@@ -40,10 +40,15 @@ export default defineConfig({
           projectRoot,
           "src/options/options.html",
         ),
+        "pcm-worklet": resolve(
+          projectRoot,
+          "src/offscreen/worklet/pcm-worklet.ts",
+        ),
       },
       output: {
         entryFileNames: "[name].js",
-        chunkFileNames: "chunks/[name]-[hash].js",
+        chunkFileNames:
+          "chunks/[name]-[hash].js",
       },
     },
   },
@@ -88,7 +93,10 @@ function finalizeDist(): Plugin {
             output.fileName,
             output.expectedPath,
           ),
-          targetPath: resolve(outDir, output.fileName),
+          targetPath: resolve(
+            outDir,
+            output.fileName,
+          ),
         })),
       );
 
@@ -129,7 +137,10 @@ function finalizeDist(): Plugin {
         recursive: true,
       });
       await copyFile(
-        resolve(projectRoot, "public/manifest.json"),
+        resolve(
+          projectRoot,
+          "public/manifest.json",
+        ),
         resolve(outDir, "manifest.json"),
       );
 

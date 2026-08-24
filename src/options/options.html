@@ -6,7 +6,7 @@
       name="viewport"
       content="width=device-width, initial-scale=1"
     />
-    <title>x-jimaku M0 Diagnostics</title>
+    <title>x-jimaku Capture &amp; Diagnostics</title>
     <style>
       :root {
         color-scheme: light dark;
@@ -29,6 +29,85 @@
 
       section {
         margin-block: 28px;
+      }
+
+      .capture-card {
+        padding: 18px;
+        border: 1px solid
+          color-mix(in srgb, currentColor 25%, transparent);
+        border-radius: 10px;
+      }
+
+      .capture-state {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-block: 0 16px;
+        font-weight: 700;
+      }
+
+      .capture-dot {
+        width: 12px;
+        height: 12px;
+        flex: 0 0 auto;
+        border-radius: 50%;
+        background: #9ca3af;
+        box-shadow: 0 0 0 3px
+          color-mix(in srgb, #9ca3af 20%, transparent);
+      }
+
+      .capture-dot[data-state="starting"],
+      .capture-dot[data-state="stopping"] {
+        background: #eab308;
+        box-shadow: 0 0 0 3px
+          color-mix(in srgb, #eab308 20%, transparent);
+      }
+
+      .capture-dot[data-state="running"] {
+        background: #16a34a;
+        box-shadow: 0 0 0 3px
+          color-mix(in srgb, #16a34a 20%, transparent);
+      }
+
+      .capture-dot[data-state="error"] {
+        background: #dc2626;
+        box-shadow: 0 0 0 3px
+          color-mix(in srgb, #dc2626 20%, transparent);
+      }
+
+      .meter-label {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        margin-block-end: 6px;
+      }
+
+      .level-meter {
+        height: 18px;
+        overflow: hidden;
+        border-radius: 999px;
+        background:
+          color-mix(in srgb, currentColor 14%, transparent);
+      }
+
+      .level-fill {
+        width: 0%;
+        height: 100%;
+        border-radius: inherit;
+        background:
+          linear-gradient(
+            90deg,
+            #16a34a 0%,
+            #eab308 72%,
+            #dc2626 100%
+          );
+        transition: width 40ms linear;
+      }
+
+      .capture-help {
+        margin-block: 14px 0;
+        color:
+          color-mix(in srgb, currentColor 72%, transparent);
       }
 
       .actions {
@@ -58,7 +137,8 @@
       th,
       td {
         padding: 8px 10px;
-        border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
+        border: 1px solid
+          color-mix(in srgb, currentColor 25%, transparent);
         text-align: left;
         vertical-align: top;
       }
@@ -72,7 +152,7 @@
         overflow-wrap: anywhere;
       }
 
-      #status {
+      #probe-status {
         min-height: 1.5em;
         font-weight: 600;
       }
@@ -80,21 +160,72 @@
   </head>
   <body>
     <main>
-      <h1>x-jimaku M0 Diagnostics</h1>
-      <p>
-        WebGPUとChrome Translator APIの実行コンテキスト別診断です。
-      </p>
+      <h1>x-jimaku</h1>
 
-      <p id="status" role="status" aria-live="polite"></p>
+      <section
+        class="capture-card"
+        aria-labelledby="capture-heading"
+      >
+        <h2 id="capture-heading">音声キャプチャ</h2>
 
-      <section>
-        <h2>操作</h2>
+        <p class="capture-state">
+          <span
+            id="capture-state-dot"
+            class="capture-dot"
+            data-state="idle"
+            aria-hidden="true"
+          ></span>
+          <span>状態:</span>
+          <span id="capture-state-name">idle</span>
+        </p>
+
+        <div class="meter-label">
+          <span>入力レベル（RMS）</span>
+          <output id="level-value">0.0000</output>
+        </div>
+
+        <div
+          id="level-meter"
+          class="level-meter"
+          role="progressbar"
+          aria-label="音声入力レベル"
+          aria-valuemin="0"
+          aria-valuemax="100"
+          aria-valuenow="0"
+        >
+          <div
+            id="level-fill"
+            class="level-fill"
+          ></div>
+        </div>
+
+        <p class="capture-help">
+          x.comの動画を再生し、拡張機能のツールバーアイコンまたは
+          Ctrl+Shift+9でキャプチャを開始・停止します。
+        </p>
+      </section>
+
+      <section aria-labelledby="diagnostics-heading">
+        <h2 id="diagnostics-heading">診断</h2>
+        <p>
+          WebGPUとChrome Translator APIの実行コンテキスト別診断です。
+        </p>
+
+        <p
+          id="probe-status"
+          role="status"
+          aria-live="polite"
+        ></p>
+
         <div class="actions">
+          <button id="run-diagnostics" type="button">
+            診断を実行
+          </button>
           <button id="run-translator" type="button">
-            Run Translator availability probe
+            Options page Translator診断
           </button>
           <button id="fetch-last" type="button">
-            Fetch last offscreen probe results
+            保存済み診断を取得
           </button>
         </div>
       </section>

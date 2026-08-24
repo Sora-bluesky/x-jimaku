@@ -1,9 +1,11 @@
 import {
   getProbeEnvironment,
+  isCapturePortMessage,
   isMessageOfType,
   nowIso,
   toProbeError,
   type AdapterInfo,
+  type M1Message,
   type OffscreenProbeResult,
   type OffscreenProbeResultMessage,
   type ProbeFailureMessage,
@@ -11,6 +13,14 @@ import {
   type WebGpuProbeResult,
   type WorkerProbeRequest,
 } from "../shared/messages";
+import {
+  createCaptureState,
+  type CaptureState,
+} from "../shared/state";
+import {
+  AudioCapture,
+  type AudioCaptureCallbacks,
+} from "./audio-capture";
 
 interface GpuLike {
   requestAdapter(): Promise<GpuAdapterLike | null>;
@@ -23,6 +33,21 @@ interface GpuAdapterLike {
 type TranslatorScope = typeof globalThis & {
   Translator?: TranslatorFactory;
 };
+
+const OFFSCREEN_PORT_NAME = "offscreen";
+const INITIAL_RECONNECT_DELAY_MS = 100;
+const MAX_RECONNECT_DELAY_MS = 1_000;
+
+const audioCapture = new AudioCapture();
+
+let backgroundPort: chrome.runtime.Port | null = null;
+let reconnectTimerId: number | null = null;
+let reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
+let localCaptureState =
+  createCaptureState("idle");
+let latestRms = 0;
+let captureOperationTail: Promise<void> =
+  Promise.resolve();
 
 console.log("[offscreen]", "document ready");
 
@@ -54,11 +79,19 @@ chrome.runtime.onMessage.addListener(
           result,
         };
 
-        console.log("[offscreen]", "probe complete", result);
+        console.log(
+          "[offscreen]",
+          "probe complete",
+          result,
+        );
         sendResponse(response);
       })
       .catch((error: unknown) => {
-        console.error("[offscreen]", "probe failed", error);
+        console.error(
+          "[offscreen]",
+          "probe failed",
+          error,
+        );
 
         sendResponse({
           t: "PROBE_ERROR",
@@ -72,6 +105,309 @@ chrome.runtime.onMessage.addListener(
     return true;
   },
 );
+
+connectBackgroundPort();
+
+function connectBackgroundPort(): void {
+  if (backgroundPort !== null) {
+    return;
+  }
+
+  if (reconnectTimerId !== null) {
+    globalThis.clearTimeout(reconnectTimerId);
+    reconnectTimerId = null;
+  }
+
+  try {
+    const port = chrome.runtime.connect({
+      name: OFFSCREEN_PORT_NAME,
+    });
+
+    backgroundPort = port;
+    reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
+
+    port.onMessage.addListener(
+      (message: unknown) => {
+        if (!isCapturePortMessage(message)) {
+          console.warn(
+            "[offscreen]",
+            "ignored malformed port message",
+            message,
+          );
+          return;
+        }
+
+        if (
+          isMessageOfType(message, "OFF_START")
+        ) {
+          void enqueueCaptureOperation(() =>
+            handleCaptureStart(
+              message.streamId,
+              message.requestId,
+            ),
+          );
+          return;
+        }
+
+        if (isMessageOfType(message, "OFF_STOP")) {
+          void enqueueCaptureOperation(() =>
+            handleCaptureStop(message.requestId),
+          );
+        }
+      },
+    );
+
+    port.onDisconnect.addListener(() => {
+      if (backgroundPort === port) {
+        backgroundPort = null;
+      }
+
+      const disconnectError =
+        chrome.runtime.lastError?.message;
+
+      console.warn(
+        "[offscreen]",
+        "background port disconnected",
+        disconnectError ?? "",
+      );
+
+      scheduleReconnect();
+    });
+
+    console.log(
+      "[offscreen]",
+      "background port connected",
+    );
+
+    postState();
+    postLevel();
+  } catch (error) {
+    console.warn(
+      "[offscreen]",
+      "could not connect background port",
+      error,
+    );
+    scheduleReconnect();
+  }
+}
+
+function scheduleReconnect(): void {
+  if (reconnectTimerId !== null) {
+    return;
+  }
+
+  const delay = reconnectDelayMs;
+  reconnectDelayMs = Math.min(
+    reconnectDelayMs * 2,
+    MAX_RECONNECT_DELAY_MS,
+  );
+
+  reconnectTimerId = globalThis.setTimeout(() => {
+    reconnectTimerId = null;
+    connectBackgroundPort();
+  }, delay);
+}
+
+function enqueueCaptureOperation(
+  operation: () => Promise<void>,
+): Promise<void> {
+  const next = captureOperationTail
+    .catch(() => undefined)
+    .then(operation);
+
+  captureOperationTail = next.catch(
+    (error: unknown) => {
+      console.error(
+        "[offscreen]",
+        "capture operation failed",
+        error,
+      );
+    },
+  );
+
+  return next;
+}
+
+async function handleCaptureStart(
+  streamId: string,
+  requestId: string,
+): Promise<void> {
+  if (audioCapture.isActive()) {
+    if (
+      localCaptureState.requestId === requestId &&
+      localCaptureState.status === "running"
+    ) {
+      postState();
+      return;
+    }
+
+    publishState(
+      createCaptureState("error", {
+        requestId,
+        error: {
+          name: "InvalidStateError",
+          message:
+            "An audio capture session is already active",
+        },
+      }),
+    );
+    return;
+  }
+
+  publishState(
+    createCaptureState("starting", {
+      requestId,
+    }),
+  );
+
+  const callbacks: AudioCaptureCallbacks = {
+    onLevel(rms) {
+      latestRms = rms;
+      postLevel();
+    },
+
+    onEnded(endedRequestId) {
+      void enqueueCaptureOperation(async () => {
+        if (
+          localCaptureState.requestId !==
+          endedRequestId
+        ) {
+          return;
+        }
+
+        publishState(
+          createCaptureState("stopping", {
+            requestId: endedRequestId,
+          }),
+        );
+
+        latestRms = 0;
+        postLevel();
+
+        publishState(
+          createCaptureState("idle", {
+            requestId: endedRequestId,
+          }),
+        );
+      });
+    },
+  };
+
+  try {
+    await audioCapture.start(
+      streamId,
+      requestId,
+      callbacks,
+    );
+
+    publishState(
+      createCaptureState("running", {
+        requestId,
+      }),
+    );
+
+    console.log("[offscreen]", "capture running", {
+      requestId,
+    });
+  } catch (error) {
+    console.error(
+      "[offscreen]",
+      "capture start failed",
+      error,
+    );
+
+    latestRms = 0;
+    postLevel();
+
+    publishState(
+      createCaptureState("error", {
+        requestId,
+        error: toProbeError(error),
+      }),
+    );
+  }
+}
+
+async function handleCaptureStop(
+  requestId: string,
+): Promise<void> {
+  publishState(
+    createCaptureState("stopping", {
+      requestId,
+    }),
+  );
+
+  try {
+    await audioCapture.stop();
+
+    latestRms = 0;
+    postLevel();
+
+    publishState(
+      createCaptureState("idle", {
+        requestId,
+      }),
+    );
+
+    console.log("[offscreen]", "capture stopped", {
+      requestId,
+    });
+  } catch (error) {
+    console.error(
+      "[offscreen]",
+      "capture cleanup failed",
+      error,
+    );
+
+    publishState(
+      createCaptureState("error", {
+        requestId,
+        error: toProbeError(error),
+      }),
+    );
+  }
+}
+
+function publishState(
+  state: CaptureState,
+): void {
+  localCaptureState = state;
+  postState();
+}
+
+function postState(): void {
+  postToBackground({
+    t: "OFF_STATE",
+    state: localCaptureState,
+  });
+}
+
+function postLevel(): void {
+  postToBackground({
+    t: "OFF_LEVEL",
+    rms: latestRms,
+    at: nowIso(),
+  });
+}
+
+function postToBackground(
+  message: M1Message,
+): void {
+  if (backgroundPort === null) {
+    scheduleReconnect();
+    return;
+  }
+
+  try {
+    backgroundPort.postMessage(message);
+  } catch (error) {
+    console.warn(
+      "[offscreen]",
+      "could not post background message",
+      error,
+    );
+  }
+}
 
 async function runOffscreenProbe(
   requestId: string,
@@ -240,9 +576,17 @@ async function probeWorkerWebGpu(
   }
 
   return new Promise<WebGpuProbeResult>((resolve) => {
-    const finish = (result: WebGpuProbeResult): void => {
-      worker.removeEventListener("message", handleMessage);
-      worker.removeEventListener("error", handleError);
+    const finish = (
+      result: WebGpuProbeResult,
+    ): void => {
+      worker.removeEventListener(
+        "message",
+        handleMessage,
+      );
+      worker.removeEventListener(
+        "error",
+        handleError,
+      );
       worker.terminate();
       resolve(result);
     };
@@ -251,14 +595,19 @@ async function probeWorkerWebGpu(
       event: MessageEvent<unknown>,
     ): void => {
       if (
-        isMessageOfType(event.data, "WORKER_PROBE_RESULT") &&
+        isMessageOfType(
+          event.data,
+          "WORKER_PROBE_RESULT",
+        ) &&
         event.data.requestId === requestId
       ) {
         finish(event.data.result);
       }
     };
 
-    const handleError = (event: ErrorEvent): void => {
+    const handleError = (
+      event: ErrorEvent,
+    ): void => {
       event.preventDefault();
 
       finish(
@@ -271,7 +620,10 @@ async function probeWorkerWebGpu(
       );
     };
 
-    worker.addEventListener("message", handleMessage);
+    worker.addEventListener(
+      "message",
+      handleMessage,
+    );
     worker.addEventListener("error", handleError);
 
     const request: WorkerProbeRequest = {
