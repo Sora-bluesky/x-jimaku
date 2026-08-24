@@ -1,0 +1,9 @@
+node_modules/
+dist/
+*.log
+.DS_Store
+
+# Internal dev docs (kept local, not published)
+HANDOFF.md
+docs/plan.md
+docs/plan-approved.md
