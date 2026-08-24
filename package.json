@@ -1,0 +1,35 @@
+{
+  "name": "x-jimaku",
+  "version": "1.0.0",
+  "description": "[English](README.md) | [日本語](README.ja.md)",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {
+    "build": "vite build && vite build -c vite.config.iife.ts",
+    "dev": "concurrently \"vite build --watch\" \"vite build -c vite.config.iife.ts --watch\"",
+    "typecheck": "tsc --noEmit"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Sora-bluesky/x-jimaku.git"
+  },
+  "keywords": [],
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/Sora-bluesky/x-jimaku/issues"
+  },
+  "homepage": "https://github.com/Sora-bluesky/x-jimaku#readme",
+  "devDependencies": {
+    "@types/chrome": "^0.2.7",
+    "concurrently": "^10.0.5",
+    "typescript": "^7.0.2",
+    "vite": "^8.2.2",
+    "vite-plugin-static-copy": "^4.1.1"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "^4.2.0"
+  },
+  "private": true
+}
