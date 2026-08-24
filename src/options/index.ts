@@ -131,6 +131,10 @@ const showOriginalInput =
   requireElement<HTMLInputElement>(
     "show-original",
   );
+const showTentativeInput =
+  requireElement<HTMLInputElement>(
+    "show-tentative",
+  );
 const settingsStatus =
   requireElement<HTMLElement>(
     "settings-status",
@@ -264,26 +268,19 @@ prepareTranslationButton.addEventListener(
   },
 );
 
-modelSelect.addEventListener(
-  "change",
-  () => {
-    void saveSelectedSettings();
-  },
-);
-
-sourceLanguageSelect.addEventListener(
-  "change",
-  () => {
-    void saveSelectedSettings();
-  },
-);
-
-showOriginalInput.addEventListener(
-  "change",
-  () => {
-    void saveSelectedSettings();
-  },
-);
+for (const control of [
+  modelSelect,
+  sourceLanguageSelect,
+  showOriginalInput,
+  showTentativeInput,
+]) {
+  control.addEventListener(
+    "change",
+    () => {
+      void saveSelectedSettings();
+    },
+  );
+}
 
 chrome.storage.onChanged.addListener(
   (changes, areaName) => {
@@ -300,11 +297,7 @@ chrome.storage.onChanged.addListener(
         .newValue as unknown;
 
     if (isSettings(next)) {
-      modelSelect.value = next.model;
-      sourceLanguageSelect.value =
-        next.sourceLang;
-      showOriginalInput.checked =
-        next.showOriginal;
+      applySettingsToControls(next);
       return;
     }
 
@@ -439,11 +432,7 @@ function schedulePortReconnect(): void {
 async function initializeSettings(): Promise<void> {
   try {
     const settings = await readSettings();
-    modelSelect.value = settings.model;
-    sourceLanguageSelect.value =
-      settings.sourceLang;
-    showOriginalInput.checked =
-      settings.showOriginal;
+    applySettingsToControls(settings);
   } catch (error) {
     console.error(
       "[options]",
@@ -453,6 +442,23 @@ async function initializeSettings(): Promise<void> {
     settingsStatus.textContent =
       `設定の読込に失敗しました: ${toProbeError(error).message}`;
   }
+}
+
+function applySettingsToControls(
+  settings: {
+    model: string;
+    sourceLang: string;
+    showOriginal: boolean;
+    showTentative: boolean;
+  },
+): void {
+  modelSelect.value = settings.model;
+  sourceLanguageSelect.value =
+    settings.sourceLang;
+  showOriginalInput.checked =
+    settings.showOriginal;
+  showTentativeInput.checked =
+    settings.showTentative;
 }
 
 async function saveSelectedSettings(): Promise<void> {
@@ -487,6 +493,8 @@ async function saveSelectedSettings(): Promise<void> {
         selectedSourceLanguage,
       showOriginal:
         showOriginalInput.checked,
+      showTentative:
+        showTentativeInput.checked,
     });
 
     settingsStatus.textContent =
@@ -510,6 +518,7 @@ function setSettingsControlsDisabled(
   modelSelect.disabled = disabled;
   sourceLanguageSelect.disabled = disabled;
   showOriginalInput.disabled = disabled;
+  showTentativeInput.disabled = disabled;
 }
 
 async function refreshTranslationAvailability(): Promise<void> {
@@ -561,10 +570,10 @@ function prepareTranslationModel(): void {
         monitor.addEventListener(
           "downloadprogress",
           (event) => {
-            const progress =
-              normalizeDownloadProgress(event);
             updateTranslationProgress(
-              progress,
+              normalizeDownloadProgress(
+                event,
+              ),
             );
           },
         );
@@ -681,13 +690,10 @@ function renderTranslationAvailability(
     availability === "unavailable" ||
     availability === "available";
 
-  if (availability === "available") {
-    prepareTranslationButton.textContent =
-      "翻訳モデル準備済み";
-  } else {
-    prepareTranslationButton.textContent =
-      "翻訳モデルを準備する";
-  }
+  prepareTranslationButton.textContent =
+    availability === "available"
+      ? "翻訳モデル準備済み"
+      : "翻訳モデルを準備する";
 }
 
 function translatorAvailabilityDescription(
@@ -1079,11 +1085,10 @@ function renderCaptureState(
     captureStatusDescription(state.status);
 
   if (state.status === "loadingModel") {
-    const progress =
-      Math.max(
-        0,
-        Math.min(100, state.progress ?? 0),
-      );
+    const progress = Math.max(
+      0,
+      Math.min(100, state.progress ?? 0),
+    );
 
     captureStateName.textContent =
       `モデル読込中（${Math.round(progress)}%）`;

@@ -11,13 +11,14 @@ type LanguageModelScope = typeof globalThis & {
   LanguageModel?: LanguageModelFactory;
 };
 
-type TranslationJob =
-  | "final"
-  | "interim";
-
 export interface ContentTranslationResponse {
   available: boolean;
   ja: string;
+}
+
+export interface TranslationQueueEntry
+  extends RecognitionPayload {
+  skipTranslation?: boolean;
 }
 
 export interface TranslationEngineOptions {
@@ -28,16 +29,7 @@ export interface TranslationEngineOptions {
     line: RecognitionPayload,
     ja: string,
   ): void;
-  onInterimTranslated(
-    line: RecognitionPayload,
-    ja: string,
-  ): void;
   onPathChanged(path: TranslationPath): void;
-}
-
-interface PendingInterimTranslation {
-  sequence: number;
-  line: RecognitionPayload;
 }
 
 const TRANSLATOR_OPTIONS: TranslatorOptions = {
@@ -46,19 +38,16 @@ const TRANSLATOR_OPTIONS: TranslatorOptions = {
 };
 
 const TRANSLATION_SYSTEM_PROMPT =
-  "Translate the English subtitle into natural Japanese. Output only the translation.";
+  "Translate the English subtitle clause into natural Japanese. Output only the translation of the current clause.";
 
 const MAX_PENDING_TRANSLATIONS = 2;
-const INTERIM_TRANSLATION_THROTTLE_MS =
-  2_000;
-const TRANSLATOR_CREATE_TIMEOUT_MS =
-  8_000;
+const TRANSLATOR_CREATE_TIMEOUT_MS = 8_000;
 
 export class TranslationEngine {
   private readonly options:
     TranslationEngineOptions;
   private readonly queue:
-    RecognitionPayload[] = [];
+    TranslationQueueEntry[] = [];
   private readonly failedPaths =
     new Set<TranslationPath>();
 
@@ -71,21 +60,9 @@ export class TranslationEngine {
   private path:
     | TranslationPath
     | null = null;
-  private latestInterim:
-    | PendingInterimTranslation
-    | null = null;
-  private interimTimerId: number | null =
-    null;
   private translatorCreateAttempted = false;
   private languageModelCreateAttempted = false;
   private processing = false;
-  private activeJob:
-    | TranslationJob
-    | null = null;
-  private interimSequence = 0;
-  private lastStartedInterimSequence = 0;
-  private lastInterimStartedAt =
-    Number.NEGATIVE_INFINITY;
   private destroyed = false;
   private initializationPromise:
     | Promise<void>
@@ -107,82 +84,66 @@ export class TranslationEngine {
     }
 
     const operation =
-      this.selectBestPath()
-        .finally(() => {
-          if (
-            this.initializationPromise ===
-              operation
-          ) {
-            this.initializationPromise = null;
-          }
-        });
+      this.selectBestPath().finally(() => {
+        if (
+          this.initializationPromise ===
+          operation
+        ) {
+          this.initializationPromise = null;
+        }
+      });
 
     this.initializationPromise = operation;
     return operation;
   }
 
-  enqueue(line: RecognitionPayload): void {
+  enqueue(line: TranslationQueueEntry): void {
+    const skipTranslation =
+      line.skipTranslation === true;
+
     if (
       this.destroyed ||
       !line.final ||
       line.text.trim() === "" ||
-      this.path === "none"
+      (
+        this.path === "none" &&
+        !skipTranslation
+      )
     ) {
       return;
     }
 
-    this.discardInterimThrough(line.id);
-
-    const activeFinalCount =
-      this.activeJob === "final" ? 1 : 0;
     const queuedCapacity =
       MAX_PENDING_TRANSLATIONS -
-      activeFinalCount;
+      (this.processing ? 1 : 0);
 
     if (
-      this.queue.length >= queuedCapacity
+      this.queue.length >=
+      Math.max(1, queuedCapacity)
     ) {
       const dropped = this.queue.shift();
 
       if (dropped !== undefined) {
         console.warn(
           "[translate]",
-          "dropped oldest untranslated final line",
+          "dropped oldest pending committed clause",
           {
             id: dropped.id,
             text: dropped.text,
+            skipTranslation:
+              dropped.skipTranslation ===
+              true,
           },
         );
       }
     }
 
-    this.queue.push({ ...line });
-    this.clearInterimTimer();
-    this.runScheduler();
-  }
-
-  submitInterim(
-    line: RecognitionPayload,
-  ): void {
-    if (
-      this.destroyed ||
-      line.final ||
-      line.text.trim() === "" ||
-      this.path === "none"
-    ) {
-      return;
-    }
-
-    this.interimSequence += 1;
-    this.latestInterim = {
-      sequence: this.interimSequence,
-      line: {
-        ...line,
-        final: false,
-      },
-    };
-
-    this.runScheduler();
+    this.queue.push({
+      ...line,
+      final: true,
+      skipTranslation,
+    });
+    this.runQueue();
   }
 
   getPath(): TranslationPath | null {
@@ -196,81 +157,55 @@ export class TranslationEngine {
 
     this.destroyed = true;
     this.queue.splice(0, this.queue.length);
-    this.latestInterim = null;
-    this.clearInterimTimer();
     this.destroyTranslator();
     this.destroyLanguageModel();
     this.path = null;
   }
 
-  private runScheduler(): void {
+  private runQueue(): void {
     if (
       this.destroyed ||
-      this.processing ||
-      this.path === null ||
-      this.path === "none"
+      this.processing
     ) {
       return;
     }
 
-    const finalLine = this.queue.shift();
+    const next = this.queue[0];
 
-    if (finalLine !== undefined) {
-      this.processing = true;
-      this.activeJob = "final";
-      void this.translateFinal(finalLine);
+    if (next === undefined) {
       return;
     }
-
-    const pending = this.latestInterim;
 
     if (
-      pending === null ||
-      pending.sequence <=
-        this.lastStartedInterimSequence
+      next.skipTranslation !== true &&
+      (
+        this.path === null ||
+        this.path === "none"
+      )
     ) {
       return;
     }
 
-    const elapsed =
-      performance.now() -
-      this.lastInterimStartedAt;
-    const delay = Math.max(
-      0,
-      INTERIM_TRANSLATION_THROTTLE_MS -
-        elapsed,
-    );
+    const line = this.queue.shift();
 
-    if (delay > 0) {
-      if (this.interimTimerId === null) {
-        this.interimTimerId =
-          self.setTimeout(() => {
-            this.interimTimerId = null;
-            this.runScheduler();
-          }, Math.ceil(delay));
-      }
-
+    if (line === undefined) {
       return;
     }
 
     this.processing = true;
-    this.activeJob = "interim";
-    this.lastStartedInterimSequence =
-      pending.sequence;
-    this.lastInterimStartedAt =
-      performance.now();
-
-    void this.translateInterim(pending);
+    void this.processClause(line);
   }
 
-  private async translateFinal(
-    line: RecognitionPayload,
+  private async processClause(
+    line: TranslationQueueEntry,
   ): Promise<void> {
     try {
       const ja =
-        await this.translateWithFallback(
-          line.text,
-        );
+        line.skipTranslation === true
+          ? line.text
+          : await this.translateWithFallback(
+              line.text,
+            );
 
       if (
         this.destroyed ||
@@ -284,67 +219,9 @@ export class TranslationEngine {
         ja,
       );
     } finally {
-      this.finishScheduledJob();
+      this.processing = false;
+      this.runQueue();
     }
-  }
-
-  private async translateInterim(
-    pending: PendingInterimTranslation,
-  ): Promise<void> {
-    try {
-      const ja =
-        await this.translateWithFallback(
-          pending.line.text,
-        );
-
-      if (
-        this.destroyed ||
-        ja === null ||
-        this.latestInterim?.sequence !==
-          pending.sequence
-      ) {
-        return;
-      }
-
-      this.options.onInterimTranslated(
-        pending.line,
-        ja,
-      );
-    } finally {
-      this.finishScheduledJob();
-    }
-  }
-
-  private finishScheduledJob(): void {
-    this.processing = false;
-    this.activeJob = null;
-    this.runScheduler();
-  }
-
-  private discardInterimThrough(
-    finalLineId: number,
-  ): void {
-    if (
-      this.latestInterim === null ||
-      this.latestInterim.line.id >
-        finalLineId
-    ) {
-      return;
-    }
-
-    this.latestInterim = null;
-    this.clearInterimTimer();
-  }
-
-  private clearInterimTimer(): void {
-    if (this.interimTimerId === null) {
-      return;
-    }
-
-    globalThis.clearTimeout(
-      this.interimTimerId,
-    );
-    this.interimTimerId = null;
   }
 
   private async translateWithFallback(
@@ -521,8 +398,6 @@ export class TranslationEngine {
           TRANSLATOR_OPTIONS,
         );
 
-      let timedOut = false;
-
       try {
         this.translator =
           await waitWithTimeout(
@@ -531,11 +406,10 @@ export class TranslationEngine {
             "Offscreen Translator creation timed out",
           );
       } catch (error) {
-        timedOut =
+        if (
           error instanceof Error &&
-          error.name === "TimeoutError";
-
-        if (timedOut) {
+          error.name === "TimeoutError"
+        ) {
           void createPromise.then(
             (instance) => {
               destroyTranslatorInstance(
@@ -692,12 +566,17 @@ export class TranslationEngine {
     this.path = path;
 
     if (path === "none") {
-      this.latestInterim = null;
+      const skipEntries =
+        this.queue.filter(
+          (line) =>
+            line.skipTranslation === true,
+        );
+
       this.queue.splice(
         0,
         this.queue.length,
+        ...skipEntries,
       );
-      this.clearInterimTimer();
     }
 
     this.options.onPathChanged(path);
@@ -708,7 +587,7 @@ export class TranslationEngine {
       { path },
     );
 
-    this.runScheduler();
+    this.runQueue();
   }
 
   private destroyTranslator(): void {

@@ -198,7 +198,16 @@
       .recognition-line[data-final="false"] {
         color:
           color-mix(in srgb, currentColor 58%, transparent);
-        font-style: italic;
+        font-style: normal;
+        opacity: 0.72;
+      }
+
+      .recognition-line[data-final="false"]
+      .recognition-body::before {
+        color:
+          color-mix(in srgb, currentColor 55%, transparent);
+        font-size: 0.76em;
+        content: "暫定";
       }
 
       .settings-row {
@@ -420,8 +429,21 @@
           </label>
         </div>
 
+        <div class="settings-row">
+          <label
+            class="checkbox-label"
+            for="show-tentative"
+          >
+            <input
+              id="show-tentative"
+              type="checkbox"
+            />
+            暫定を薄字で表示
+          </label>
+        </div>
+
         <p class="settings-help">
-          適用は次回キャプチャ開始時
+          暫定表示は既定でOFFです。適用は次回キャプチャ開始時です。
         </p>
         <p
           id="settings-status"
