@@ -307,6 +307,17 @@ function connectBackgroundPort(): void {
       const disconnectError =
         chrome.runtime.lastError?.message;
 
+      if (!isExtensionContextAlive()) {
+        console.info(
+          "[cs]",
+          "extension was updated; this page's script is retiring (reload the page to refresh)",
+        );
+        lastCaptureStatus = "idle";
+        contentSessionRequestId = null;
+        destroyOverlay();
+        return;
+      }
+
       console.warn(
         "[cs]",
         "background port disconnected",
@@ -344,12 +355,33 @@ function connectBackgroundPort(): void {
       scheduleReconnect();
     });
   } catch (error) {
+    if (
+      !isExtensionContextAlive() ||
+      String(error).includes(
+        "Extension context invalidated",
+      )
+    ) {
+      console.info(
+        "[cs]",
+        "extension was updated; this page's script is retiring (reload the page to refresh)",
+      );
+      return;
+    }
+
     console.warn(
       "[cs]",
       "could not connect background port",
       error,
     );
     scheduleReconnect();
+  }
+}
+
+function isExtensionContextAlive(): boolean {
+  try {
+    return chrome.runtime?.id !== undefined;
+  } catch {
+    return false;
   }
 }
 
