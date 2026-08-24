@@ -207,12 +207,24 @@
         margin-block-start: 18px;
       }
 
+      .checkbox-label {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+      }
+
       select {
         min-width: 150px;
         padding: 7px 10px;
         border: 1px solid currentColor;
         border-radius: 6px;
         font: inherit;
+      }
+
+      input[type="checkbox"] {
+        width: 18px;
+        height: 18px;
+        margin: 0;
       }
 
       .settings-help,
@@ -247,7 +259,8 @@
       }
 
       button:disabled,
-      select:disabled {
+      select:disabled,
+      input:disabled {
         cursor: wait;
         opacity: 0.65;
       }
@@ -392,6 +405,19 @@
             <option value="en">英語</option>
             <option value="auto">自動判定</option>
           </select>
+        </div>
+
+        <div class="settings-row">
+          <label
+            class="checkbox-label"
+            for="show-original"
+          >
+            <input
+              id="show-original"
+              type="checkbox"
+            />
+            英語原文も表示
+          </label>
         </div>
 
         <p class="settings-help">

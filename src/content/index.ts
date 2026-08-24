@@ -14,6 +14,9 @@ import {
   type TranslationPath,
   type TranslatorProbeResult,
 } from "../shared/messages";
+import {
+  DEFAULT_SETTINGS,
+} from "../shared/settings";
 import type {
   CaptureState,
   CaptureStatus,
@@ -68,6 +71,8 @@ let lastCaptureStatus: CaptureStatus =
 let activeTranslationPath:
   | TranslationPath
   | null = null;
+let activeShowOriginal =
+  DEFAULT_SETTINGS.showOriginal;
 
 console.log("[cs]", "content script loaded", {
   url: location.href,
@@ -156,7 +161,12 @@ function connectBackgroundPort(): void {
             message.requestId;
           resetContentTranslator();
           activeTranslationPath = null;
+          activeShowOriginal =
+            message.settings?.showOriginal ??
+            DEFAULT_SETTINGS.showOriginal;
           lastCaptureStatus = "starting";
+
+          destroyOverlay();
 
           const overlay = ensureOverlay();
           overlay.setTranslationPath(null);
@@ -284,6 +294,8 @@ function connectBackgroundPort(): void {
 
       lastCaptureStatus = "idle";
       activeTranslationPath = null;
+      activeShowOriginal =
+        DEFAULT_SETTINGS.showOriginal;
       contentSessionRequestId = null;
       resetContentTranslator();
       destroyOverlay();
@@ -954,6 +966,7 @@ function ensureOverlay(): CaptionOverlay {
   const overlay = new CaptionOverlay({
     getTargetVideo:
       getCurrentAudioTapTarget,
+    showOriginal: activeShowOriginal,
     onCaptionFadeOut() {
       if (
         lastCaptureStatus === "idle" ||

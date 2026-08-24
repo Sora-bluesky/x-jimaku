@@ -11,6 +11,10 @@ type LanguageModelScope = typeof globalThis & {
   LanguageModel?: LanguageModelFactory;
 };
 
+type TranslationJob =
+  | "final"
+  | "interim";
+
 export interface ContentTranslationResponse {
   available: boolean;
   ja: string;
@@ -73,7 +77,9 @@ export class TranslationEngine {
   private translatorCreateAttempted = false;
   private languageModelCreateAttempted = false;
   private processing = false;
-  private interimInFlight = false;
+  private activeJob:
+    | TranslationJob
+    | null = null;
   private interimSequence = 0;
   private lastStartedInterimSequence = 0;
   private lastInterimStartedAt =
@@ -106,10 +112,11 @@ export class TranslationEngine {
 
     this.discardInterimThrough(line.id);
 
+    const activeFinalCount =
+      this.activeJob === "final" ? 1 : 0;
     const queuedCapacity =
-      this.processing
-        ? MAX_PENDING_TRANSLATIONS - 1
-        : MAX_PENDING_TRANSLATIONS;
+      MAX_PENDING_TRANSLATIONS -
+      activeFinalCount;
 
     if (
       this.queue.length >= queuedCapacity
@@ -129,7 +136,8 @@ export class TranslationEngine {
     }
 
     this.queue.push({ ...line });
-    void this.drainQueue();
+    this.clearInterimTimer();
+    this.runScheduler();
   }
 
   submitInterim(
@@ -153,7 +161,7 @@ export class TranslationEngine {
       },
     };
 
-    this.scheduleInterimTranslation();
+    this.runScheduler();
   }
 
   getPath(): TranslationPath | null {
@@ -174,61 +182,31 @@ export class TranslationEngine {
     this.path = null;
   }
 
-  private async drainQueue(): Promise<void> {
-    if (this.processing || this.destroyed) {
+  private runScheduler(): void {
+    if (
+      this.destroyed ||
+      this.processing ||
+      this.path === null ||
+      this.path === "none"
+    ) {
       return;
     }
 
-    this.processing = true;
+    const finalLine = this.queue.shift();
 
-    try {
-      while (
-        !this.destroyed &&
-        this.queue.length > 0
-      ) {
-        const line = this.queue.shift();
-
-        if (line === undefined) {
-          continue;
-        }
-
-        const ja =
-          await this.translateWithFallback(
-            line.text,
-          );
-
-        if (
-          this.destroyed ||
-          ja === null
-        ) {
-          continue;
-        }
-
-        this.options.onTranslated(
-          line,
-          ja,
-        );
-      }
-    } finally {
-      this.processing = false;
-      this.scheduleInterimTranslation();
+    if (finalLine !== undefined) {
+      this.processing = true;
+      this.activeJob = "final";
+      void this.translateFinal(finalLine);
+      return;
     }
-  }
 
-  private scheduleInterimTranslation(): void {
     const pending = this.latestInterim;
 
     if (
-      this.destroyed ||
-      this.interimTimerId !== null ||
-      this.interimInFlight ||
       pending === null ||
       pending.sequence <=
-        this.lastStartedInterimSequence ||
-      this.path === null ||
-      this.path === "none" ||
-      this.processing ||
-      this.queue.length > 0
+        this.lastStartedInterimSequence
     ) {
       return;
     }
@@ -243,21 +221,50 @@ export class TranslationEngine {
     );
 
     if (delay > 0) {
-      this.interimTimerId =
-        self.setTimeout(() => {
-          this.interimTimerId = null;
-          this.scheduleInterimTranslation();
-        }, Math.ceil(delay));
+      if (this.interimTimerId === null) {
+        this.interimTimerId =
+          self.setTimeout(() => {
+            this.interimTimerId = null;
+            this.runScheduler();
+          }, Math.ceil(delay));
+      }
+
       return;
     }
 
-    this.interimInFlight = true;
+    this.processing = true;
+    this.activeJob = "interim";
     this.lastStartedInterimSequence =
       pending.sequence;
     this.lastInterimStartedAt =
       performance.now();
 
     void this.translateInterim(pending);
+  }
+
+  private async translateFinal(
+    line: RecognitionPayload,
+  ): Promise<void> {
+    try {
+      const ja =
+        await this.translateWithFallback(
+          line.text,
+        );
+
+      if (
+        this.destroyed ||
+        ja === null
+      ) {
+        return;
+      }
+
+      this.options.onTranslated(
+        line,
+        ja,
+      );
+    } finally {
+      this.finishScheduledJob();
+    }
   }
 
   private async translateInterim(
@@ -283,9 +290,14 @@ export class TranslationEngine {
         ja,
       );
     } finally {
-      this.interimInFlight = false;
-      this.scheduleInterimTranslation();
+      this.finishScheduledJob();
     }
+  }
+
+  private finishScheduledJob(): void {
+    this.processing = false;
+    this.activeJob = null;
+    this.runScheduler();
   }
 
   private discardInterimThrough(
@@ -631,6 +643,10 @@ export class TranslationEngine {
 
     if (path === "none") {
       this.latestInterim = null;
+      this.queue.splice(
+        0,
+        this.queue.length,
+      );
       this.clearInterimTimer();
     }
 
@@ -642,7 +658,7 @@ export class TranslationEngine {
       { path },
     );
 
-    this.scheduleInterimTranslation();
+    this.runScheduler();
   }
 
   private destroyTranslator(): void {

@@ -26,11 +26,13 @@ export type WhisperDevice =
 export interface Settings {
   model: WhisperModel;
   sourceLang: SourceLanguage;
+  showOriginal: boolean;
 }
 
 export const DEFAULT_SETTINGS: Readonly<Settings> = {
   model: "base",
   sourceLang: "en",
+  showOriginal: false,
 };
 
 export async function readSettings(): Promise<Settings> {
@@ -52,6 +54,10 @@ export async function readSettings(): Promise<Settings> {
     )
       ? stored.sourceLang
       : DEFAULT_SETTINGS.sourceLang,
+    showOriginal:
+      typeof stored.showOriginal === "boolean"
+        ? stored.showOriginal
+        : DEFAULT_SETTINGS.showOriginal,
   };
 }
 
@@ -75,7 +81,8 @@ export function isSettings(
   return (
     isRecord(value) &&
     isWhisperModel(value.model) &&
-    isSourceLanguage(value.sourceLang)
+    isSourceLanguage(value.sourceLang) &&
+    typeof value.showOriginal === "boolean"
   );
 }
 
