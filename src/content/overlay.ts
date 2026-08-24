@@ -1,3 +1,7 @@
+import type {
+  TranslationPath,
+} from "../shared/messages";
+
 const HOST_ID = "xjsub-host";
 const FINAL_VISIBLE_MS = 5_000;
 const FINAL_FADE_MS = 350;
@@ -9,6 +13,7 @@ export interface CaptionLine {
   text: string;
   final: boolean;
   at: string;
+  ja?: string;
 }
 
 export type CaptionOverlayStatus =
@@ -25,7 +30,13 @@ export class CaptionOverlay {
   private readonly options: CaptionOverlayOptions;
   private readonly host: HTMLDivElement;
   private readonly captionStack: HTMLDivElement;
+  private readonly translationBadge:
+    HTMLDivElement;
   private readonly finalLine: HTMLDivElement;
+  private readonly finalPrimaryLine:
+    HTMLDivElement;
+  private readonly finalOriginalLine:
+    HTMLDivElement;
   private readonly interimLine: HTMLDivElement;
   private readonly targetChip: HTMLDivElement;
   private readonly targetDot: HTMLSpanElement;
@@ -42,6 +53,9 @@ export class CaptionOverlay {
   private mutationRoot: Node | null = null;
   private status: CaptionOverlayStatus =
     "loadingModel";
+  private translationPath:
+    | TranslationPath
+    | null = null;
   private progress: number | undefined;
   private finalId: number | null = null;
   private interimId: number | null = null;
@@ -75,10 +89,32 @@ export class CaptionOverlay {
     this.captionStack.className =
       "caption-stack";
 
+    this.translationBadge =
+      document.createElement("div");
+    this.translationBadge.className =
+      "translation-badge";
+    this.translationBadge.textContent =
+      "翻訳未使用";
+
     this.finalLine =
       document.createElement("div");
     this.finalLine.className =
-      "caption-line caption-final";
+      "caption-line caption-final is-empty";
+
+    this.finalPrimaryLine =
+      document.createElement("div");
+    this.finalPrimaryLine.className =
+      "caption-primary";
+
+    this.finalOriginalLine =
+      document.createElement("div");
+    this.finalOriginalLine.className =
+      "caption-original";
+
+    this.finalLine.append(
+      this.finalPrimaryLine,
+      this.finalOriginalLine,
+    );
 
     this.interimLine =
       document.createElement("div");
@@ -86,6 +122,7 @@ export class CaptionOverlay {
       "caption-line caption-interim";
 
     this.captionStack.append(
+      this.translationBadge,
       this.finalLine,
       this.interimLine,
     );
@@ -132,6 +169,7 @@ export class CaptionOverlay {
         this.scheduleMutationPass();
       });
 
+    this.updateTranslationBadge();
     this.updateTargetChip();
     this.appendHost();
     this.observeMutationRoot();
@@ -149,13 +187,25 @@ export class CaptionOverlay {
     }
 
     const text = line.text.trim();
+    const ja = line.ja?.trim() ?? "";
 
     this.cancelFinalFade();
 
     if (line.final) {
       if (
+        this.finalId !== null &&
+        line.id < this.finalId
+      ) {
+        this.scheduleFinalFade();
+        return;
+      }
+
+      if (
         this.interimId === line.id ||
-        this.interimLine.textContent !== ""
+        (
+          this.interimId !== null &&
+          this.interimId <= line.id
+        )
       ) {
         this.interimId = null;
         this.interimLine.textContent = "";
@@ -167,18 +217,39 @@ export class CaptionOverlay {
       }
 
       this.finalId = line.id;
-      this.finalLine.textContent = text;
+
+      if (ja !== "") {
+        this.finalPrimaryLine.textContent =
+          ja;
+        this.finalOriginalLine.textContent =
+          text;
+      } else {
+        this.finalPrimaryLine.textContent =
+          text;
+        this.finalOriginalLine.textContent =
+          "";
+      }
+
       this.finalLine.classList.remove(
+        "is-empty",
         "is-fading",
       );
       this.scheduleFinalFade();
     } else {
+      if (
+        this.interimId !== null &&
+        line.id < this.interimId
+      ) {
+        if (this.hasFinalCaption()) {
+          this.scheduleFinalFade();
+        }
+        return;
+      }
+
       this.interimId = line.id;
       this.interimLine.textContent = text;
 
-      if (
-        this.finalLine.textContent !== ""
-      ) {
+      if (this.hasFinalCaption()) {
         this.scheduleFinalFade();
       }
     }
@@ -196,14 +267,30 @@ export class CaptionOverlay {
     this.cancelFinalFade();
     this.finalId = null;
     this.interimId = null;
-    this.finalLine.textContent = "";
+    this.finalPrimaryLine.textContent = "";
+    this.finalOriginalLine.textContent = "";
     this.interimLine.textContent = "";
     this.finalLine.classList.remove(
       "is-fading",
     );
+    this.finalLine.classList.add(
+      "is-empty",
+    );
     this.captionStack.style.display = "none";
 
     console.log("[overlay]", "captions cleared");
+  }
+
+  setTranslationPath(
+    path: TranslationPath | null,
+  ): void {
+    if (this.destroyed) {
+      return;
+    }
+
+    this.translationPath = path;
+    this.updateTranslationBadge();
+    this.updateLayout();
   }
 
   setStatus(
@@ -569,6 +656,13 @@ export class CaptionOverlay {
     }
   }
 
+  private updateTranslationBadge(): void {
+    this.translationBadge.classList.toggle(
+      "is-visible",
+      this.translationPath === "none",
+    );
+  }
+
   private updateLayout(): void {
     if (this.destroyed) {
       return;
@@ -606,11 +700,7 @@ export class CaptionOverlay {
   private positionCaptionStack(
     rect: DOMRect,
   ): void {
-    const hasCaption =
-      this.finalLine.textContent !== "" ||
-      this.interimLine.textContent !== "";
-
-    if (!hasCaption) {
+    if (!this.hasCaption()) {
       this.captionStack.style.display =
         "none";
       return;
@@ -722,10 +812,23 @@ export class CaptionOverlay {
     }
   }
 
+  private hasCaption(): boolean {
+    return (
+      this.hasFinalCaption() ||
+      this.interimLine.textContent !== ""
+    );
+  }
+
+  private hasFinalCaption(): boolean {
+    return (
+      this.finalPrimaryLine.textContent !== ""
+    );
+  }
+
   private scheduleFinalFade(): void {
     if (
       this.destroyed ||
-      this.finalLine.textContent === ""
+      !this.hasFinalCaption()
     ) {
       return;
     }
@@ -741,9 +844,15 @@ export class CaptionOverlay {
           window.setTimeout(() => {
             this.finalRemovalTimerId = null;
             this.finalId = null;
-            this.finalLine.textContent = "";
+            this.finalPrimaryLine.textContent =
+              "";
+            this.finalOriginalLine.textContent =
+              "";
             this.finalLine.classList.remove(
               "is-fading",
+            );
+            this.finalLine.classList.add(
+              "is-empty",
             );
             this.updateLayout();
             this.options.onCaptionFadeOut?.();
@@ -874,7 +983,8 @@ function getOverlayStyles(): string {
       transition: opacity ${FINAL_FADE_MS}ms ease;
     }
 
-    .caption-line:empty {
+    .caption-line:empty,
+    .caption-line.is-empty {
       display: none;
     }
 
@@ -893,6 +1003,23 @@ function getOverlayStyles(): string {
       opacity: 0;
     }
 
+    .caption-primary {
+      display: block;
+    }
+
+    .caption-original {
+      display: block;
+      margin-block-start: 0.16em;
+      color: rgba(229, 231, 235, 0.82);
+      font-size: 0.68em;
+      font-weight: 500;
+      line-height: 1.22;
+    }
+
+    .caption-original:empty {
+      display: none;
+    }
+
     .caption-interim {
       color: #d1d5db;
       background: rgba(0, 0, 0, 0.5);
@@ -900,6 +1027,24 @@ function getOverlayStyles(): string {
       font-weight: 500;
       text-shadow:
         0 1px 2px rgba(0, 0, 0, 0.9);
+    }
+
+    .translation-badge {
+      display: none;
+      margin: 0;
+      padding: 3px 7px;
+      border: 1px solid rgba(253, 230, 138, 0.5);
+      border-radius: 999px;
+      color: #fef3c7;
+      background: rgba(120, 53, 15, 0.86);
+      font-size: 11px;
+      font-weight: 700;
+      line-height: 1;
+      text-shadow: none;
+    }
+
+    .translation-badge.is-visible {
+      display: inline-flex;
     }
 
     .chip {

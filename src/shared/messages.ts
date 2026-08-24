@@ -4,9 +4,11 @@ import {
 } from "./state";
 import {
   isSettings,
+  isSourceLanguage,
   isWhisperDevice,
   isWhisperModel,
   type Settings,
+  type SourceLanguage,
   type WhisperDevice,
   type WhisperModel,
 } from "./settings";
@@ -23,6 +25,12 @@ export type WebGpuProbeContext =
   | "offscreen-document"
   | "dedicated-worker"
   | "options-page";
+
+export type TranslationPath =
+  | "offscreen-translator"
+  | "content-translator"
+  | "language-model"
+  | "none";
 
 export interface ProbeError {
   name: string;
@@ -214,11 +222,40 @@ export interface CsPcmMessage {
   b64: string;
 }
 
+export interface CsTranslateMessage {
+  t: "CS_TRANSLATE";
+  requestId: string;
+  id: string;
+  text: string;
+}
+
+export interface CsTranslateResultMessage {
+  t: "CS_TRANSLATE_RESULT";
+  requestId: string;
+  id: string;
+  ja: string;
+  available: boolean;
+  error?: ProbeError;
+}
+
+export interface OffTranslationStateMessage {
+  t: "OFF_TRANSLATION_STATE";
+  requestId: string;
+  path: TranslationPath;
+}
+
+export interface SwTranslationStateMessage {
+  t: "SW_TRANSLATION_STATE";
+  requestId: string;
+  path: TranslationPath;
+}
+
 export interface RecognitionPayload {
   id: number;
   text: string;
   final: boolean;
   at: string;
+  ja?: string;
 }
 
 export interface OffRecognitionMessage
@@ -244,6 +281,7 @@ export interface WhisperInitMessage {
   t: "WHISPER_INIT";
   model: WhisperModel;
   ortBaseUrl: string;
+  sourceLang: SourceLanguage;
   forceDevice?: WhisperDevice;
 }
 
@@ -311,7 +349,10 @@ export type ContentPortMessage =
   | CsStopTapMessage
   | CsTapStateMessage
   | CsPcmMessage
+  | CsTranslateMessage
+  | CsTranslateResultMessage
   | OffStateMessage
+  | SwTranslationStateMessage
   | CaptionPortMessage;
 
 export type CapturePortMessage =
@@ -320,12 +361,16 @@ export type CapturePortMessage =
   | OffStateMessage
   | OffLevelMessage
   | OffRecognitionMessage
-  | CsPcmMessage;
+  | OffTranslationStateMessage
+  | CsPcmMessage
+  | CsTranslateMessage
+  | CsTranslateResultMessage;
 
 export type OptionsPortMessage =
   | OffStateMessage
   | OffLevelMessage
   | SwRecognitionMessage
+  | SwTranslationStateMessage
   | CsTapStateMessage;
 
 export type M1Message =
@@ -335,6 +380,7 @@ export type M1Message =
   | CapturePortMessage
   | ContentPortMessage
   | SwRecognitionMessage
+  | SwTranslationStateMessage
   | CaptionPortMessage;
 
 export function nowIso(): string {
@@ -551,6 +597,36 @@ export function isM1Message(
         typeof value.b64 === "string"
       );
 
+    case "CS_TRANSLATE":
+      return (
+        typeof value.requestId === "string" &&
+        typeof value.id === "string" &&
+        typeof value.text === "string"
+      );
+
+    case "CS_TRANSLATE_RESULT":
+      return (
+        typeof value.requestId === "string" &&
+        typeof value.id === "string" &&
+        typeof value.ja === "string" &&
+        typeof value.available === "boolean" &&
+        (
+          value.error === undefined ||
+          (
+            isRecord(value.error) &&
+            typeof value.error.name === "string" &&
+            typeof value.error.message === "string"
+          )
+        )
+      );
+
+    case "OFF_TRANSLATION_STATE":
+    case "SW_TRANSLATION_STATE":
+      return (
+        typeof value.requestId === "string" &&
+        isTranslationPath(value.path)
+      );
+
     case "OFF_RECOG":
     case "SW_RECOG":
     case "SW_CAPTION":
@@ -582,7 +658,16 @@ export function isCapturePortMessage(
     isMessageOfType(value, "OFF_STATE") ||
     isMessageOfType(value, "OFF_LEVEL") ||
     isMessageOfType(value, "OFF_RECOG") ||
-    isMessageOfType(value, "CS_PCM")
+    isMessageOfType(
+      value,
+      "OFF_TRANSLATION_STATE",
+    ) ||
+    isMessageOfType(value, "CS_PCM") ||
+    isMessageOfType(value, "CS_TRANSLATE") ||
+    isMessageOfType(
+      value,
+      "CS_TRANSLATE_RESULT",
+    )
   );
 }
 
@@ -594,7 +679,16 @@ export function isContentPortMessage(
     isMessageOfType(value, "CS_STOP_TAP") ||
     isMessageOfType(value, "CS_TAP_STATE") ||
     isMessageOfType(value, "CS_PCM") ||
+    isMessageOfType(value, "CS_TRANSLATE") ||
+    isMessageOfType(
+      value,
+      "CS_TRANSLATE_RESULT",
+    ) ||
     isMessageOfType(value, "OFF_STATE") ||
+    isMessageOfType(
+      value,
+      "SW_TRANSLATION_STATE",
+    ) ||
     isMessageOfType(value, "SW_CAPTION") ||
     isMessageOfType(
       value,
@@ -615,6 +709,7 @@ export function isWhisperWorkerInputMessage(
       return (
         isWhisperModel(value.model) &&
         typeof value.ortBaseUrl === "string" &&
+        isSourceLanguage(value.sourceLang) &&
         (
           value.forceDevice === undefined ||
           isWhisperDevice(value.forceDevice)
@@ -679,6 +774,17 @@ export function isWhisperWorkerOutputMessage(
   }
 }
 
+export function isTranslationPath(
+  value: unknown,
+): value is TranslationPath {
+  return (
+    value === "offscreen-translator" ||
+    value === "content-translator" ||
+    value === "language-model" ||
+    value === "none"
+  );
+}
+
 function isRecognitionPayload(
   value: Record<string, unknown>,
 ): boolean {
@@ -688,7 +794,11 @@ function isRecognitionPayload(
     value.id >= 0 &&
     typeof value.text === "string" &&
     typeof value.final === "boolean" &&
-    typeof value.at === "string"
+    typeof value.at === "string" &&
+    (
+      value.ja === undefined ||
+      typeof value.ja === "string"
+    )
   );
 }
 

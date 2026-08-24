@@ -32,7 +32,8 @@
       }
 
       .capture-card,
-      .recognition-card {
+      .recognition-card,
+      .translation-card {
         padding: 18px;
         border: 1px solid
           color-mix(in srgb, currentColor 25%, transparent);
@@ -79,7 +80,8 @@
 
       .meter-label,
       .recognition-runtime,
-      .settings-row {
+      .settings-row,
+      .translation-status-row {
         display: flex;
         align-items: center;
         justify-content: space-between;
@@ -116,14 +118,17 @@
         margin-block-start: 14px;
       }
 
-      .model-progress progress {
+      .model-progress progress,
+      .translation-progress progress {
         width: 100%;
         height: 16px;
       }
 
       .capture-help,
       .settings-help,
-      #settings-status {
+      .translation-help,
+      #settings-status,
+      #translation-status {
         color:
           color-mix(in srgb, currentColor 72%, transparent);
       }
@@ -174,6 +179,22 @@
         font-size: 0.82em;
       }
 
+      .recognition-body {
+        display: inline-flex;
+        flex-direction: column;
+        vertical-align: top;
+      }
+
+      .recognition-ja {
+        font-weight: 650;
+      }
+
+      .recognition-original {
+        color:
+          color-mix(in srgb, currentColor 62%, transparent);
+        font-size: 0.84em;
+      }
+
       .recognition-line[data-final="false"] {
         color:
           color-mix(in srgb, currentColor 58%, transparent);
@@ -195,9 +216,20 @@
       }
 
       .settings-help,
-      #settings-status {
+      .translation-help,
+      #settings-status,
+      #translation-status {
         margin-block: 6px 0;
         font-size: 0.92em;
+      }
+
+      .translation-status-row {
+        justify-content: flex-start;
+        flex-wrap: wrap;
+      }
+
+      .translation-progress {
+        margin-block: 14px;
       }
 
       .actions {
@@ -327,6 +359,10 @@
             実行デバイス:
             <strong id="active-device">—</strong>
           </span>
+          <span>
+            翻訳経路:
+            <strong id="active-translation-path">—</strong>
+          </span>
         </p>
 
         <ol
@@ -348,11 +384,72 @@
           </select>
         </div>
 
+        <div class="settings-row">
+          <label for="source-language-select">
+            音声の言語
+          </label>
+          <select id="source-language-select">
+            <option value="en">英語</option>
+            <option value="auto">自動判定</option>
+          </select>
+        </div>
+
         <p class="settings-help">
           適用は次回キャプチャ開始時
         </p>
         <p
           id="settings-status"
+          role="status"
+          aria-live="polite"
+        ></p>
+      </section>
+
+      <section
+        class="translation-card"
+        aria-labelledby="translation-heading"
+      >
+        <h2 id="translation-heading">翻訳</h2>
+
+        <p class="translation-status-row">
+          <span>Translator（英語→日本語）:</span>
+          <strong id="translation-availability">
+            確認中…
+          </strong>
+        </p>
+
+        <p class="translation-help">
+          初回はChromeの言語パックをダウンロードします。
+          準備ボタンはこのページ上のユーザー操作として実行されます。
+        </p>
+
+        <div
+          id="translation-progress-container"
+          class="translation-progress"
+          hidden
+        >
+          <div class="meter-label">
+            <span>翻訳モデルの準備</span>
+            <output id="translation-progress-value">0%</output>
+          </div>
+          <progress
+            id="translation-progress"
+            max="100"
+            value="0"
+          ></progress>
+        </div>
+
+        <div class="actions">
+          <button
+            id="prepare-translation"
+            type="button"
+            disabled
+          >
+            翻訳モデルを準備する
+          </button>
+        </div>
+
+        <p
+          id="translation-status"
           role="status"
           aria-live="polite"
         ></p>

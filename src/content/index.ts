@@ -7,8 +7,11 @@ import {
   type ContentScriptProbeResultMessage,
   type CsPcmMessage,
   type CsTapStateMessage,
+  type CsTranslateMessage,
+  type CsTranslateResultMessage,
   type ProbeFailureMessage,
   type SwCaptionMessage,
+  type TranslationPath,
   type TranslatorProbeResult,
 } from "../shared/messages";
 import type {
@@ -40,12 +43,31 @@ let reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
 let activeTap: AudioTap | null = null;
 let tapOperationTail: Promise<void> =
   Promise.resolve();
+let contentTranslationTail: Promise<void> =
+  Promise.resolve();
+let contentTranslator:
+  | TranslatorInstance
+  | null = null;
+let contentTranslatorCreatePromise:
+  | Promise<TranslatorInstance | null>
+  | null = null;
+let contentTranslatorCreateGeneration:
+  | number
+  | null = null;
+let contentTranslatorCreateAttempted = false;
+let contentTranslatorGeneration = 0;
+let contentSessionRequestId:
+  | string
+  | null = null;
 let captionOverlay: CaptionOverlay | null =
   null;
 let overlayDestroyTimerId: number | null =
   null;
 let lastCaptureStatus: CaptureStatus =
   "idle";
+let activeTranslationPath:
+  | TranslationPath
+  | null = null;
 
 console.log("[cs]", "content script loaded", {
   url: location.href,
@@ -130,10 +152,15 @@ function connectBackgroundPort(): void {
             "CS_START_TAP",
           )
         ) {
+          contentSessionRequestId =
+            message.requestId;
+          resetContentTranslator();
+          activeTranslationPath = null;
           lastCaptureStatus = "starting";
-          ensureOverlay().setStatus(
-            "loadingModel",
-          );
+
+          const overlay = ensureOverlay();
+          overlay.setTranslationPath(null);
+          overlay.setStatus("loadingModel");
 
           void enqueueTapOperation(() =>
             startTap(message.requestId),
@@ -147,6 +174,14 @@ function connectBackgroundPort(): void {
             "CS_STOP_TAP",
           )
         ) {
+          if (
+            contentSessionRequestId ===
+              message.requestId
+          ) {
+            contentSessionRequestId = null;
+            resetContentTranslator();
+          }
+
           void enqueueTapOperation(() =>
             stopTap(
               message.requestId,
@@ -159,10 +194,42 @@ function connectBackgroundPort(): void {
         if (
           isMessageOfType(
             message,
+            "CS_TRANSLATE",
+          )
+        ) {
+          enqueueContentTranslation(message);
+          return;
+        }
+
+        if (
+          isMessageOfType(
+            message,
             "OFF_STATE",
           )
         ) {
           handleCaptureState(message.state);
+          return;
+        }
+
+        if (
+          isMessageOfType(
+            message,
+            "SW_TRANSLATION_STATE",
+          )
+        ) {
+          if (
+            contentSessionRequestId !== null &&
+            message.requestId !==
+              contentSessionRequestId
+          ) {
+            return;
+          }
+
+          activeTranslationPath =
+            message.path;
+          ensureOverlay().setTranslationPath(
+            message.path,
+          );
           return;
         }
 
@@ -216,6 +283,9 @@ function connectBackgroundPort(): void {
       );
 
       lastCaptureStatus = "idle";
+      activeTranslationPath = null;
+      contentSessionRequestId = null;
+      resetContentTranslator();
       destroyOverlay();
 
       void enqueueTapOperation(async () => {
@@ -295,6 +365,341 @@ function enqueueTapOperation(
   return next;
 }
 
+function enqueueContentTranslation(
+  message: CsTranslateMessage,
+): void {
+  const operation = contentTranslationTail
+    .catch(() => undefined)
+    .then(() =>
+      handleContentTranslation(message),
+    );
+
+  contentTranslationTail = operation.catch(
+    (error: unknown) => {
+      console.error(
+        "[cs]",
+        "content translation operation failed",
+        error,
+      );
+    },
+  );
+}
+
+async function handleContentTranslation(
+  message: CsTranslateMessage,
+): Promise<void> {
+  const sessionGeneration =
+    contentTranslatorGeneration;
+
+  if (
+    !isContentTranslationSessionCurrent(
+      message.requestId,
+      sessionGeneration,
+    )
+  ) {
+    postAbortedContentTranslation(message);
+    return;
+  }
+
+  try {
+    const translator =
+      await ensureContentTranslator(
+        message.requestId,
+        sessionGeneration,
+      );
+
+    if (
+      !isContentTranslationSessionCurrent(
+        message.requestId,
+        sessionGeneration,
+      )
+    ) {
+      postAbortedContentTranslation(message);
+      return;
+    }
+
+    if (translator === null) {
+      postTranslationResult({
+        t: "CS_TRANSLATE_RESULT",
+        requestId: message.requestId,
+        id: message.id,
+        ja: "",
+        available: false,
+      });
+      return;
+    }
+
+    if (message.text.trim() === "") {
+      postTranslationResult({
+        t: "CS_TRANSLATE_RESULT",
+        requestId: message.requestId,
+        id: message.id,
+        ja: "",
+        available: true,
+      });
+      return;
+    }
+
+    const ja =
+      await translator.translate(
+        message.text,
+      );
+
+    if (
+      !isContentTranslationSessionCurrent(
+        message.requestId,
+        sessionGeneration,
+      )
+    ) {
+      postAbortedContentTranslation(message);
+      return;
+    }
+
+    postTranslationResult({
+      t: "CS_TRANSLATE_RESULT",
+      requestId: message.requestId,
+      id: message.id,
+      ja,
+      available: true,
+    });
+  } catch (error) {
+    if (
+      !isContentTranslationSessionCurrent(
+        message.requestId,
+        sessionGeneration,
+      )
+    ) {
+      postAbortedContentTranslation(message);
+      return;
+    }
+
+    destroyContentTranslator();
+
+    postTranslationResult({
+      t: "CS_TRANSLATE_RESULT",
+      requestId: message.requestId,
+      id: message.id,
+      ja: "",
+      available: false,
+      error: toProbeError(error),
+    });
+  }
+}
+
+async function ensureContentTranslator(
+  requestId: string,
+  generation: number,
+): Promise<TranslatorInstance | null> {
+  while (
+    isContentTranslationSessionCurrent(
+      requestId,
+      generation,
+    )
+  ) {
+    if (contentTranslator !== null) {
+      return contentTranslator;
+    }
+
+    let createPromise =
+      contentTranslatorCreatePromise;
+    let createGeneration =
+      contentTranslatorCreateGeneration;
+
+    if (createPromise === null) {
+      if (contentTranslatorCreateAttempted) {
+        return null;
+      }
+
+      createGeneration = generation;
+      createPromise =
+        createContentTranslator(
+          requestId,
+          generation,
+        );
+      contentTranslatorCreatePromise =
+        createPromise;
+      contentTranslatorCreateGeneration =
+        createGeneration;
+    }
+
+    let translator:
+      | TranslatorInstance
+      | null;
+
+    try {
+      translator = await createPromise;
+    } finally {
+      if (
+        contentTranslatorCreatePromise ===
+          createPromise
+      ) {
+        contentTranslatorCreatePromise = null;
+        contentTranslatorCreateGeneration =
+          null;
+      }
+    }
+
+    if (
+      !isContentTranslationSessionCurrent(
+        requestId,
+        generation,
+      )
+    ) {
+      return null;
+    }
+
+    if (createGeneration !== generation) {
+      continue;
+    }
+
+    return translator;
+  }
+
+  return null;
+}
+
+async function createContentTranslator(
+  requestId: string,
+  generation: number,
+): Promise<TranslatorInstance | null> {
+  try {
+    const scope =
+      globalThis as TranslatorScope;
+    const factory = scope.Translator;
+
+    if (
+      !("Translator" in scope) ||
+      factory === undefined ||
+      typeof factory.availability !==
+        "function" ||
+      typeof factory.create !== "function"
+    ) {
+      return null;
+    }
+
+    const availability =
+      await factory.availability({
+        sourceLanguage: "en",
+        targetLanguage: "ja",
+      });
+
+    if (
+      !isContentTranslationSessionCurrent(
+        requestId,
+        generation,
+      )
+    ) {
+      return null;
+    }
+
+    if (availability !== "available") {
+      return null;
+    }
+
+    contentTranslatorCreateAttempted = true;
+
+    const translator =
+      await factory.create({
+        sourceLanguage: "en",
+        targetLanguage: "ja",
+      });
+
+    if (
+      !isContentTranslationSessionCurrent(
+        requestId,
+        generation,
+      )
+    ) {
+      destroyContentTranslatorInstance(
+        translator,
+      );
+      return null;
+    }
+
+    contentTranslator = translator;
+    return translator;
+  } catch (error) {
+    if (
+      !isContentTranslationSessionCurrent(
+        requestId,
+        generation,
+      )
+    ) {
+      return null;
+    }
+
+    throw error;
+  }
+}
+
+function isContentTranslationSessionCurrent(
+  requestId: string,
+  generation: number,
+): boolean {
+  return (
+    contentSessionRequestId === requestId &&
+    contentTranslatorGeneration === generation
+  );
+}
+
+function postAbortedContentTranslation(
+  message: CsTranslateMessage,
+): void {
+  postTranslationResult({
+    t: "CS_TRANSLATE_RESULT",
+    requestId: message.requestId,
+    id: message.id,
+    ja: "",
+    available: false,
+    error: {
+      name: "AbortError",
+      message:
+        "Translation request was aborted because the content session changed",
+    },
+  });
+}
+
+function resetContentTranslator(): void {
+  contentTranslatorGeneration += 1;
+  destroyContentTranslator();
+  contentTranslatorCreateAttempted = false;
+  contentTranslationTail =
+    Promise.resolve();
+}
+
+function destroyContentTranslator(): void {
+  const translator = contentTranslator;
+  contentTranslator = null;
+
+  if (translator === null) {
+    return;
+  }
+
+  destroyContentTranslatorInstance(
+    translator,
+  );
+}
+
+function destroyContentTranslatorInstance(
+  translator: TranslatorInstance,
+): void {
+  try {
+    translator.destroy();
+  } catch (error) {
+    console.warn(
+      "[cs]",
+      "content Translator cleanup failed",
+      error,
+    );
+  }
+}
+
+function postTranslationResult(
+  message: CsTranslateResultMessage,
+): void {
+  postContentMessage(message);
+}
+
 async function startTap(
   requestId: string,
 ): Promise<void> {
@@ -352,7 +757,16 @@ async function startTap(
         activeTap = null;
       }
 
+      if (
+        contentSessionRequestId ===
+          requestId
+      ) {
+        contentSessionRequestId = null;
+        resetContentTranslator();
+      }
+
       lastCaptureStatus = "stopping";
+      activeTranslationPath = null;
       destroyOverlay();
 
       postTapState(
@@ -365,6 +779,14 @@ async function startTap(
     onError(error) {
       if (activeTap === tap) {
         activeTap = null;
+      }
+
+      if (
+        contentSessionRequestId ===
+          requestId
+      ) {
+        contentSessionRequestId = null;
+        resetContentTranslator();
       }
 
       showOverlayError();
@@ -400,6 +822,13 @@ async function startTap(
   } catch (error) {
     if (activeTap === tap) {
       activeTap = null;
+    }
+
+    if (
+      contentSessionRequestId === requestId
+    ) {
+      contentSessionRequestId = null;
+      resetContentTranslator();
     }
 
     console.error(
@@ -495,11 +924,17 @@ function handleCaptureState(
       return;
 
     case "error":
+      activeTranslationPath = null;
+      contentSessionRequestId = null;
+      resetContentTranslator();
       showOverlayError(state.progress);
       return;
 
     case "stopping":
     case "idle":
+      activeTranslationPath = null;
+      contentSessionRequestId = null;
+      resetContentTranslator();
       destroyOverlay();
   }
 }
@@ -529,6 +964,9 @@ function ensureOverlay(): CaptionOverlay {
     },
   });
 
+  overlay.setTranslationPath(
+    activeTranslationPath,
+  );
   captionOverlay = overlay;
   return overlay;
 }
@@ -541,6 +979,7 @@ function showOverlayError(
 
   const overlay = ensureOverlay();
   overlay.clear();
+  overlay.setTranslationPath(null);
   overlay.setStatus("error", progress);
 
   overlayDestroyTimerId =
@@ -590,7 +1029,10 @@ function postTapState(
 }
 
 function postContentMessage(
-  message: CsPcmMessage | CsTapStateMessage,
+  message:
+    | CsPcmMessage
+    | CsTapStateMessage
+    | CsTranslateResultMessage,
 ): void {
   const port = backgroundPort;
 
