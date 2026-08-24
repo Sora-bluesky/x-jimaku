@@ -2,8 +2,16 @@ import type {
   TranslationPath,
 } from "../shared/messages";
 
-const MAX_PRIMARY_CAPTION_CHARS = 90;
+const MAX_PRIMARY_CAPTION_CHARS = 120;
 const MAX_SECONDARY_CAPTION_CHARS = 140;
+
+const FINAL_PRIMARY_LINE_HEIGHT = 1.16;
+const FINAL_ORIGINAL_FONT_SCALE = 0.68;
+const FINAL_ORIGINAL_LINE_HEIGHT = 1.18;
+const INTERIM_PRIMARY_FONT_SCALE = 0.86;
+const INTERIM_PRIMARY_LINE_HEIGHT = 1.16;
+const INTERIM_ORIGINAL_FONT_SCALE = 0.64;
+const INTERIM_ORIGINAL_LINE_HEIGHT = 1.16;
 
 function clampCaptionTail(
   text: string,
@@ -15,7 +23,6 @@ function clampCaptionTail(
 
   return "…" + text.slice(text.length - maxChars);
 }
-
 
 const HOST_ID = "xjsub-host";
 const FINAL_VISIBLE_MS = 5_000;
@@ -53,6 +60,10 @@ export class CaptionOverlay {
   private readonly finalOriginalLine:
     HTMLDivElement;
   private readonly interimLine: HTMLDivElement;
+  private readonly interimPrimaryLine:
+    HTMLDivElement;
+  private readonly interimOriginalLine:
+    HTMLDivElement;
   private readonly targetChip: HTMLDivElement;
   private readonly targetDot: HTMLSpanElement;
   private readonly targetText: HTMLSpanElement;
@@ -74,6 +85,10 @@ export class CaptionOverlay {
   private progress: number | undefined;
   private finalId: number | null = null;
   private interimId: number | null = null;
+  private interimEnglishText = "";
+  private interimJapaneseText = "";
+  private interimEnglishAt: string | null =
+    null;
   private frameId: number | null = null;
   private mutationTimerId: number | null =
     null;
@@ -81,6 +96,7 @@ export class CaptionOverlay {
     null;
   private finalRemovalTimerId: number | null =
     null;
+  private captionBarEnabled = true;
   private destroyed = false;
 
   constructor(options: CaptionOverlayOptions) {
@@ -134,7 +150,22 @@ export class CaptionOverlay {
     this.interimLine =
       document.createElement("div");
     this.interimLine.className =
-      "caption-line caption-interim";
+      "caption-line caption-interim is-empty";
+
+    this.interimPrimaryLine =
+      document.createElement("div");
+    this.interimPrimaryLine.className =
+      "caption-primary caption-interim-primary";
+
+    this.interimOriginalLine =
+      document.createElement("div");
+    this.interimOriginalLine.className =
+      "caption-original caption-interim-original";
+
+    this.interimLine.append(
+      this.interimPrimaryLine,
+      this.interimOriginalLine,
+    );
 
     this.captionStack.append(
       this.translationBadge,
@@ -204,6 +235,7 @@ export class CaptionOverlay {
     const text = line.text.trim();
     const ja = line.ja?.trim() ?? "";
 
+    this.captionBarEnabled = true;
     this.cancelFinalFade();
 
     if (line.final) {
@@ -222,8 +254,7 @@ export class CaptionOverlay {
           this.interimId <= line.id
         )
       ) {
-        this.interimId = null;
-        this.interimLine.textContent = "";
+        this.clearInterimCaption();
       }
 
       if (text === "") {
@@ -235,12 +266,21 @@ export class CaptionOverlay {
 
       if (ja !== "") {
         this.finalPrimaryLine.textContent =
-          clampCaptionTail(ja, MAX_PRIMARY_CAPTION_CHARS);
+          clampCaptionTail(
+            ja,
+            MAX_PRIMARY_CAPTION_CHARS,
+          );
         this.finalOriginalLine.textContent =
-          clampCaptionTail(text, MAX_SECONDARY_CAPTION_CHARS);
+          clampCaptionTail(
+            text,
+            MAX_SECONDARY_CAPTION_CHARS,
+          );
       } else {
         this.finalPrimaryLine.textContent =
-          clampCaptionTail(text, MAX_SECONDARY_CAPTION_CHARS);
+          clampCaptionTail(
+            text,
+            MAX_SECONDARY_CAPTION_CHARS,
+          );
         this.finalOriginalLine.textContent =
           "";
       }
@@ -252,8 +292,14 @@ export class CaptionOverlay {
       this.scheduleFinalFade();
     } else {
       if (
-        this.interimId !== null &&
-        line.id < this.interimId
+        (
+          this.finalId !== null &&
+          line.id <= this.finalId
+        ) ||
+        (
+          this.interimId !== null &&
+          line.id < this.interimId
+        )
       ) {
         if (this.hasFinalCaption()) {
           this.scheduleFinalFade();
@@ -261,9 +307,25 @@ export class CaptionOverlay {
         return;
       }
 
+      const isCurrentInterim =
+        this.interimId === line.id;
+      const shouldUpdateEnglish =
+        !isCurrentInterim ||
+        this.interimEnglishAt === null ||
+        line.at >= this.interimEnglishAt;
+
       this.interimId = line.id;
-      this.interimLine.textContent =
-        clampCaptionTail(text, MAX_SECONDARY_CAPTION_CHARS);
+
+      if (shouldUpdateEnglish) {
+        this.interimEnglishText = text;
+        this.interimEnglishAt = line.at;
+      }
+
+      if (ja !== "") {
+        this.interimJapaneseText = ja;
+      }
+
+      this.renderInterimCaption();
 
       if (this.hasFinalCaption()) {
         this.scheduleFinalFade();
@@ -281,11 +343,11 @@ export class CaptionOverlay {
     }
 
     this.cancelFinalFade();
+    this.captionBarEnabled = false;
     this.finalId = null;
-    this.interimId = null;
     this.finalPrimaryLine.textContent = "";
     this.finalOriginalLine.textContent = "";
-    this.interimLine.textContent = "";
+    this.clearInterimCaption();
     this.finalLine.classList.remove(
       "is-fading",
     );
@@ -323,6 +385,13 @@ export class CaptionOverlay {
       !Number.isFinite(progress)
         ? undefined
         : Math.min(100, Math.max(0, progress));
+
+    if (
+      state === "loadingModel" ||
+      state === "running"
+    ) {
+      this.captionBarEnabled = true;
+    }
 
     this.updateTargetChip();
     this.refreshTarget();
@@ -364,6 +433,55 @@ export class CaptionOverlay {
     this.host.remove();
 
     console.log("[overlay]", "overlay destroyed");
+  }
+
+  private renderInterimCaption(): void {
+    if (this.interimJapaneseText !== "") {
+      this.interimPrimaryLine.textContent =
+        clampCaptionTail(
+          this.interimJapaneseText,
+          MAX_PRIMARY_CAPTION_CHARS,
+        );
+      this.interimOriginalLine.textContent =
+        clampCaptionTail(
+          this.interimEnglishText,
+          MAX_SECONDARY_CAPTION_CHARS,
+        );
+      this.interimLine.classList.add(
+        "has-translation",
+      );
+    } else {
+      this.interimPrimaryLine.textContent =
+        clampCaptionTail(
+          this.interimEnglishText,
+          MAX_SECONDARY_CAPTION_CHARS,
+        );
+      this.interimOriginalLine.textContent =
+        "";
+      this.interimLine.classList.remove(
+        "has-translation",
+      );
+    }
+
+    this.interimLine.classList.toggle(
+      "is-empty",
+      this.interimPrimaryLine.textContent === "",
+    );
+  }
+
+  private clearInterimCaption(): void {
+    this.interimId = null;
+    this.interimEnglishText = "";
+    this.interimJapaneseText = "";
+    this.interimEnglishAt = null;
+    this.interimPrimaryLine.textContent = "";
+    this.interimOriginalLine.textContent = "";
+    this.interimLine.classList.remove(
+      "has-translation",
+    );
+    this.interimLine.classList.add(
+      "is-empty",
+    );
   }
 
   private installEventListeners(): void {
@@ -716,7 +834,26 @@ export class CaptionOverlay {
   private positionCaptionStack(
     rect: DOMRect,
   ): void {
-    if (!this.hasCaption()) {
+    const captureIsOn =
+      this.status === "loadingModel" ||
+      this.status === "running";
+
+    if (
+      !captureIsOn ||
+      !this.captionBarEnabled
+    ) {
+      this.captionStack.style.display =
+        "none";
+      return;
+    }
+
+    const width = Math.max(0, rect.width);
+    const barHeight = Math.max(
+      64,
+      Math.min(150, rect.height * 0.26),
+    );
+
+    if (width <= 0 || barHeight <= 0) {
       this.captionStack.style.display =
         "none";
       return;
@@ -724,45 +861,96 @@ export class CaptionOverlay {
 
     const horizontalPadding = Math.max(
       10,
-      Math.min(32, rect.width * 0.035),
+      Math.min(24, rect.width * 0.025),
     );
-    const bottomInset = Math.max(
-      8,
-      Math.min(24, rect.height * 0.04),
+    const verticalPadding = Math.max(
+      5,
+      Math.min(10, barHeight * 0.07),
     );
-    const width = Math.max(
-      0,
-      rect.width -
-        horizontalPadding * 2,
+    const availableRowHeight = Math.max(
+      1,
+      barHeight - verticalPadding * 2,
     );
-    const fontSize = Math.max(
+
+    const rowHeightInFontUnits =
+      FINAL_PRIMARY_LINE_HEIGHT * 2 +
+      FINAL_ORIGINAL_FONT_SCALE *
+        FINAL_ORIGINAL_LINE_HEIGHT +
+      INTERIM_PRIMARY_FONT_SCALE *
+        INTERIM_PRIMARY_LINE_HEIGHT +
+      INTERIM_ORIGINAL_FONT_SCALE *
+        INTERIM_ORIGINAL_LINE_HEIGHT;
+
+    const widthScaledFontSize = Math.max(
       14,
       Math.min(24, rect.width / 32),
     );
+    const heightLimitedFontSize =
+      availableRowHeight /
+      rowHeightInFontUnits;
+    const fontSize = Math.max(
+      10,
+      Math.min(
+        widthScaledFontSize,
+        heightLimitedFontSize,
+      ),
+    );
 
-    if (width <= 0) {
-      this.captionStack.style.display =
-        "none";
-      return;
-    }
+    const finalPrimarySlot =
+      fontSize *
+      FINAL_PRIMARY_LINE_HEIGHT *
+      2;
+    const finalOriginalSlot =
+      fontSize *
+      FINAL_ORIGINAL_FONT_SCALE *
+      FINAL_ORIGINAL_LINE_HEIGHT;
+    const interimPrimarySlot =
+      fontSize *
+      INTERIM_PRIMARY_FONT_SCALE *
+      INTERIM_PRIMARY_LINE_HEIGHT;
+    const interimOriginalSlot =
+      fontSize *
+      INTERIM_ORIGINAL_FONT_SCALE *
+      INTERIM_ORIGINAL_LINE_HEIGHT;
 
     this.captionStack.style.display =
       "flex";
     this.captionStack.style.left =
-      `${rect.left + horizontalPadding}px`;
+      `${rect.left}px`;
     this.captionStack.style.bottom =
-      `${Math.max(
-        0,
-        window.innerHeight -
-          rect.bottom +
-          bottomInset,
-      )}px`;
+      `${window.innerHeight - rect.bottom}px`;
     this.captionStack.style.width =
       `${width}px`;
     this.captionStack.style.maxWidth =
       `${width}px`;
+    this.captionStack.style.height =
+      `${barHeight}px`;
     this.captionStack.style.fontSize =
       `${fontSize}px`;
+    this.captionStack.style.setProperty(
+      "--bar-padding-x",
+      `${horizontalPadding}px`,
+    );
+    this.captionStack.style.setProperty(
+      "--bar-padding-y",
+      `${verticalPadding}px`,
+    );
+    this.captionStack.style.setProperty(
+      "--final-primary-slot",
+      `${finalPrimarySlot}px`,
+    );
+    this.captionStack.style.setProperty(
+      "--final-original-slot",
+      `${finalOriginalSlot}px`,
+    );
+    this.captionStack.style.setProperty(
+      "--interim-primary-slot",
+      `${interimPrimarySlot}px`,
+    );
+    this.captionStack.style.setProperty(
+      "--interim-original-slot",
+      `${interimOriginalSlot}px`,
+    );
   }
 
   private positionTargetChip(
@@ -826,13 +1014,6 @@ export class CaptionOverlay {
     for (const badge of this.otherBadges.values()) {
       badge.style.display = "none";
     }
-  }
-
-  private hasCaption(): boolean {
-    return (
-      this.hasFinalCaption() ||
-      this.interimLine.textContent !== ""
-    );
   }
 
   private hasFinalCaption(): boolean {
@@ -967,96 +1148,188 @@ function getOverlayStyles(): string {
     }
 
     .caption-stack {
+      --bar-padding-x: 12px;
+      --bar-padding-y: 6px;
+      --final-primary-slot: 40px;
+      --final-original-slot: 14px;
+      --interim-primary-slot: 14px;
+      --interim-original-slot: 12px;
+
       position: fixed;
       display: none;
       flex-direction: column;
-      align-items: center;
+      align-items: stretch;
       justify-content: flex-end;
-      gap: 4px;
       margin: 0;
-      padding: 0;
+      padding:
+        var(--bar-padding-y)
+        var(--bar-padding-x);
+      overflow: hidden;
+      border-radius: 8px 8px 0 0;
+      color: #ffffff;
+      background: rgba(0, 0, 0, 0.92);
       font-family:
         system-ui,
         -apple-system,
         BlinkMacSystemFont,
         "Segoe UI",
         sans-serif;
-      line-height: 1.28;
       text-align: center;
       pointer-events: none;
     }
 
     .caption-line {
-      display: block;
-      width: fit-content;
-      max-width: 100%;
-      margin: 0 auto;
-      padding: 0.18em 0.48em 0.22em;
-      border-radius: 0.2em;
-      overflow-wrap: anywhere;
-      white-space: normal;
+      display: flex;
+      flex: 0 0 auto;
+      flex-direction: column;
+      width: 100%;
+      min-width: 0;
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
       pointer-events: none;
-      transition: opacity ${FINAL_FADE_MS}ms ease;
+      opacity: 1;
+      transition:
+        opacity ${FINAL_FADE_MS}ms ease;
     }
 
-    .caption-line:empty,
     .caption-line.is-empty {
-      display: none;
+      opacity: 0;
     }
 
     .caption-final {
+      height: calc(
+        var(--final-primary-slot) +
+        var(--final-original-slot)
+      );
       color: #ffffff;
-      background: rgba(0, 0, 0, 0.72);
       font-style: normal;
       font-weight: 650;
       text-shadow:
         0 1px 2px rgba(0, 0, 0, 0.95),
         0 0 3px rgba(0, 0, 0, 0.8);
-      opacity: 1;
     }
 
     .caption-final.is-fading {
       opacity: 0;
     }
 
-    .caption-primary {
-      display: block;
+    .caption-final > .caption-primary {
+      display: -webkit-box;
+      flex: 0 0 var(--final-primary-slot);
+      width: 100%;
+      min-width: 0;
+      height: var(--final-primary-slot);
+      min-height: var(--final-primary-slot);
+      max-height: var(--final-primary-slot);
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      overflow-wrap: anywhere;
+      font-size: 1em;
+      font-weight: 650;
+      line-height: ${FINAL_PRIMARY_LINE_HEIGHT};
+      white-space: normal;
+      -webkit-box-orient: vertical;
+      -webkit-line-clamp: 2;
     }
 
-    .caption-original {
+    .caption-final > .caption-original {
       display: block;
-      margin-block-start: 0.16em;
-      color: rgba(229, 231, 235, 0.82);
-      font-size: 0.68em;
+      flex: 0 0 var(--final-original-slot);
+      width: 100%;
+      min-width: 0;
+      height: var(--final-original-slot);
+      min-height: var(--final-original-slot);
+      max-height: var(--final-original-slot);
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      color: rgba(229, 231, 235, 0.78);
+      font-size: ${FINAL_ORIGINAL_FONT_SCALE}em;
       font-weight: 500;
-      line-height: 1.22;
-    }
-
-    .caption-original:empty {
-      display: none;
+      line-height: ${FINAL_ORIGINAL_LINE_HEIGHT};
+      text-overflow: ellipsis;
+      text-shadow:
+        0 1px 2px rgba(0, 0, 0, 0.9);
+      white-space: nowrap;
     }
 
     .caption-interim {
-      color: #d1d5db;
-      background: rgba(0, 0, 0, 0.5);
+      height: calc(
+        var(--interim-primary-slot) +
+        var(--interim-original-slot)
+      );
+      color: rgba(229, 231, 235, 0.88);
       font-style: italic;
       font-weight: 500;
       text-shadow:
         0 1px 2px rgba(0, 0, 0, 0.9);
     }
 
+    .caption-interim > .caption-interim-primary {
+      display: block;
+      flex: 0 0 var(--interim-primary-slot);
+      width: 100%;
+      min-width: 0;
+      height: var(--interim-primary-slot);
+      min-height: var(--interim-primary-slot);
+      max-height: var(--interim-primary-slot);
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      color: rgba(229, 231, 235, 0.88);
+      font-size: ${INTERIM_PRIMARY_FONT_SCALE}em;
+      font-weight: 500;
+      line-height: ${INTERIM_PRIMARY_LINE_HEIGHT};
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .caption-interim.has-translation
+      > .caption-interim-primary {
+      color: rgba(243, 244, 246, 0.94);
+      font-weight: 550;
+    }
+
+    .caption-interim > .caption-interim-original {
+      display: block;
+      flex: 0 0 var(--interim-original-slot);
+      width: 100%;
+      min-width: 0;
+      height: var(--interim-original-slot);
+      min-height: var(--interim-original-slot);
+      max-height: var(--interim-original-slot);
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      color: rgba(209, 213, 219, 0.66);
+      font-size: ${INTERIM_ORIGINAL_FONT_SCALE}em;
+      font-weight: 450;
+      line-height: ${INTERIM_ORIGINAL_LINE_HEIGHT};
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
     .translation-badge {
+      position: absolute;
+      top: 6px;
+      right: 8px;
+      z-index: 1;
       display: none;
       margin: 0;
       padding: 3px 7px;
       border: 1px solid rgba(253, 230, 138, 0.5);
       border-radius: 999px;
       color: #fef3c7;
-      background: rgba(120, 53, 15, 0.86);
+      background: rgba(120, 53, 15, 0.9);
       font-size: 11px;
+      font-style: normal;
       font-weight: 700;
       line-height: 1;
+      white-space: nowrap;
       text-shadow: none;
+      pointer-events: none;
     }
 
     .translation-badge.is-visible {
