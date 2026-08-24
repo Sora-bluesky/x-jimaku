@@ -169,7 +169,6 @@ export interface DiagnosticsResultMessage {
 
 export interface OffStartMessage {
   t: "OFF_START";
-  streamId: string;
   requestId: string;
   settings: Settings;
 }
@@ -188,6 +187,31 @@ export interface OffLevelMessage {
   t: "OFF_LEVEL";
   rms: number;
   at: string;
+}
+
+export interface CsStartTapMessage {
+  t: "CS_START_TAP";
+  requestId: string;
+  settings?: Settings;
+}
+
+export interface CsStopTapMessage {
+  t: "CS_STOP_TAP";
+  requestId: string;
+}
+
+export interface CsTapStateMessage {
+  t: "CS_TAP_STATE";
+  requestId: string;
+  state: "tapping" | "stopped" | "error";
+  detail?: string;
+}
+
+export interface CsPcmMessage {
+  t: "CS_PCM";
+  requestId: string;
+  seq: number;
+  b64: string;
 }
 
 export interface RecognitionPayload {
@@ -269,23 +293,32 @@ export type M0Message =
   | WorkerProbeRequest
   | WorkerProbeResultMessage;
 
+export type ContentPortMessage =
+  | CsStartTapMessage
+  | CsStopTapMessage
+  | CsTapStateMessage
+  | CsPcmMessage;
+
 export type CapturePortMessage =
   | OffStartMessage
   | OffStopMessage
   | OffStateMessage
   | OffLevelMessage
-  | OffRecognitionMessage;
+  | OffRecognitionMessage
+  | CsPcmMessage;
 
 export type OptionsPortMessage =
   | OffStateMessage
   | OffLevelMessage
-  | SwRecognitionMessage;
+  | SwRecognitionMessage
+  | CsTapStateMessage;
 
 export type M1Message =
   | M0Message
   | RunDiagnosticsMessage
   | DiagnosticsResultMessage
   | CapturePortMessage
+  | ContentPortMessage
   | SwRecognitionMessage;
 
 export function nowIso(): string {
@@ -451,12 +484,12 @@ export function isM1Message(
 
     case "OFF_START":
       return (
-        typeof value.streamId === "string" &&
         typeof value.requestId === "string" &&
         isSettings(value.settings)
       );
 
     case "OFF_STOP":
+    case "CS_STOP_TAP":
       return typeof value.requestId === "string";
 
     case "OFF_STATE":
@@ -468,6 +501,38 @@ export function isM1Message(
         Number.isFinite(value.rms) &&
         value.rms >= 0 &&
         typeof value.at === "string"
+      );
+
+    case "CS_START_TAP":
+      return (
+        typeof value.requestId === "string" &&
+        (
+          value.settings === undefined ||
+          isSettings(value.settings)
+        )
+      );
+
+    case "CS_TAP_STATE":
+      return (
+        typeof value.requestId === "string" &&
+        (
+          value.state === "tapping" ||
+          value.state === "stopped" ||
+          value.state === "error"
+        ) &&
+        (
+          value.detail === undefined ||
+          typeof value.detail === "string"
+        )
+      );
+
+    case "CS_PCM":
+      return (
+        typeof value.requestId === "string" &&
+        typeof value.seq === "number" &&
+        Number.isSafeInteger(value.seq) &&
+        value.seq >= 0 &&
+        typeof value.b64 === "string"
       );
 
     case "OFF_RECOG":
@@ -496,7 +561,19 @@ export function isCapturePortMessage(
     isMessageOfType(value, "OFF_STOP") ||
     isMessageOfType(value, "OFF_STATE") ||
     isMessageOfType(value, "OFF_LEVEL") ||
-    isMessageOfType(value, "OFF_RECOG")
+    isMessageOfType(value, "OFF_RECOG") ||
+    isMessageOfType(value, "CS_PCM")
+  );
+}
+
+export function isContentPortMessage(
+  value: unknown,
+): value is ContentPortMessage {
+  return (
+    isMessageOfType(value, "CS_START_TAP") ||
+    isMessageOfType(value, "CS_STOP_TAP") ||
+    isMessageOfType(value, "CS_TAP_STATE") ||
+    isMessageOfType(value, "CS_PCM")
   );
 }
 

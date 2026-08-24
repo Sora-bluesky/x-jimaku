@@ -25,7 +25,8 @@ export default defineConfig({
     },
   },
 
-  // pcm-worklet.js is emitted by the main ESM pass.
-  // AudioWorklet.addModule() loads module scripts, and the
-  // worklet entry has no imports from extension application code.
+  // The main ESM pass emits the import-free
+  // src/offscreen/worklet/pcm-worklet.ts entry as
+  // dist/pcm-worklet.js. The manifest exposes that
+  // module to the supported web-page origins.
 });

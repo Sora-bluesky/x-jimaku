@@ -20,7 +20,6 @@
   },
   "options_page": "options.html",
   "permissions": [
-    "tabCapture",
     "offscreen",
     "storage",
     "activeTab",
@@ -35,7 +34,8 @@
     {
       "matches": [
         "https://x.com/*",
-        "https://twitter.com/*"
+        "https://twitter.com/*",
+        "http://127.0.0.1:8123/*"
       ],
       "js": [
         "content.js"
@@ -47,11 +47,13 @@
   "web_accessible_resources": [
     {
       "resources": [
-        "ort/*"
+        "ort/*",
+        "pcm-worklet.js"
       ],
       "matches": [
         "https://x.com/*",
-        "https://twitter.com/*"
+        "https://twitter.com/*",
+        "http://127.0.0.1:8123/*"
       ]
     }
   ],
