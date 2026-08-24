@@ -9,7 +9,7 @@ A Chrome extension (Manifest V3) that overlays live Japanese subtitles on videos
 ## Features
 
 - Real-time Japanese subtitles overlaid under X (Twitter) videos
-- Speech recognition and translation run entirely on-device — no audio or text ever leaves your machine
+- Speech recognition and translation run entirely on-device, so no audio or text ever leaves your machine
 - No tab-share indicator, and tab audio keeps playing normally, because the extension taps the video element directly instead of using tab capture
 - Toggle per video from the toolbar icon or a keyboard shortcut (Ctrl+Shift+9)
 - Four Whisper model sizes (tiny / base / small / turbo) to trade off speed and accuracy
@@ -17,7 +17,7 @@ A Chrome extension (Manifest V3) that overlays live Japanese subtitles on videos
 
 ## How it works
 
-The content script grabs the target `<video>` element's audio with `captureStream()`, resamples it to 16kHz PCM, and streams it to an offscreen document running Whisper (via transformers.js) for local English speech recognition — on WebGPU where available, falling back to WASM otherwise. Recognized text is translated from English to Japanese with Chrome's built-in Translator API, which also runs on-device. The result is drawn as an overlay under the video: Japanese on top, the smaller English source line below it, with in-progress lines re-translated roughly every two seconds as more audio comes in.
+The content script grabs the target `<video>` element's audio with `captureStream()`, resamples it to 16kHz PCM, and streams it to an offscreen document running Whisper (via transformers.js) for local English speech recognition, using WebGPU where available and falling back to WASM otherwise. Recognized text is translated from English to Japanese with Chrome's built-in Translator API, which also runs on-device. The result is drawn as an overlay under the video: Japanese on top, the smaller English source line below it, with in-progress lines re-translated roughly every two seconds as more audio comes in.
 
 ```
 video element --captureStream()--> 16kHz PCM
@@ -54,7 +54,7 @@ Audio and recognized text never leave your device. Whisper speech recognition ru
 
 - Chrome 138 or later (required for the built-in Translator API)
 - WebGPU is recommended (e.g. an NVIDIA GPU) for reasonable speed; without it the extension falls back to WASM, which is noticeably slower
-- Translation normally needs no setup — Chrome fetches the language pack automatically. If translation doesn't appear, check the diagnostics on the options page.
+- Translation normally needs no setup: Chrome fetches the language pack automatically. If translation doesn't appear, check the diagnostics on the options page.
 
 ## Tips
 
