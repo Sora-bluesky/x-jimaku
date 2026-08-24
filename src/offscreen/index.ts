@@ -555,6 +555,27 @@ async function handleCaptureStart(
           });
         },
 
+        onInterimTranslated(line, ja) {
+          if (
+            activeTranslationEngine !==
+              translationEngine ||
+            activeTranslationRequestId !==
+              requestId ||
+            requestedStopIds.has(requestId)
+          ) {
+            return;
+          }
+
+          postToBackground({
+            t: "OFF_RECOG",
+            id: line.id,
+            text: line.text,
+            final: false,
+            at: line.at,
+            ja,
+          });
+        },
+
         onPathChanged(path) {
           if (
             activeTranslationEngine !==
@@ -1028,10 +1049,7 @@ function postRecognition(
     at: line.at,
   });
 
-  if (
-    !line.final ||
-    line.text.trim() === ""
-  ) {
+  if (line.text.trim() === "") {
     return;
   }
 
@@ -1044,10 +1062,20 @@ function postRecognition(
     return;
   }
 
-  activeTranslationEngine?.enqueue({
+  if (line.final) {
+    activeTranslationEngine?.enqueue({
+      id: line.id,
+      text: line.text,
+      final: true,
+      at: line.at,
+    });
+    return;
+  }
+
+  activeTranslationEngine?.submitInterim({
     id: line.id,
     text: line.text,
-    final: true,
+    final: false,
     at: line.at,
   });
 }
