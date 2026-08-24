@@ -87,6 +87,9 @@ export class CaptionOverlay {
     | null = null;
   private progress: number | undefined;
   private highestFinalId: number | null = null;
+  private highestShownFinalId:
+    | number
+    | null = null;
   private finalId: number | null = null;
   private finalEnglishText = "";
   private finalJapaneseText = "";
@@ -302,6 +305,7 @@ export class CaptionOverlay {
     this.translationPath = path;
     this.updateTranslationBadge();
     this.renderFinalCaption();
+    this.syncFinalFadeAfterRender();
     this.renderInterimCaption();
     this.updateLayout();
   }
@@ -375,19 +379,19 @@ export class CaptionOverlay {
     text: string,
     ja: string,
   ): void {
-    const highestFinalId =
-      this.highestFinalId;
+    const highestShownFinalId =
+      this.highestShownFinalId;
 
     if (
-      highestFinalId !== null &&
-      line.id < highestFinalId
+      highestShownFinalId !== null &&
+      line.id < highestShownFinalId
     ) {
       this.refreshFinalFadeIfVisible();
       return;
     }
 
     if (
-      highestFinalId === line.id &&
+      highestShownFinalId === line.id &&
       this.finalId !== line.id
     ) {
       return;
@@ -398,15 +402,35 @@ export class CaptionOverlay {
       return;
     }
 
+    const incomingIsRenderable =
+      this.showOriginal ||
+      this.translationPath === "none" ||
+      ja !== "";
+
+    if (
+      this.finalId !== null &&
+      line.id < this.finalId &&
+      !incomingIsRenderable
+    ) {
+      this.refreshFinalFadeIfVisible();
+      return;
+    }
+
     const isNewFinal =
-      highestFinalId === null ||
-      line.id > highestFinalId;
+      this.finalId !== line.id;
 
     this.captionBarEnabled = true;
     this.cancelFinalFade();
 
+    this.highestFinalId =
+      this.highestFinalId === null
+        ? line.id
+        : Math.max(
+            this.highestFinalId,
+            line.id,
+          );
+
     if (isNewFinal) {
-      this.highestFinalId = line.id;
       this.finalId = line.id;
       this.finalEnglishText = text;
       this.finalJapaneseText = "";
@@ -429,7 +453,7 @@ export class CaptionOverlay {
     }
 
     this.renderFinalCaption();
-    this.scheduleFinalFade();
+    this.syncFinalFadeAfterRender();
   }
 
   private showInterimCaption(
@@ -1255,6 +1279,26 @@ export class CaptionOverlay {
     );
   }
 
+  private syncFinalFadeAfterRender(): void {
+    if (
+      this.finalId === null ||
+      !this.hasFinalCaption()
+    ) {
+      this.cancelFinalFade();
+      return;
+    }
+
+    this.highestShownFinalId =
+      this.highestShownFinalId === null
+        ? this.finalId
+        : Math.max(
+            this.highestShownFinalId,
+            this.finalId,
+          );
+
+    this.scheduleFinalFade();
+  }
+
   private refreshFinalFadeIfVisible(): void {
     if (
       this.finalId === null ||
@@ -1271,6 +1315,7 @@ export class CaptionOverlay {
     if (
       this.destroyed ||
       this.finalId === null ||
+      !this.hasFinalCaption() ||
       this.finalFadeTimerId !== null ||
       this.finalRemovalTimerId !== null
     ) {
