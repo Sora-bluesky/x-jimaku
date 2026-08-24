@@ -6,6 +6,7 @@ import {
   toProbeError,
   type ContentScriptProbeResultMessage,
   type CsPcmMessage,
+  type CsPongMessage,
   type CsTapStateMessage,
   type CsTranslateMessage,
   type CsTranslateResultMessage,
@@ -34,15 +35,25 @@ type TranslatorScope = typeof globalThis & {
   Translator?: TranslatorFactory;
 };
 
+type ContentInstanceWindow = Window & {
+  __xJimakuContentScriptVersion__?:
+    string;
+};
+
 const CONTENT_PORT_NAME = "content";
 const INITIAL_RECONNECT_DELAY_MS = 100;
 const MAX_RECONNECT_DELAY_MS = 1_000;
 const ERROR_CHIP_VISIBLE_MS = 2_500;
+const TRANSLATOR_CREATE_WAIT_MS = 8_000;
+const CONTENT_INSTANCE_VERSION =
+  chrome.runtime.getManifest().version;
 
-let backgroundPort: chrome.runtime.Port | null =
-  null;
+let backgroundPort:
+  | chrome.runtime.Port
+  | null = null;
 let reconnectTimerId: number | null = null;
-let reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
+let reconnectDelayMs =
+  INITIAL_RECONNECT_DELAY_MS;
 let activeTap: AudioTap | null = null;
 let tapOperationTail: Promise<void> =
   Promise.resolve();
@@ -62,10 +73,12 @@ let contentTranslatorGeneration = 0;
 let contentSessionRequestId:
   | string
   | null = null;
-let captionOverlay: CaptionOverlay | null =
-  null;
-let overlayDestroyTimerId: number | null =
-  null;
+let captionOverlay:
+  | CaptionOverlay
+  | null = null;
+let overlayDestroyTimerId:
+  | number
+  | null = null;
 let lastCaptureStatus: CaptureStatus =
   "idle";
 let activeTranslationPath:
@@ -74,61 +87,84 @@ let activeTranslationPath:
 let activeShowOriginal =
   DEFAULT_SETTINGS.showOriginal;
 
-console.log("[cs]", "content script loaded", {
-  url: location.href,
-  topLevel: window === window.top,
-});
+const instanceWindow =
+  window as ContentInstanceWindow;
 
-connectBackgroundPort();
-void runInitialProbe();
+if (
+  instanceWindow
+    .__xJimakuContentScriptVersion__ !==
+  CONTENT_INSTANCE_VERSION
+) {
+  instanceWindow
+    .__xJimakuContentScriptVersion__ =
+    CONTENT_INSTANCE_VERSION;
+  initializeContentScript();
+} else {
+  console.info(
+    "[cs]",
+    "duplicate content-script injection ignored",
+  );
+}
 
-chrome.runtime.onMessage.addListener(
-  (
-    message: unknown,
-    _sender,
-    sendResponse: (
-      response:
-        | ContentScriptProbeResultMessage
-        | ProbeFailureMessage,
-    ) => void,
-  ): boolean => {
-    if (!isMessageOfType(message, "PROBE")) {
-      return false;
-    }
+function initializeContentScript(): void {
+  console.log("[cs]", "content script loaded", {
+    url: location.href,
+    topLevel: window === window.top,
+    version: CONTENT_INSTANCE_VERSION,
+  });
 
-    console.log(
-      "[cs]",
-      "probe request received",
-      message.requestId,
-    );
+  connectBackgroundPort();
+  void runInitialProbe();
 
-    void probeTranslator()
-      .then((result) => {
-        const response:
-          ContentScriptProbeResultMessage = {
+  chrome.runtime.onMessage.addListener(
+    (
+      message: unknown,
+      _sender,
+      sendResponse: (
+        response:
+          | ContentScriptProbeResultMessage
+          | ProbeFailureMessage
+          | CsPongMessage,
+      ) => void,
+    ): boolean => {
+      if (
+        isMessageOfType(
+          message,
+          "CS_PING",
+        )
+      ) {
+        sendResponse({
+          t: "CS_PONG",
+        });
+        return false;
+      }
+
+      if (!isMessageOfType(message, "PROBE")) {
+        return false;
+      }
+
+      void probeTranslator()
+        .then((result) => {
+          sendResponse({
             t: "CS_PROBE_RESULT",
             requestId: message.requestId,
             result,
-          };
-
-        console.log("[cs]", "probe complete", result);
-        sendResponse(response);
-      })
-      .catch((error: unknown) => {
-        console.error("[cs]", "probe failed", error);
-
-        sendResponse({
-          t: "PROBE_ERROR",
-          requestId: message.requestId,
-          source: "content-script",
-          error: toProbeError(error),
-          at: nowIso(),
+          });
+        })
+        .catch((error: unknown) => {
+          sendResponse({
+            t: "PROBE_ERROR",
+            requestId: message.requestId,
+            source: "content-script",
+            error: toProbeError(error),
+            at: nowIso(),
+          });
         });
-      });
 
-    return true;
-  },
-);
+      return true;
+    },
+  );
+}
 
 function connectBackgroundPort(): void {
   if (backgroundPort !== null) {
@@ -136,7 +172,9 @@ function connectBackgroundPort(): void {
   }
 
   if (reconnectTimerId !== null) {
-    globalThis.clearTimeout(reconnectTimerId);
+    globalThis.clearTimeout(
+      reconnectTimerId,
+    );
     reconnectTimerId = null;
   }
 
@@ -157,24 +195,7 @@ function connectBackgroundPort(): void {
             "CS_START_TAP",
           )
         ) {
-          contentSessionRequestId =
-            message.requestId;
-          resetContentTranslator();
-          activeTranslationPath = null;
-          activeShowOriginal =
-            message.settings?.showOriginal ??
-            DEFAULT_SETTINGS.showOriginal;
-          lastCaptureStatus = "starting";
-
-          destroyOverlay();
-
-          const overlay = ensureOverlay();
-          overlay.setTranslationPath(null);
-          overlay.setStatus("loadingModel");
-
-          void enqueueTapOperation(() =>
-            startTap(message.requestId),
-          );
+          handleStartTapMessage(message);
           return;
         }
 
@@ -322,11 +343,6 @@ function connectBackgroundPort(): void {
 
       scheduleReconnect();
     });
-
-    console.log(
-      "[cs]",
-      "background port connected",
-    );
   } catch (error) {
     console.warn(
       "[cs]",
@@ -335,6 +351,58 @@ function connectBackgroundPort(): void {
     );
     scheduleReconnect();
   }
+}
+
+function handleStartTapMessage(
+  message: Extract<
+    import("../shared/messages").M1Message,
+    { t: "CS_START_TAP" }
+  >,
+): void {
+  activeShowOriginal =
+    message.settings?.showOriginal ??
+    DEFAULT_SETTINGS.showOriginal;
+
+  if (
+    contentSessionRequestId ===
+      message.requestId &&
+    activeTap?.getRequestId() ===
+      message.requestId
+  ) {
+    lastCaptureStatus = "starting";
+    cancelOverlayDestroy();
+
+    const overlay = ensureOverlay();
+    overlay.setTranslationPath(
+      activeTranslationPath,
+    );
+    overlay.setStatus("loadingModel");
+
+    postTapState(
+      message.requestId,
+      "tapping",
+      activeTap.isSuspended()
+        ? "audio-context-suspended"
+        : "already-tapping",
+    );
+    return;
+  }
+
+  contentSessionRequestId =
+    message.requestId;
+  resetContentTranslator();
+  activeTranslationPath = null;
+  lastCaptureStatus = "starting";
+
+  destroyOverlay();
+
+  const overlay = ensureOverlay();
+  overlay.setTranslationPath(null);
+  overlay.setStatus("loadingModel");
+
+  void enqueueTapOperation(() =>
+    startTap(message.requestId),
+  );
 }
 
 function scheduleReconnect(): void {
@@ -539,7 +607,25 @@ async function ensureContentTranslator(
       | null;
 
     try {
-      translator = await createPromise;
+      translator =
+        await waitWithTimeout(
+          createPromise,
+          TRANSLATOR_CREATE_WAIT_MS,
+          "Content Translator creation timed out",
+        );
+    } catch (error) {
+      if (
+        contentTranslatorCreatePromise ===
+          createPromise
+      ) {
+        contentTranslatorCreatePromise = null;
+        contentTranslatorCreateGeneration =
+          null;
+        contentTranslatorCreateAttempted =
+          true;
+      }
+
+      throw error;
     } finally {
       if (
         contentTranslatorCreatePromise ===
@@ -683,13 +769,11 @@ function destroyContentTranslator(): void {
   const translator = contentTranslator;
   contentTranslator = null;
 
-  if (translator === null) {
-    return;
+  if (translator !== null) {
+    destroyContentTranslatorInstance(
+      translator,
+    );
   }
-
-  destroyContentTranslatorInstance(
-    translator,
-  );
 }
 
 function destroyContentTranslatorInstance(
@@ -826,11 +910,6 @@ async function startTap(
       "tapping",
       detail,
     );
-
-    console.log("[tap]", "audio tap started", {
-      requestId,
-      detail,
-    });
   } catch (error) {
     if (activeTap === tap) {
       activeTap = null;
@@ -842,12 +921,6 @@ async function startTap(
       contentSessionRequestId = null;
       resetContentTranslator();
     }
-
-    console.error(
-      "[tap]",
-      "audio tap start failed",
-      error,
-    );
 
     showOverlayError();
 
@@ -887,18 +960,7 @@ async function stopTap(
       "stopped",
       detail,
     );
-
-    console.log("[tap]", "audio tap stopped", {
-      requestId,
-      detail,
-    });
   } catch (error) {
-    console.error(
-      "[tap]",
-      "audio tap cleanup failed",
-      error,
-    );
-
     showOverlayError();
 
     postTapState(
@@ -1075,31 +1137,27 @@ async function runInitialProbe(): Promise<void> {
     result,
   };
 
-  console.log(
-    "[cs]",
-    "initial Translator probe complete",
-    result,
-  );
-
   try {
-    const response = (await chrome.runtime.sendMessage(
-      message,
-    )) as unknown;
+    const response =
+      (await chrome.runtime.sendMessage(
+        message,
+      )) as unknown;
 
     if (
-      isMessageOfType(response, "PROBE_STORED") &&
+      isMessageOfType(
+        response,
+        "PROBE_STORED",
+      ) &&
       response.requestId === requestId
     ) {
-      console.log(
-        "[cs]",
-        "initial probe stored",
-        response,
-      );
       return;
     }
 
     if (
-      isMessageOfType(response, "PROBE_ERROR") &&
+      isMessageOfType(
+        response,
+        "PROBE_ERROR",
+      ) &&
       response.requestId === requestId
     ) {
       console.error(
@@ -1107,14 +1165,7 @@ async function runInitialProbe(): Promise<void> {
         "background rejected initial probe",
         response.error,
       );
-      return;
     }
-
-    console.warn(
-      "[cs]",
-      "background returned an unexpected response",
-      response,
-    );
   } catch (error) {
     console.error(
       "[cs]",
@@ -1179,4 +1230,51 @@ async function probeTranslator(): Promise<TranslatorProbeResult> {
       error: toProbeError(error),
     };
   }
+}
+
+function waitWithTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  message: string,
+): Promise<T> {
+  return new Promise<T>(
+    (resolve, reject) => {
+      let settled = false;
+
+      const timerId = self.setTimeout(
+        () => {
+          if (settled) {
+            return;
+          }
+
+          settled = true;
+          const error = new Error(message);
+          error.name = "TimeoutError";
+          reject(error);
+        },
+        timeoutMs,
+      );
+
+      void promise.then(
+        (value) => {
+          if (settled) {
+            return;
+          }
+
+          settled = true;
+          globalThis.clearTimeout(timerId);
+          resolve(value);
+        },
+        (error: unknown) => {
+          if (settled) {
+            return;
+          }
+
+          settled = true;
+          globalThis.clearTimeout(timerId);
+          reject(error);
+        },
+      );
+    },
+  );
 }

@@ -12,6 +12,7 @@ import {
   type M1Message,
   type OffscreenProbeResult,
   type OffscreenProbeResultMessage,
+  type OffStatusMessage,
   type ProbeFailureMessage,
   type TranslatorProbeResult,
   type TranslationPath,
@@ -23,6 +24,7 @@ import {
 import {
   createCaptureState,
   type CaptureState,
+  type CaptureStatus,
 } from "../shared/state";
 import type {
   Settings,
@@ -81,10 +83,12 @@ const PCM_GAP_LOG_INTERVAL_MS = 5_000;
 
 const audioCapture = new AudioCapture();
 
-let backgroundPort: chrome.runtime.Port | null =
-  null;
+let backgroundPort:
+  | chrome.runtime.Port
+  | null = null;
 let reconnectTimerId: number | null = null;
-let reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
+let reconnectDelayMs =
+  INITIAL_RECONNECT_DELAY_MS;
 let localCaptureState =
   createCaptureState("idle");
 let latestRms = 0;
@@ -140,35 +144,15 @@ chrome.runtime.onMessage.addListener(
       return false;
     }
 
-    console.log(
-      "[offscreen]",
-      "probe request received",
-      message.requestId,
-    );
-
     void runOffscreenProbe(message.requestId)
       .then((result) => {
-        const response:
-          OffscreenProbeResultMessage = {
-            t: "OFFSCREEN_PROBE_RESULT",
-            requestId: message.requestId,
-            result,
-          };
-
-        console.log(
-          "[offscreen]",
-          "probe complete",
+        sendResponse({
+          t: "OFFSCREEN_PROBE_RESULT",
+          requestId: message.requestId,
           result,
-        );
-        sendResponse(response);
+        });
       })
       .catch((error: unknown) => {
-        console.error(
-          "[offscreen]",
-          "probe failed",
-          error,
-        );
-
         sendResponse({
           t: "PROBE_ERROR",
           requestId: message.requestId,
@@ -190,7 +174,9 @@ function connectBackgroundPort(): void {
   }
 
   if (reconnectTimerId !== null) {
-    globalThis.clearTimeout(reconnectTimerId);
+    globalThis.clearTimeout(
+      reconnectTimerId,
+    );
     reconnectTimerId = null;
   }
 
@@ -215,6 +201,18 @@ function connectBackgroundPort(): void {
         }
 
         if (
+          isMessageOfType(
+            message,
+            "OFF_QUERY",
+          )
+        ) {
+          postOffscreenStatus(
+            message.queryId,
+          );
+          return;
+        }
+
+        if (
           isMessageOfType(message, "CS_PCM")
         ) {
           handlePcm(message);
@@ -234,7 +232,10 @@ function connectBackgroundPort(): void {
         }
 
         if (
-          isMessageOfType(message, "OFF_START")
+          isMessageOfType(
+            message,
+            "OFF_START",
+          )
         ) {
           requestedStopIds.delete(
             message.requestId,
@@ -250,7 +251,10 @@ function connectBackgroundPort(): void {
         }
 
         if (
-          isMessageOfType(message, "OFF_STOP")
+          isMessageOfType(
+            message,
+            "OFF_STOP",
+          )
         ) {
           requestedStopIds.add(
             message.requestId,
@@ -276,12 +280,6 @@ function connectBackgroundPort(): void {
       const disconnectError =
         chrome.runtime.lastError?.message;
 
-      console.warn(
-        "[offscreen]",
-        "background port disconnected",
-        disconnectError ?? "",
-      );
-
       rejectPendingContentTranslations(
         undefined,
         new Error(
@@ -291,11 +289,6 @@ function connectBackgroundPort(): void {
       );
       scheduleReconnect();
     });
-
-    console.log(
-      "[offscreen]",
-      "background port connected",
-    );
 
     postState();
     postLevel();
@@ -308,6 +301,43 @@ function connectBackgroundPort(): void {
     );
     scheduleReconnect();
   }
+}
+
+function postOffscreenStatus(
+  queryId: string,
+): void {
+  const message: OffStatusMessage = {
+    t: "OFF_STATUS",
+    queryId,
+    state: localCaptureState,
+    sessionActive:
+      isLocalCaptureSessionActive(),
+  };
+
+  postToBackground(message);
+}
+
+function isLocalCaptureSessionActive(): boolean {
+  return (
+    isCaptureActiveStatus(
+      localCaptureState.status,
+    ) &&
+    localCaptureState.requestId !==
+      undefined &&
+    activePcmRequestId ===
+      localCaptureState.requestId &&
+    audioCapture.isActive()
+  );
+}
+
+function isCaptureActiveStatus(
+  status: CaptureStatus,
+): boolean {
+  return (
+    status === "starting" ||
+    status === "loadingModel" ||
+    status === "running"
+  );
 }
 
 function scheduleReconnect(): void {
@@ -426,8 +456,7 @@ function detectPcmSequenceGap(
   receivedSequence: number,
 ): void {
   if (
-    receivedSequence !==
-    expectedPcmSequence
+    receivedSequence !== expectedPcmSequence
   ) {
     const now = performance.now();
 
@@ -458,12 +487,10 @@ async function handleCaptureStart(
 ): Promise<void> {
   if (audioCapture.isActive()) {
     if (
-      localCaptureState.requestId === requestId &&
-      (
-        localCaptureState.status === "starting" ||
-        localCaptureState.status ===
-          "loadingModel" ||
-        localCaptureState.status === "running"
+      localCaptureState.requestId ===
+        requestId &&
+      isCaptureActiveStatus(
+        localCaptureState.status,
       )
     ) {
       postState();
@@ -597,15 +624,22 @@ async function handleCaptureStart(
       requestId;
     activeTranslationPath = null;
 
-    await translationEngine.initialize();
-
-    if (
-      requestedStopIds.has(requestId) ||
-      activeTranslationEngine !==
-        translationEngine
-    ) {
-      return;
-    }
+    void translationEngine
+      .initialize()
+      .catch((error: unknown) => {
+        if (
+          activeTranslationEngine ===
+            translationEngine &&
+          activeTranslationRequestId ===
+            requestId
+        ) {
+          console.warn(
+            "[translate]",
+            "translation initialization failed; recognition continues without blocking",
+            error,
+          );
+        }
+      });
 
     const ortBaseUrl =
       chrome.runtime.getURL("ort/");
@@ -620,7 +654,8 @@ async function handleCaptureStart(
         {
           onProgress(message) {
             if (
-              activeWhisperSession !== session ||
+              activeWhisperSession !==
+                session ||
               requestedStopIds.has(requestId)
             ) {
               return;
@@ -655,7 +690,8 @@ async function handleCaptureStart(
 
           onFatal(error) {
             if (
-              activeWhisperSession !== session
+              activeWhisperSession !==
+                session
             ) {
               return;
             }
@@ -693,12 +729,6 @@ async function handleCaptureStart(
       ) {
         throw webGpuError;
       }
-
-      console.warn(
-        "[offscreen]",
-        "WebGPU initialization failed; retrying in a fresh worker with WASM",
-        webGpuError,
-      );
 
       session.terminate();
 
@@ -786,20 +816,6 @@ async function handleCaptureStart(
         progress: 100,
       }),
     );
-
-    console.log(
-      "[offscreen]",
-      "recognition running",
-      {
-        requestId,
-        model,
-        device,
-        sourceLang:
-          settings.sourceLang,
-        translationPath:
-          activeTranslationPath,
-      },
-    );
   } catch (error) {
     if (
       requestedStopIds.has(requestId) ||
@@ -807,12 +823,6 @@ async function handleCaptureStart(
     ) {
       return;
     }
-
-    console.error(
-      "[offscreen]",
-      "capture start failed",
-      error,
-    );
 
     terminateRecognition(requestId);
     activePcmRequestId = null;
@@ -880,19 +890,7 @@ async function handleCaptureStop(
         requestId,
       }),
     );
-
-    console.log(
-      "[offscreen]",
-      "capture stopped",
-      { requestId },
-    );
   } catch (error) {
-    console.error(
-      "[offscreen]",
-      "capture cleanup failed",
-      error,
-    );
-
     publishState(
       createCaptureState("error", {
         requestId,
@@ -1049,16 +1047,10 @@ function postRecognition(
     at: line.at,
   });
 
-  if (line.text.trim() === "") {
-    return;
-  }
-
-  if (isMostlyJapanese(line.text)) {
-    console.info(
-      "[translate]",
-      "skipped translation for Japanese recognition line",
-      { id: line.id },
-    );
+  if (
+    line.text.trim() === "" ||
+    isMostlyJapanese(line.text)
+  ) {
     return;
   }
 
@@ -1489,22 +1481,6 @@ async function runOffscreenProbe(
     probeTranslator(),
     probeWorkerWebGpu(requestId),
   ]);
-
-  console.log(
-    "[offscreen]",
-    "document WebGPU result",
-    documentWebGpu,
-  );
-  console.log(
-    "[offscreen]",
-    "worker WebGPU result",
-    workerWebGpu,
-  );
-  console.log(
-    "[offscreen]",
-    "Translator result",
-    translator,
-  );
 
   return {
     context: "offscreen-document",

@@ -5,10 +5,13 @@ import {
   isMessageOfType,
   isM1Message,
   isProbeSnapshot,
+  isSettings,
   nowIso,
   toProbeError,
   type ContentScriptProbeResultMessage,
   type CsPcmMessage,
+  type CsPingMessage,
+  type CsPongMessage,
   type CsStartTapMessage,
   type CsStopTapMessage,
   type CsTapStateMessage,
@@ -16,12 +19,14 @@ import {
   type CsTranslateResultMessage,
   type DiagnosticsResultMessage,
   type M1Message,
+  type OffQueryMessage,
   type OffRecognitionMessage,
   type OffStartMessage,
-  type OffscreenProbeResultMessage,
   type OffStateMessage,
+  type OffStatusMessage,
   type OffStopMessage,
   type OffTranslationStateMessage,
+  type OffscreenProbeResultMessage,
   type OptionsPageProbeResultMessage,
   type ProbeFailureMessage,
   type ProbeRequest,
@@ -33,6 +38,7 @@ import {
 } from "../shared/messages";
 import {
   readSettings,
+  type Settings,
 } from "../shared/settings";
 import {
   CAPTURE_STATE_STORAGE_KEY,
@@ -47,9 +53,12 @@ import {
 
 const OFFSCREEN_DOCUMENT_PATH =
   "offscreen.html";
+const CONTENT_SCRIPT_PATH = "content.js";
 const OFFSCREEN_PORT_NAME = "offscreen";
 const CONTENT_PORT_NAME = "content";
 const OPTIONS_PORT_NAME = "options";
+const CAPTURE_SESSION_STORAGE_KEY =
+  "capture.session" as const;
 const PORT_WAIT_MS = 2_000;
 const TRANSIENT_ERROR_MS = 2_500;
 const MAX_RECOGNITION_LINES = 50;
@@ -59,9 +68,22 @@ type SnapshotPatch = Partial<
 >;
 
 interface PortWaiter {
-  resolve: (port: chrome.runtime.Port) => void;
-  reject: (error: Error) => void;
+  resolve(port: chrome.runtime.Port): void;
+  reject(error: Error): void;
   timerId: number;
+}
+
+interface OffscreenStatusWaiter {
+  port: chrome.runtime.Port;
+  resolve(message: OffStatusMessage): void;
+  reject(error: Error): void;
+  timerId: number;
+}
+
+interface PersistedCaptureSession {
+  requestId: string;
+  tabId: number;
+  settings: Settings;
 }
 
 const optionsPorts =
@@ -70,8 +92,12 @@ const contentPorts =
   new Map<number, chrome.runtime.Port>();
 const contentPortWaiters =
   new Map<number, PortWaiter[]>();
+const contentInjectionOperations =
+  new Map<number, Promise<void>>();
 const offscreenPortWaiters: PortWaiter[] =
   [];
+const offscreenStatusWaiters =
+  new Map<string, OffscreenStatusWaiter>();
 const expectedOffscreenDisconnectPorts =
   new WeakSet<chrome.runtime.Port>();
 const expectedContentDisconnectPorts =
@@ -91,8 +117,9 @@ let offscreenCloseReason = "capture-ended";
 let offscreenCloseInvocationActive = false;
 let captureState =
   createCaptureState("idle");
-let captureStateHydrated = false;
 let captureStateWriteTail: Promise<void> =
+  Promise.resolve();
+let captureSessionWriteTail: Promise<void> =
   Promise.resolve();
 let badgeWriteTail: Promise<void> =
   Promise.resolve();
@@ -111,6 +138,13 @@ let offscreenStartRequestId:
 let contentStartRequestId:
   | string
   | null = null;
+let persistedCaptureSession:
+  | PersistedCaptureSession
+  | null = null;
+let recoveryPending = false;
+let recoveryOperation:
+  | Promise<void>
+  | null = null;
 let transientErrorTimerId:
   | number
   | null = null;
@@ -122,6 +156,12 @@ console.log("[bg]", "service worker started");
 
 void stateInitialization.then(() => {
   queueBadgeUpdate(captureState);
+
+  if (recoveryPending) {
+    void reconcileRecoveredCapture(
+      "service-worker-start",
+    );
+  }
 });
 
 chrome.runtime.onStartup.addListener(() => {
@@ -129,6 +169,12 @@ chrome.runtime.onStartup.addListener(() => {
 
   void stateInitialization.then(() => {
     queueBadgeUpdate(captureState);
+
+    if (recoveryPending) {
+      void reconcileRecoveredCapture(
+        "runtime-startup",
+      );
+    }
   });
 });
 
@@ -208,16 +254,6 @@ chrome.runtime.onMessage.addListener(
       );
       return false;
     }
-
-    console.log(
-      "[bg]",
-      "received message",
-      message.t,
-      {
-        senderUrl: sender.url,
-        tabId: sender.tab?.id,
-      },
-    );
 
     if (
       isMessageOfType(
@@ -319,22 +355,12 @@ async function handleActionClick(
 ): Promise<void> {
   await stateInitialization;
 
-  console.log("[bg]", "action clicked", {
-    tabId: tab.id,
-    url: tab.url,
-    cachedState: captureState.status,
-  });
-
   if (isCaptureActive(captureState.status)) {
     requestCaptureStop("action-click");
     return;
   }
 
   if (captureState.status === "stopping") {
-    console.log(
-      "[bg]",
-      "capture stop already in progress",
-    );
     return;
   }
 
@@ -356,26 +382,125 @@ async function handleActionClick(
 }
 
 async function hydrateCaptureState(): Promise<void> {
+  let shouldWriteState = false;
+  let shouldCloseInvalidContext = false;
+
   try {
     const values =
-      await chrome.storage.session.get(
+      await chrome.storage.session.get([
         CAPTURE_STATE_STORAGE_KEY,
-      );
-    const stored =
+        CAPTURE_SESSION_STORAGE_KEY,
+      ]);
+    const storedState =
       values[CAPTURE_STATE_STORAGE_KEY];
+    const storedSession =
+      values[CAPTURE_SESSION_STORAGE_KEY];
 
-    captureState = isCaptureState(stored)
-      ? stored
+    captureState = isCaptureState(storedState)
+      ? storedState
       : createCaptureState("idle");
+    shouldWriteState =
+      !isCaptureState(storedState);
 
-    if (!isCaptureState(stored)) {
+    const restoredSession =
+      isPersistedCaptureSession(storedSession)
+        ? storedSession
+        : null;
+
+    if (
+      isCaptureActive(captureState.status) ||
+      captureState.status === "stopping"
+    ) {
+      const contexts =
+        await getOffscreenContexts();
+
+      if (contexts.length === 0) {
+        console.warn(
+          "[bg]",
+          "discarded persisted capture because the offscreen document is gone",
+          {
+            status: captureState.status,
+            requestId:
+              captureState.requestId,
+          },
+        );
+
+        captureState =
+          createCaptureState("idle");
+        persistedCaptureSession = null;
+        recoveryPending = false;
+        shouldWriteState = true;
+      } else if (
+        isCaptureActive(
+          captureState.status,
+        )
+      ) {
+        if (
+          restoredSession === null ||
+          restoredSession.requestId !==
+            captureState.requestId ||
+          restoredSession.tabId !==
+            captureState.tabId
+        ) {
+          captureState =
+            createCaptureState("error", {
+              ...(captureState.requestId ===
+              undefined
+                ? {}
+                : {
+                    requestId:
+                      captureState.requestId,
+                  }),
+              ...(captureState.tabId ===
+              undefined
+                ? {}
+                : {
+                    tabId:
+                      captureState.tabId,
+                  }),
+              error: {
+                name:
+                  "CaptureRecoveryError",
+                message:
+                  "字幕セッションの復旧情報が失われました。もう一度開始してください",
+              },
+            });
+          persistedCaptureSession = null;
+          recoveryPending = false;
+          shouldWriteState = true;
+          shouldCloseInvalidContext = true;
+        } else {
+          persistedCaptureSession =
+            restoredSession;
+          recoveryPending = true;
+        }
+      } else {
+        persistedCaptureSession =
+          restoredSession;
+      }
+    } else {
+      persistedCaptureSession = null;
+
+      if (storedSession !== undefined) {
+        void queueCaptureSessionWrite(null);
+      }
+    }
+
+    if (shouldWriteState) {
       queueCaptureStateWrite(captureState);
+    }
+
+    if (persistedCaptureSession === null) {
+      void queueCaptureSessionWrite(null);
     }
 
     console.log(
       "[bg]",
       "capture state restored",
-      captureState,
+      {
+        state: captureState,
+        recoveryPending,
+      },
     );
   } catch (error) {
     console.error(
@@ -388,11 +513,19 @@ async function hydrateCaptureState(): Promise<void> {
       createCaptureState("error", {
         error: toCaptureStateError(error),
       });
+    persistedCaptureSession = null;
+    recoveryPending = false;
     queueCaptureStateWrite(captureState);
+    void queueCaptureSessionWrite(null);
   } finally {
-    captureStateHydrated = true;
     queueBadgeUpdate(captureState);
     broadcastCaptureState();
+
+    if (shouldCloseInvalidContext) {
+      scheduleOffscreenClose(
+        "invalid-persisted-session",
+      );
+    }
   }
 }
 
@@ -401,6 +534,7 @@ function beginCaptureStart(
   requestId: string,
 ): void {
   clearTransientErrorTimer();
+  recoveryPending = false;
 
   if (captureState.status === "error") {
     moveCaptureState("idle");
@@ -415,6 +549,8 @@ function beginCaptureStart(
   localStartRequestId = requestId;
   offscreenStartRequestId = null;
   contentStartRequestId = null;
+  persistedCaptureSession = null;
+  void queueCaptureSessionWrite(null);
 
   moveCaptureState("starting", {
     requestId,
@@ -438,6 +574,20 @@ async function finishCaptureStart(
       return;
     }
 
+    const session: PersistedCaptureSession = {
+      requestId,
+      tabId,
+      settings,
+    };
+
+    persistedCaptureSession = session;
+    await queueCaptureSessionWrite(session);
+
+    if (!isCurrentActiveRequest(requestId)) {
+      return;
+    }
+
+    await assertSupportedCaptureTab(tabId);
     await ensureOffscreenDocument();
 
     if (!isCurrentActiveRequest(requestId)) {
@@ -447,7 +597,7 @@ async function finishCaptureStart(
     const [offscreen, content] =
       await Promise.all([
         waitForOffscreenPort(PORT_WAIT_MS),
-        waitForContentPort(
+        getOrInjectContentPort(
           tabId,
           PORT_WAIT_MS,
         ),
@@ -524,6 +674,8 @@ function requestCaptureStop(
     return;
   }
 
+  recoveryPending = false;
+
   const requestId =
     captureState.requestId ??
     createProbeRequestId("capture-stop");
@@ -533,12 +685,6 @@ function requestCaptureStop(
     localStartRequestId === requestId &&
     offscreenStartRequestId !== requestId &&
     contentStartRequestId !== requestId;
-
-  console.log("[bg]", "stopping capture", {
-    requestId,
-    reason,
-    startWasNotDelivered,
-  });
 
   moveCaptureState("stopping", {
     requestId,
@@ -586,6 +732,11 @@ function requestCaptureStop(
         error,
       );
     });
+
+  console.log("[bg]", "capture stop requested", {
+    requestId,
+    reason,
+  });
 }
 
 function stopDeliveredSession(
@@ -649,12 +800,6 @@ function handleContentPortConnected(
 
   contentPorts.set(tabId, port);
   resolveContentPortWaiters(tabId, port);
-
-  console.log(
-    "[bg]",
-    "content port connected",
-    { tabId },
-  );
 
   port.onMessage.addListener(
     (message: unknown) => {
@@ -724,14 +869,6 @@ function handleContentPortConnected(
     if (
       expectedContentDisconnectPorts.has(port)
     ) {
-      console.info(
-        "[bg]",
-        "superseded content port disconnected",
-        {
-          tabId,
-          detail: disconnectError ?? "",
-        },
-      );
       return;
     }
 
@@ -794,6 +931,16 @@ function handleContentPortConnected(
       postStopToContent(
         port,
         captureState.requestId,
+      );
+      return;
+    }
+
+    if (
+      recoveryPending &&
+      isCaptureActive(captureState.status)
+    ) {
+      void reconcileRecoveredCapture(
+        "content-port-reconnected",
       );
     }
   });
@@ -870,25 +1017,10 @@ function handleContentTapState(
     captureState.requestId !==
       message.requestId
   ) {
-    console.warn(
-      "[bg]",
-      "ignored stale content tap state",
-      {
-        tabId,
-        incomingRequestId:
-          message.requestId,
-        currentRequestId:
-          captureState.requestId,
-      },
-    );
     return;
   }
 
   if (message.state === "tapping") {
-    console.log("[bg]", "content tap state", {
-      requestId: message.requestId,
-      detail: message.detail,
-    });
     return;
   }
 
@@ -957,6 +1089,12 @@ function handleOffscreenPortConnected(
     expectedOffscreenDisconnectPorts.add(
       offscreenPort,
     );
+    rejectOffscreenStatusWaitersForPort(
+      offscreenPort,
+      new Error(
+        "Offscreen port was superseded",
+      ),
+    );
     offscreenPort.disconnect();
   }
 
@@ -968,10 +1106,21 @@ function handleOffscreenPortConnected(
 
   resolveOffscreenPortWaiters(port);
 
-  console.log("[bg]", "offscreen port connected");
-
   port.onMessage.addListener(
     (message: unknown) => {
+      if (
+        isMessageOfType(
+          message,
+          "OFF_STATUS",
+        )
+      ) {
+        resolveOffscreenStatusWaiter(
+          port,
+          message,
+        );
+        return;
+      }
+
       if (
         isMessageOfType(
           message,
@@ -1042,24 +1191,32 @@ function handleOffscreenPortConnected(
       offscreenPort = null;
     }
 
+    rejectOffscreenStatusWaitersForPort(
+      port,
+      new Error(
+        "Offscreen port disconnected",
+      ),
+    );
+
     const disconnectError =
       chrome.runtime.lastError?.message;
 
     if (
       expectedOffscreenDisconnectPorts.has(port)
     ) {
-      console.info(
-        "[bg]",
-        "offscreen port disconnected after document close",
-        disconnectError ?? "",
-      );
       return;
     }
 
     console.warn(
       "[bg]",
-      "offscreen port disconnected",
+      "offscreen port disconnected unexpectedly",
       disconnectError ?? "",
+    );
+
+    void stateInitialization.then(() =>
+      inspectUnexpectedOffscreenDisconnect(
+        port,
+      ),
     );
   });
 
@@ -1073,8 +1230,357 @@ function handleOffscreenPortConnected(
         port,
         captureState.requestId,
       );
+      return;
+    }
+
+    if (
+      recoveryPending &&
+      isCaptureActive(captureState.status) &&
+      offscreenPort === port
+    ) {
+      void reconcileRecoveredCapture(
+        "offscreen-port-reconnected",
+      );
     }
   });
+}
+
+async function inspectUnexpectedOffscreenDisconnect(
+  disconnectedPort: chrome.runtime.Port,
+): Promise<void> {
+  if (
+    offscreenPort !== null ||
+    !isCaptureActive(captureState.status)
+  ) {
+    return;
+  }
+
+  try {
+    const contexts =
+      await getOffscreenContexts();
+
+    if (
+      contexts.length > 0 ||
+      offscreenPort !== null ||
+      !isCaptureActive(captureState.status)
+    ) {
+      return;
+    }
+
+    failActiveCaptureUnexpectedly(
+      "字幕処理が予期せず終了しました。もう一度開始してください",
+    );
+  } catch (error) {
+    console.error(
+      "[bg]",
+      "could not verify offscreen disconnect",
+      {
+        disconnectedPort,
+        error,
+      },
+    );
+  }
+}
+
+function failActiveCaptureUnexpectedly(
+  message: string,
+): void {
+  if (!isCaptureActive(captureState.status)) {
+    return;
+  }
+
+  recoveryPending = false;
+
+  const requestId = captureState.requestId;
+  const tabId = captureState.tabId;
+
+  if (
+    requestId !== undefined &&
+    tabId !== undefined
+  ) {
+    const content = contentPorts.get(tabId);
+
+    if (content !== undefined) {
+      postStopToContent(
+        content,
+        requestId,
+      );
+    }
+
+    if (offscreenPort !== null) {
+      postStopToOffscreen(
+        offscreenPort,
+        requestId,
+      );
+    }
+  }
+
+  clearSessionTracking();
+  latestRms = 0;
+  activeTranslationState = null;
+  recognitionLines.clear();
+  broadcastLevel();
+
+  moveCaptureState("error", {
+    ...(requestId === undefined
+      ? {}
+      : { requestId }),
+    ...(tabId === undefined
+      ? {}
+      : { tabId }),
+    error: {
+      name: "CaptureInterruptedError",
+      message,
+    },
+  });
+}
+
+function reconcileRecoveredCapture(
+  reason: string,
+): Promise<void> {
+  if (recoveryOperation !== null) {
+    return recoveryOperation;
+  }
+
+  const operation =
+    performRecoveredCaptureReconciliation(
+      reason,
+    )
+      .catch((error: unknown) => {
+        console.error(
+          "[bg]",
+          "capture reconciliation failed",
+          error,
+        );
+
+        if (
+          recoveryPending &&
+          isCaptureActive(
+            captureState.status,
+          )
+        ) {
+          failActiveCaptureUnexpectedly(
+            "字幕セッションを復旧できませんでした。もう一度開始してください",
+          );
+        }
+      })
+      .finally(() => {
+        if (recoveryOperation === operation) {
+          recoveryOperation = null;
+        }
+      });
+
+  recoveryOperation = operation;
+  return operation;
+}
+
+async function performRecoveredCaptureReconciliation(
+  reason: string,
+): Promise<void> {
+  if (
+    !recoveryPending ||
+    !isCaptureActive(captureState.status)
+  ) {
+    return;
+  }
+
+  const requestId = captureState.requestId;
+  const tabId = captureState.tabId;
+  const session = persistedCaptureSession;
+
+  if (
+    requestId === undefined ||
+    tabId === undefined ||
+    session === null ||
+    session.requestId !== requestId ||
+    session.tabId !== tabId
+  ) {
+    failActiveCaptureUnexpectedly(
+      "字幕セッションの復旧情報が一致しません。もう一度開始してください",
+    );
+    return;
+  }
+
+  const contexts =
+    await getOffscreenContexts();
+
+  if (contexts.length === 0) {
+    failActiveCaptureUnexpectedly(
+      "字幕処理が終了していたため、セッションを復旧できませんでした",
+    );
+    return;
+  }
+
+  const port =
+    offscreenPort ??
+    await waitForOffscreenPort(PORT_WAIT_MS);
+  const status =
+    await queryOffscreenStatus(
+      port,
+      PORT_WAIT_MS,
+    );
+
+  if (
+    !recoveryPending ||
+    captureState.requestId !== requestId ||
+    captureState.tabId !== tabId ||
+    !isCaptureActive(captureState.status)
+  ) {
+    return;
+  }
+
+  if (
+    !status.sessionActive ||
+    status.state.requestId !== requestId ||
+    !isCaptureActive(status.state.status)
+  ) {
+    failActiveCaptureUnexpectedly(
+      "字幕処理の実行状態を確認できなかったため、セッションを終了しました",
+    );
+    return;
+  }
+
+  await assertSupportedCaptureTab(tabId);
+  const content =
+    await getOrInjectContentPort(
+      tabId,
+      PORT_WAIT_MS,
+    );
+
+  if (
+    !recoveryPending ||
+    captureState.requestId !== requestId ||
+    captureState.tabId !== tabId ||
+    !isCaptureActive(captureState.status)
+  ) {
+    return;
+  }
+
+  const startMessage: CsStartTapMessage = {
+    t: "CS_START_TAP",
+    requestId,
+    settings: session.settings,
+  };
+
+  content.postMessage(startMessage);
+  contentStartRequestId = requestId;
+  offscreenStartRequestId = requestId;
+  localStartRequestId = null;
+  recoveryPending = false;
+
+  handleOffscreenState({
+    t: "OFF_STATE",
+    state: status.state,
+  });
+  postCaptureState(content);
+
+  console.info(
+    "[bg]",
+    "persisted capture reconciled",
+    {
+      requestId,
+      tabId,
+      reason,
+      offscreenStatus:
+        status.state.status,
+    },
+  );
+}
+
+function queryOffscreenStatus(
+  port: chrome.runtime.Port,
+  timeoutMs: number,
+): Promise<OffStatusMessage> {
+  const queryId =
+    createProbeRequestId(
+      "offscreen-status",
+    );
+  const message: OffQueryMessage = {
+    t: "OFF_QUERY",
+    queryId,
+  };
+
+  return new Promise<OffStatusMessage>(
+    (resolve, reject) => {
+      const waiter: OffscreenStatusWaiter = {
+        port,
+        resolve,
+        reject,
+        timerId: self.setTimeout(() => {
+          offscreenStatusWaiters.delete(
+            queryId,
+          );
+          reject(
+            new Error(
+              "Offscreen status query timed out",
+            ),
+          );
+        }, timeoutMs),
+      };
+
+      offscreenStatusWaiters.set(
+        queryId,
+        waiter,
+      );
+
+      try {
+        port.postMessage(message);
+      } catch (error) {
+        offscreenStatusWaiters.delete(
+          queryId,
+        );
+        globalThis.clearTimeout(
+          waiter.timerId,
+        );
+        reject(errorToError(error));
+      }
+    },
+  );
+}
+
+function resolveOffscreenStatusWaiter(
+  port: chrome.runtime.Port,
+  message: OffStatusMessage,
+): void {
+  const waiter =
+    offscreenStatusWaiters.get(
+      message.queryId,
+    );
+
+  if (
+    waiter === undefined ||
+    waiter.port !== port
+  ) {
+    return;
+  }
+
+  offscreenStatusWaiters.delete(
+    message.queryId,
+  );
+  globalThis.clearTimeout(
+    waiter.timerId,
+  );
+  waiter.resolve(message);
+}
+
+function rejectOffscreenStatusWaitersForPort(
+  port: chrome.runtime.Port,
+  error: Error,
+): void {
+  for (
+    const [queryId, waiter]
+    of offscreenStatusWaiters
+  ) {
+    if (waiter.port !== port) {
+      continue;
+    }
+
+    offscreenStatusWaiters.delete(queryId);
+    globalThis.clearTimeout(
+      waiter.timerId,
+    );
+    waiter.reject(error);
+  }
 }
 
 function relayOffscreenTranslationRequest(
@@ -1158,16 +1664,6 @@ function handleOffscreenTranslationState(
       message.requestId ||
     !isCaptureActive(captureState.status)
   ) {
-    console.warn(
-      "[bg]",
-      "ignored stale translation state",
-      {
-        incomingRequestId:
-          message.requestId,
-        currentRequestId:
-          captureState.requestId,
-      },
-    );
     return;
   }
 
@@ -1211,16 +1707,6 @@ function handleOffscreenState(
     current.requestId !== undefined &&
     incoming.requestId !== current.requestId
   ) {
-    console.warn(
-      "[bg]",
-      "ignored stale offscreen state",
-      {
-        currentRequestId: current.requestId,
-        incomingRequestId:
-          incoming.requestId,
-        incomingStatus: incoming.status,
-      },
-    );
     return;
   }
 
@@ -1356,10 +1842,7 @@ function handleOffscreenState(
     case "idle":
       if (current.status === "running") {
         stopContentForState(current);
-        latestRms = 0;
-        activeTranslationState = null;
-        clearSessionTracking();
-        broadcastLevel();
+        resetSessionPresentation();
 
         moveCaptureState("stopping", {
           ...(current.requestId === undefined
@@ -1378,10 +1861,7 @@ function handleOffscreenState(
 
       if (current.status === "stopping") {
         stopContentForState(current);
-        latestRms = 0;
-        activeTranslationState = null;
-        clearSessionTracking();
-        broadcastLevel();
+        resetSessionPresentation();
         moveCaptureState("idle");
         return;
       }
@@ -1393,13 +1873,11 @@ function handleOffscreenState(
         ) &&
         incoming.requestId !== undefined &&
         incoming.requestId ===
-          current.requestId
+          current.requestId &&
+        !recoveryPending
       ) {
         stopContentForState(current);
-        latestRms = 0;
-        activeTranslationState = null;
-        clearSessionTracking();
-        broadcastLevel();
+        resetSessionPresentation();
 
         moveCaptureState("error", {
           requestId:
@@ -1414,32 +1892,12 @@ function handleOffscreenState(
               "Offscreen processing returned to idle before startup completed",
           },
         });
-        return;
-      }
-
-      if (
-        current.status === "starting" ||
-        current.status === "loadingModel"
-      ) {
-        console.log(
-          "[bg]",
-          "ignored boot-time idle report",
-          {
-            currentRequestId:
-              current.requestId,
-            incomingRequestId:
-              incoming.requestId,
-          },
-        );
       }
       return;
 
     case "error":
       stopContentForState(current);
-      clearSessionTracking();
-      latestRms = 0;
-      activeTranslationState = null;
-      broadcastLevel();
+      resetSessionPresentation();
 
       if (current.status === "error") {
         replaceCaptureState(
@@ -1515,6 +1973,14 @@ function handleOffscreenState(
   }
 }
 
+function resetSessionPresentation(): void {
+  clearSessionTracking();
+  latestRms = 0;
+  activeTranslationState = null;
+  recognitionLines.clear();
+  broadcastLevel();
+}
+
 function stopContentForState(
   state: CaptureState,
 ): void {
@@ -1568,14 +2034,6 @@ function handleOffscreenRecognition(
   message: OffRecognitionMessage,
 ): void {
   if (captureState.status !== "running") {
-    console.warn(
-      "[bg]",
-      "ignored recognition outside running capture",
-      {
-        id: message.id,
-        status: captureState.status,
-      },
-    );
     return;
   }
 
@@ -1648,14 +2106,9 @@ function handleOptionsPortConnected(
   port: chrome.runtime.Port,
 ): void {
   optionsPorts.add(port);
-  console.log("[bg]", "options port connected");
 
   port.onDisconnect.addListener(() => {
     optionsPorts.delete(port);
-    console.log(
-      "[bg]",
-      "options port disconnected",
-    );
   });
 
   void stateInitialization.then(() => {
@@ -1793,6 +2246,16 @@ function replaceCaptureState(
   const previousState = captureState;
 
   captureState = nextState;
+
+  if (
+    nextState.status === "idle" ||
+    nextState.status === "error"
+  ) {
+    recoveryPending = false;
+    persistedCaptureSession = null;
+    void queueCaptureSessionWrite(null);
+  }
+
   queueCaptureStateWrite(nextState);
   queueBadgeUpdate(nextState);
   broadcastCaptureState();
@@ -1811,12 +2274,6 @@ function replaceCaptureState(
       nextState,
     );
   }
-
-  console.log(
-    "[bg]",
-    "capture state changed",
-    nextState,
-  );
 
   if (
     shouldCloseOffscreenAfterTransition(
@@ -1921,6 +2378,59 @@ function queueCaptureStateWrite(
         error,
       );
     },
+  );
+}
+
+function queueCaptureSessionWrite(
+  session: PersistedCaptureSession | null,
+): Promise<void> {
+  const operation = captureSessionWriteTail
+    .catch(() => undefined)
+    .then(async () => {
+      if (session === null) {
+        await chrome.storage.session.remove(
+          CAPTURE_SESSION_STORAGE_KEY,
+        );
+        return;
+      }
+
+      await chrome.storage.session.set({
+        [CAPTURE_SESSION_STORAGE_KEY]:
+          session,
+      });
+    });
+
+  captureSessionWriteTail =
+    operation.catch((error: unknown) => {
+      console.error(
+        "[bg]",
+        "capture session write failed",
+        error,
+      );
+    });
+
+  return operation;
+}
+
+function isPersistedCaptureSession(
+  value: unknown,
+): value is PersistedCaptureSession {
+  if (
+    typeof value !== "object" ||
+    value === null
+  ) {
+    return false;
+  }
+
+  const record =
+    value as Record<string, unknown>;
+
+  return (
+    typeof record.requestId === "string" &&
+    typeof record.tabId === "number" &&
+    Number.isSafeInteger(record.tabId) &&
+    record.tabId >= 0 &&
+    isSettings(record.settings)
   );
 }
 
@@ -2143,6 +2653,118 @@ function isCurrentActiveRequest(
   );
 }
 
+async function assertSupportedCaptureTab(
+  tabId: number,
+): Promise<void> {
+  const tab = await chrome.tabs.get(tabId);
+
+  if (
+    tab.url !== undefined &&
+    !isSupportedCaptureUrl(tab.url)
+  ) {
+    throw new Error(
+      "x.com のタブで使ってください",
+    );
+  }
+}
+
+async function getOrInjectContentPort(
+  tabId: number,
+  timeoutMs: number,
+): Promise<chrome.runtime.Port> {
+  const existing = contentPorts.get(tabId);
+
+  if (existing !== undefined) {
+    return existing;
+  }
+
+  await ensureContentScript(tabId);
+  return waitForContentPort(
+    tabId,
+    timeoutMs,
+  );
+}
+
+function ensureContentScript(
+  tabId: number,
+): Promise<void> {
+  const existing =
+    contentInjectionOperations.get(tabId);
+
+  if (existing !== undefined) {
+    return existing;
+  }
+
+  const operation =
+    performContentScriptHandshake(tabId)
+      .finally(() => {
+        if (
+          contentInjectionOperations.get(
+            tabId,
+          ) === operation
+        ) {
+          contentInjectionOperations.delete(
+            tabId,
+          );
+        }
+      });
+
+  contentInjectionOperations.set(
+    tabId,
+    operation,
+  );
+  return operation;
+}
+
+async function performContentScriptHandshake(
+  tabId: number,
+): Promise<void> {
+  if (contentPorts.has(tabId)) {
+    return;
+  }
+
+  await assertSupportedCaptureTab(tabId);
+
+  const ping: CsPingMessage = {
+    t: "CS_PING",
+  };
+
+  try {
+    const response =
+      (await chrome.tabs.sendMessage(
+        tabId,
+        ping,
+      )) as unknown;
+
+    if (
+      isMessageOfType(
+        response,
+        "CS_PONG",
+      )
+    ) {
+      return;
+    }
+  } catch (error) {
+    console.info(
+      "[bg]",
+      "content script ping failed; injecting it",
+      {
+        tabId,
+        error,
+      },
+    );
+  }
+
+  if (contentPorts.has(tabId)) {
+    return;
+  }
+
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    files: [CONTENT_SCRIPT_PATH],
+  });
+}
+
 function isSupportedCaptureUrl(
   value: string | undefined,
 ): boolean {
@@ -2205,17 +2827,8 @@ async function createOffscreenDocumentIfMissing(): Promise<void> {
     await getOffscreenContexts();
 
   if (contexts.length > 0) {
-    console.log(
-      "[bg]",
-      "offscreen document already exists",
-    );
     return;
   }
-
-  console.log(
-    "[bg]",
-    "creating offscreen document",
-  );
 
   await chrome.offscreen.createDocument({
     url: OFFSCREEN_DOCUMENT_PATH,
@@ -2225,11 +2838,6 @@ async function createOffscreenDocumentIfMissing(): Promise<void> {
     justification:
       "Host on-device speech recognition workers and diagnostics",
   });
-
-  console.log(
-    "[bg]",
-    "offscreen document created",
-  );
 }
 
 function scheduleOffscreenClose(
@@ -2277,14 +2885,6 @@ async function closeOffscreenDocumentIfUnused(): Promise<void> {
   }
 
   if (offscreenBusyCount > 0) {
-    console.info(
-      "[bg]",
-      "offscreen document close deferred while diagnostics are running",
-      {
-        reason: offscreenCloseReason,
-        busyCount: offscreenBusyCount,
-      },
-    );
     return;
   }
 
@@ -2538,12 +3138,6 @@ async function runDiagnostics(
         offscreen: result,
       });
 
-    console.log(
-      "[bg]",
-      "offscreen diagnostics stored",
-      result,
-    );
-
     return {
       t: "DIAGNOSTICS_RESULT",
       requestId,
@@ -2570,12 +3164,6 @@ async function requestOffscreenProbe(
     t: "PROBE",
     requestId,
   };
-
-  console.log(
-    "[bg]",
-    "requesting offscreen probe",
-    requestId,
-  );
 
   const response =
     (await chrome.runtime.sendMessage(
@@ -2616,13 +3204,11 @@ async function storeContentScriptResult(
     contentScript: message.result,
   });
 
-  const storedAt = nowIso();
-
   return {
     t: "PROBE_STORED",
     requestId: message.requestId,
     context: "content-script",
-    storedAt,
+    storedAt: nowIso(),
   };
 }
 
@@ -2633,13 +3219,11 @@ async function storeOptionsPageResult(
     optionsPage: message.result,
   });
 
-  const storedAt = nowIso();
-
   return {
     t: "PROBE_STORED",
     requestId: message.requestId,
     context: "options-page",
-    storedAt,
+    storedAt: nowIso(),
   };
 }
 
@@ -2717,4 +3301,14 @@ function createFailure(
   };
 }
 
-void captureStateHydrated;
+function errorToError(
+  error: unknown,
+): Error {
+  if (error instanceof Error) {
+    return error;
+  }
+
+  return new Error(String(error));
+}
+
+void (null as CsPongMessage | null);
