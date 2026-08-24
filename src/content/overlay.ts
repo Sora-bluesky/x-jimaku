@@ -145,8 +145,17 @@ export class CaptionOverlay {
 
     this.host = document.createElement("div");
     this.host.id = HOST_ID;
+    this.host.setAttribute("popover", "manual");
     this.host.style.position = "fixed";
-    this.host.style.inset = "0";
+    this.host.style.display = "block";
+    this.host.style.margin = "0";
+    this.host.style.inset = "auto";
+    this.host.style.border = "0";
+    this.host.style.padding = "0";
+    this.host.style.background = "transparent";
+    this.host.style.overflow = "visible";
+    this.host.style.width = "auto";
+    this.host.style.height = "auto";
     this.host.style.pointerEvents = "none";
     this.host.style.zIndex = "2147483647";
 
@@ -397,6 +406,7 @@ export class CaptionOverlay {
     this.otherBadges.clear();
     this.targetVideo = null;
     this.lastLayoutSnapshot = null;
+    this.hideHostPopover();
     this.host.remove();
 
     console.log("[overlay]", "overlay destroyed");
@@ -909,20 +919,72 @@ export class CaptionOverlay {
       document.documentElement;
     const fullscreenElement =
       document.fullscreenElement;
+    const useTopLayer =
+      fullscreenElement !== null &&
+      isNonHostingFullscreenElement(
+        fullscreenElement,
+      );
+
+    if (useTopLayer) {
+      if (
+        this.host.parentNode !==
+        fallbackParent
+      ) {
+        this.hideHostPopover();
+        fallbackParent.append(this.host);
+        this.lastLayoutSnapshot = null;
+        this.stableFrameCount = 0;
+      }
+
+      this.showHostPopover();
+      return;
+    }
+
+    this.hideHostPopover();
+
     const parent =
-      fullscreenElement === null
-        ? fallbackParent
-        : isNonHostingFullscreenElement(
-              fullscreenElement,
-            )
-          ? fullscreenElement.parentElement ??
-            fallbackParent
-          : fullscreenElement;
+      fullscreenElement ?? fallbackParent;
 
     if (this.host.parentNode !== parent) {
       parent.append(this.host);
       this.lastLayoutSnapshot = null;
       this.stableFrameCount = 0;
+    }
+  }
+
+  private showHostPopover(): void {
+    if (this.isHostPopoverOpen()) {
+      return;
+    }
+
+    try {
+      this.host.showPopover();
+    } catch {
+      // A later lifecycle pass retries after the
+      // document or fullscreen state settles.
+    }
+  }
+
+  private hideHostPopover(): void {
+    if (!this.isHostPopoverOpen()) {
+      return;
+    }
+
+    try {
+      this.host.hidePopover();
+    } catch {
+      // The browser may already have closed it
+      // during a top-layer state transition.
+    }
+  }
+
+  private isHostPopoverOpen(): boolean {
+    try {
+      return this.host.matches(
+        ":popover-open",
+      );
+    } catch {
+      return false;
     }
   }
 
