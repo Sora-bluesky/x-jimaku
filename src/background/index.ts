@@ -23,6 +23,8 @@ import {
   type ProbeFailureMessage,
   type ProbeRequest,
   type ProbeSnapshot,
+  type SwCaptionClearMessage,
+  type SwCaptionMessage,
   type SwRecognitionMessage,
 } from "../shared/messages";
 import {
@@ -735,10 +737,25 @@ function handleContentPortConnected(
 
   void stateInitialization.then(() => {
     if (
+      captureState.tabId !== tabId ||
+      contentPorts.get(tabId) !== port
+    ) {
+      return;
+    }
+
+    postCaptureState(port);
+
+    if (
+      shouldClearCaptionForStatus(
+        captureState.status,
+      )
+    ) {
+      postCaptionClear(port);
+    }
+
+    if (
       captureState.status === "stopping" &&
-      captureState.tabId === tabId &&
-      captureState.requestId !== undefined &&
-      contentPorts.get(tabId) === port
+      captureState.requestId !== undefined
     ) {
       postStopToContent(
         port,
@@ -1363,6 +1380,28 @@ function handleOffscreenRecognition(
   for (const port of optionsPorts) {
     postRecognition(port, relayed);
   }
+
+  const tabId = captureState.tabId;
+
+  if (tabId === undefined) {
+    return;
+  }
+
+  const content = contentPorts.get(tabId);
+
+  if (content === undefined) {
+    return;
+  }
+
+  const caption: SwCaptionMessage = {
+    t: "SW_CAPTION",
+    id: message.id,
+    text: message.text,
+    final: message.final,
+    at: message.at,
+  };
+
+  postCaption(content, caption);
 }
 
 function trimRecognitionLines(): void {
@@ -1444,7 +1483,7 @@ function postStopToContent(
   } catch (error) {
     console.error(
       "[bg]",
-      "could not send stop to content script",
+      "could not send stop to content",
       error,
     );
   }
@@ -1528,6 +1567,21 @@ function replaceCaptureState(
   queueCaptureStateWrite(nextState);
   queueBadgeUpdate(nextState);
   broadcastCaptureState();
+  relayCaptureStateToContent(
+    previousState,
+    nextState,
+  );
+
+  if (
+    shouldClearCaptionForStatus(
+      nextState.status,
+    )
+  ) {
+    relayCaptionClearToContent(
+      previousState,
+      nextState,
+    );
+  }
 
   console.log(
     "[bg]",
@@ -1545,6 +1599,54 @@ function replaceCaptureState(
       `${previousState.status}-to-${nextState.status}`,
     );
   }
+}
+
+function relayCaptureStateToContent(
+  previousState: CaptureState,
+  nextState: CaptureState,
+): void {
+  const tabId =
+    nextState.tabId ??
+    previousState.tabId;
+
+  if (tabId === undefined) {
+    return;
+  }
+
+  const port = contentPorts.get(tabId);
+
+  if (port !== undefined) {
+    postCaptureState(port);
+  }
+}
+
+function relayCaptionClearToContent(
+  previousState: CaptureState,
+  nextState: CaptureState,
+): void {
+  const tabId =
+    nextState.tabId ??
+    previousState.tabId;
+
+  if (tabId === undefined) {
+    return;
+  }
+
+  const port = contentPorts.get(tabId);
+
+  if (port !== undefined) {
+    postCaptionClear(port);
+  }
+}
+
+function shouldClearCaptionForStatus(
+  status: CaptureStatus,
+): boolean {
+  return (
+    status === "stopping" ||
+    status === "idle" ||
+    status === "error"
+  );
 }
 
 function shouldCloseOffscreenAfterTransition(
@@ -1740,6 +1842,39 @@ function postRecognition(
     console.warn(
       "[bg]",
       "could not relay recognition line",
+      error,
+    );
+  }
+}
+
+function postCaption(
+  port: chrome.runtime.Port,
+  message: SwCaptionMessage,
+): void {
+  try {
+    port.postMessage(message);
+  } catch (error) {
+    console.warn(
+      "[bg]",
+      "could not relay caption line",
+      error,
+    );
+  }
+}
+
+function postCaptionClear(
+  port: chrome.runtime.Port,
+): void {
+  const message: SwCaptionClearMessage = {
+    t: "SW_CAPTION_CLEAR",
+  };
+
+  try {
+    port.postMessage(message);
+  } catch (error) {
+    console.warn(
+      "[bg]",
+      "could not clear content caption",
       error,
     );
   }

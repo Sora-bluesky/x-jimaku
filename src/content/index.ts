@@ -8,12 +8,21 @@ import {
   type CsPcmMessage,
   type CsTapStateMessage,
   type ProbeFailureMessage,
+  type SwCaptionMessage,
   type TranslatorProbeResult,
 } from "../shared/messages";
+import type {
+  CaptureState,
+  CaptureStatus,
+} from "../shared/state";
 import {
   AudioTap,
   getAudioTapErrorDetail,
+  getCurrentAudioTapTarget,
 } from "./audio-tap";
+import {
+  CaptionOverlay,
+} from "./overlay";
 
 type TranslatorScope = typeof globalThis & {
   Translator?: TranslatorFactory;
@@ -22,6 +31,7 @@ type TranslatorScope = typeof globalThis & {
 const CONTENT_PORT_NAME = "content";
 const INITIAL_RECONNECT_DELAY_MS = 100;
 const MAX_RECONNECT_DELAY_MS = 1_000;
+const ERROR_CHIP_VISIBLE_MS = 2_500;
 
 let backgroundPort: chrome.runtime.Port | null =
   null;
@@ -30,6 +40,12 @@ let reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
 let activeTap: AudioTap | null = null;
 let tapOperationTail: Promise<void> =
   Promise.resolve();
+let captionOverlay: CaptionOverlay | null =
+  null;
+let overlayDestroyTimerId: number | null =
+  null;
+let lastCaptureStatus: CaptureStatus =
+  "idle";
 
 console.log("[cs]", "content script loaded", {
   url: location.href,
@@ -114,6 +130,11 @@ function connectBackgroundPort(): void {
             "CS_START_TAP",
           )
         ) {
+          lastCaptureStatus = "starting";
+          ensureOverlay().setStatus(
+            "loadingModel",
+          );
+
           void enqueueTapOperation(() =>
             startTap(message.requestId),
           );
@@ -132,6 +153,43 @@ function connectBackgroundPort(): void {
               "stop-requested",
             ),
           );
+          return;
+        }
+
+        if (
+          isMessageOfType(
+            message,
+            "OFF_STATE",
+          )
+        ) {
+          handleCaptureState(message.state);
+          return;
+        }
+
+        if (
+          isMessageOfType(
+            message,
+            "SW_CAPTION",
+          )
+        ) {
+          handleCaption(message);
+          return;
+        }
+
+        if (
+          isMessageOfType(
+            message,
+            "SW_CAPTION_CLEAR",
+          )
+        ) {
+          captionOverlay?.clear();
+
+          if (
+            lastCaptureStatus === "idle" ||
+            lastCaptureStatus === "stopping"
+          ) {
+            destroyOverlay();
+          }
           return;
         }
 
@@ -156,6 +214,9 @@ function connectBackgroundPort(): void {
         "background port disconnected",
         disconnectError ?? "",
       );
+
+      lastCaptureStatus = "idle";
+      destroyOverlay();
 
       void enqueueTapOperation(async () => {
         const tap = activeTap;
@@ -256,6 +317,7 @@ async function startTap(
       "error",
       "another-tap-is-active",
     );
+    showOverlayError();
     return;
   }
 
@@ -290,6 +352,9 @@ async function startTap(
         activeTap = null;
       }
 
+      lastCaptureStatus = "stopping";
+      destroyOverlay();
+
       postTapState(
         requestId,
         "stopped",
@@ -301,6 +366,8 @@ async function startTap(
       if (activeTap === tap) {
         activeTap = null;
       }
+
+      showOverlayError();
 
       postTapState(
         requestId,
@@ -340,6 +407,8 @@ async function startTap(
       "audio tap start failed",
       error,
     );
+
+    showOverlayError();
 
     postTapState(
       requestId,
@@ -389,12 +458,118 @@ async function stopTap(
       error,
     );
 
+    showOverlayError();
+
     postTapState(
       requestId,
       "error",
       getAudioTapErrorDetail(error),
     );
   }
+}
+
+function handleCaptureState(
+  state: CaptureState,
+): void {
+  lastCaptureStatus = state.status;
+
+  switch (state.status) {
+    case "starting":
+      cancelOverlayDestroy();
+      ensureOverlay().setStatus(
+        "loadingModel",
+      );
+      return;
+
+    case "loadingModel":
+      cancelOverlayDestroy();
+      ensureOverlay().setStatus(
+        "loadingModel",
+        state.progress,
+      );
+      return;
+
+    case "running":
+      cancelOverlayDestroy();
+      ensureOverlay().setStatus("running");
+      return;
+
+    case "error":
+      showOverlayError(state.progress);
+      return;
+
+    case "stopping":
+    case "idle":
+      destroyOverlay();
+  }
+}
+
+function handleCaption(
+  message: SwCaptionMessage,
+): void {
+  cancelOverlayDestroy();
+  ensureOverlay().showCaption(message);
+}
+
+function ensureOverlay(): CaptionOverlay {
+  if (captionOverlay !== null) {
+    return captionOverlay;
+  }
+
+  const overlay = new CaptionOverlay({
+    getTargetVideo:
+      getCurrentAudioTapTarget,
+    onCaptionFadeOut() {
+      if (
+        lastCaptureStatus === "idle" ||
+        lastCaptureStatus === "stopping"
+      ) {
+        destroyOverlay();
+      }
+    },
+  });
+
+  captionOverlay = overlay;
+  return overlay;
+}
+
+function showOverlayError(
+  progress?: number,
+): void {
+  lastCaptureStatus = "error";
+  cancelOverlayDestroy();
+
+  const overlay = ensureOverlay();
+  overlay.clear();
+  overlay.setStatus("error", progress);
+
+  overlayDestroyTimerId =
+    window.setTimeout(() => {
+      overlayDestroyTimerId = null;
+
+      if (lastCaptureStatus === "error") {
+        destroyOverlay();
+      }
+    }, ERROR_CHIP_VISIBLE_MS);
+}
+
+function cancelOverlayDestroy(): void {
+  if (overlayDestroyTimerId === null) {
+    return;
+  }
+
+  globalThis.clearTimeout(
+    overlayDestroyTimerId,
+  );
+  overlayDestroyTimerId = null;
+}
+
+function destroyOverlay(): void {
+  cancelOverlayDestroy();
+
+  const overlay = captionOverlay;
+  captionOverlay = null;
+  overlay?.destroy();
 }
 
 function postTapState(

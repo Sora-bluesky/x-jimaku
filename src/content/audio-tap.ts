@@ -12,11 +12,21 @@ type CapturableVideoElement =
     captureStream(): MediaStream;
   };
 
+let currentAudioTapTarget:
+  | HTMLVideoElement
+  | null = null;
+
 export interface AudioTapCallbacks {
   onChunk(seq: number, b64: string): void;
   onDetail(detail: string): void;
   onStopped(detail: string): void;
   onError(error: unknown): void;
+}
+
+export function getCurrentAudioTapTarget():
+  | HTMLVideoElement
+  | null {
+  return currentAudioTapTarget;
 }
 
 export class AudioTap {
@@ -90,6 +100,7 @@ export class AudioTap {
     }
 
     this.video = video;
+    currentAudioTapTarget = video;
     this.initialUrl = location.href;
     this.chunkBuffer =
       new Float32Array(PCM_CHUNK_SAMPLES);
@@ -532,6 +543,11 @@ export class AudioTap {
 
     this.active = false;
     this.video = null;
+
+    if (currentAudioTapTarget === video) {
+      currentAudioTapTarget = null;
+    }
+
     this.stream = null;
     this.audioTrack = null;
     this.context = null;
