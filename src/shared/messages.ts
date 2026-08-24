@@ -2,8 +2,17 @@ import {
   isCaptureState,
   type CaptureState,
 } from "./state";
+import {
+  isSettings,
+  isWhisperDevice,
+  isWhisperModel,
+  type Settings,
+  type WhisperDevice,
+  type WhisperModel,
+} from "./settings";
 
-export const LAST_PROBE_STORAGE_KEY = "m0.lastProbe" as const;
+export const LAST_PROBE_STORAGE_KEY =
+  "m0.lastProbe" as const;
 
 export type TranslatorProbeContext =
   | "offscreen-document"
@@ -45,7 +54,9 @@ export interface WebGpuProbeResult {
 export interface TranslatorProbeResult {
   context: TranslatorProbeContext;
   exposed: boolean;
-  availability: BuiltinTranslatorAvailability | null;
+  availability:
+    | BuiltinTranslatorAvailability
+    | null;
   startedAt: string;
   completedAt: string;
   environment: ProbeEnvironment;
@@ -160,6 +171,7 @@ export interface OffStartMessage {
   t: "OFF_START";
   streamId: string;
   requestId: string;
+  settings: Settings;
 }
 
 export interface OffStopMessage {
@@ -178,6 +190,73 @@ export interface OffLevelMessage {
   at: string;
 }
 
+export interface RecognitionPayload {
+  id: number;
+  text: string;
+  final: boolean;
+  at: string;
+}
+
+export interface OffRecognitionMessage
+  extends RecognitionPayload {
+  t: "OFF_RECOG";
+}
+
+export interface SwRecognitionMessage
+  extends RecognitionPayload {
+  t: "SW_RECOG";
+}
+
+export interface WhisperInitMessage {
+  t: "WHISPER_INIT";
+  model: WhisperModel;
+  ortBaseUrl: string;
+  forceDevice?: WhisperDevice;
+}
+
+export interface WhisperTranscribeMessage {
+  t: "WHISPER_TRANSCRIBE";
+  requestId: string;
+  audio: Float32Array;
+}
+
+export interface WhisperProgressMessage {
+  t: "WHISPER_PROGRESS";
+  file: string;
+  progress: number;
+  loaded: number;
+  total: number;
+}
+
+export interface WhisperReadyMessage {
+  t: "WHISPER_READY";
+  device: WhisperDevice;
+}
+
+export interface WhisperResultMessage {
+  t: "WHISPER_RESULT";
+  requestId: string;
+  text: string;
+}
+
+export interface WhisperErrorMessage {
+  t: "WHISPER_ERROR";
+  requestId?: string;
+  message: string;
+  fatal: boolean;
+  attemptedDevice?: WhisperDevice;
+}
+
+export type WhisperWorkerInputMessage =
+  | WhisperInitMessage
+  | WhisperTranscribeMessage;
+
+export type WhisperWorkerOutputMessage =
+  | WhisperProgressMessage
+  | WhisperReadyMessage
+  | WhisperResultMessage
+  | WhisperErrorMessage;
+
 export type M0Message =
   | ProbeRequest
   | OffscreenProbeResultMessage
@@ -194,19 +273,28 @@ export type CapturePortMessage =
   | OffStartMessage
   | OffStopMessage
   | OffStateMessage
-  | OffLevelMessage;
+  | OffLevelMessage
+  | OffRecognitionMessage;
+
+export type OptionsPortMessage =
+  | OffStateMessage
+  | OffLevelMessage
+  | SwRecognitionMessage;
 
 export type M1Message =
   | M0Message
   | RunDiagnosticsMessage
   | DiagnosticsResultMessage
-  | CapturePortMessage;
+  | CapturePortMessage
+  | SwRecognitionMessage;
 
 export function nowIso(): string {
   return new Date().toISOString();
 }
 
-export function createProbeRequestId(prefix: string): string {
+export function createProbeRequestId(
+  prefix: string,
+): string {
   return `${prefix}:${crypto.randomUUID()}`;
 }
 
@@ -229,7 +317,9 @@ export function getProbeEnvironment(): ProbeEnvironment {
   };
 }
 
-export function toProbeError(error: unknown): ProbeError {
+export function toProbeError(
+  error: unknown,
+): ProbeError {
   if (error instanceof Error) {
     return {
       name: error.name,
@@ -248,7 +338,8 @@ export function toProbeError(error: unknown): ProbeError {
   ) {
     return {
       name:
-        "name" in error && typeof error.name === "string"
+        "name" in error &&
+        typeof error.name === "string"
           ? error.name
           : "Error",
       message: error.message,
@@ -267,12 +358,18 @@ export function isProbeSnapshot(
   return (
     isRecord(value) &&
     typeof value.updatedAt === "string" &&
-    (value.offscreen === undefined ||
-      isRecord(value.offscreen)) &&
-    (value.contentScript === undefined ||
-      isRecord(value.contentScript)) &&
-    (value.optionsPage === undefined ||
-      isRecord(value.optionsPage))
+    (
+      value.offscreen === undefined ||
+      isRecord(value.offscreen)
+    ) &&
+    (
+      value.contentScript === undefined ||
+      isRecord(value.contentScript)
+    ) &&
+    (
+      value.optionsPage === undefined ||
+      isRecord(value.optionsPage)
+    )
   );
 }
 
@@ -309,8 +406,10 @@ export function isM0Message(
     case "PROBE_STORED":
       return (
         typeof value.requestId === "string" &&
-        (value.context === "content-script" ||
-          value.context === "options-page") &&
+        (
+          value.context === "content-script" ||
+          value.context === "options-page"
+        ) &&
         typeof value.storedAt === "string"
       );
 
@@ -353,7 +452,8 @@ export function isM1Message(
     case "OFF_START":
       return (
         typeof value.streamId === "string" &&
-        typeof value.requestId === "string"
+        typeof value.requestId === "string" &&
+        isSettings(value.settings)
       );
 
     case "OFF_STOP":
@@ -369,6 +469,10 @@ export function isM1Message(
         value.rms >= 0 &&
         typeof value.at === "string"
       );
+
+    case "OFF_RECOG":
+    case "SW_RECOG":
+      return isRecognitionPayload(value);
 
     default:
       return false;
@@ -391,7 +495,107 @@ export function isCapturePortMessage(
     isMessageOfType(value, "OFF_START") ||
     isMessageOfType(value, "OFF_STOP") ||
     isMessageOfType(value, "OFF_STATE") ||
-    isMessageOfType(value, "OFF_LEVEL")
+    isMessageOfType(value, "OFF_LEVEL") ||
+    isMessageOfType(value, "OFF_RECOG")
+  );
+}
+
+export function isWhisperWorkerInputMessage(
+  value: unknown,
+): value is WhisperWorkerInputMessage {
+  if (!isRecord(value) || typeof value.t !== "string") {
+    return false;
+  }
+
+  switch (value.t) {
+    case "WHISPER_INIT":
+      return (
+        isWhisperModel(value.model) &&
+        typeof value.ortBaseUrl === "string" &&
+        (
+          value.forceDevice === undefined ||
+          isWhisperDevice(value.forceDevice)
+        )
+      );
+
+    case "WHISPER_TRANSCRIBE":
+      return (
+        typeof value.requestId === "string" &&
+        value.audio instanceof Float32Array
+      );
+
+    default:
+      return false;
+  }
+}
+
+export function isWhisperWorkerOutputMessage(
+  value: unknown,
+): value is WhisperWorkerOutputMessage {
+  if (!isRecord(value) || typeof value.t !== "string") {
+    return false;
+  }
+
+  switch (value.t) {
+    case "WHISPER_PROGRESS":
+      return (
+        typeof value.file === "string" &&
+        isFiniteNonNegative(value.progress) &&
+        value.progress <= 100 &&
+        isFiniteNonNegative(value.loaded) &&
+        isFiniteNonNegative(value.total)
+      );
+
+    case "WHISPER_READY":
+      return isWhisperDevice(value.device);
+
+    case "WHISPER_RESULT":
+      return (
+        typeof value.requestId === "string" &&
+        typeof value.text === "string"
+      );
+
+    case "WHISPER_ERROR":
+      return (
+        (
+          value.requestId === undefined ||
+          typeof value.requestId === "string"
+        ) &&
+        typeof value.message === "string" &&
+        typeof value.fatal === "boolean" &&
+        (
+          value.attemptedDevice === undefined ||
+          isWhisperDevice(
+            value.attemptedDevice,
+          )
+        )
+      );
+
+    default:
+      return false;
+  }
+}
+
+function isRecognitionPayload(
+  value: Record<string, unknown>,
+): boolean {
+  return (
+    typeof value.id === "number" &&
+    Number.isSafeInteger(value.id) &&
+    value.id >= 0 &&
+    typeof value.text === "string" &&
+    typeof value.final === "boolean" &&
+    typeof value.at === "string"
+  );
+}
+
+function isFiniteNonNegative(
+  value: unknown,
+): value is number {
+  return (
+    typeof value === "number" &&
+    Number.isFinite(value) &&
+    value >= 0
   );
 }
 

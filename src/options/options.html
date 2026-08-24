@@ -31,7 +31,8 @@
         margin-block: 28px;
       }
 
-      .capture-card {
+      .capture-card,
+      .recognition-card {
         padding: 18px;
         border: 1px solid
           color-mix(in srgb, currentColor 25%, transparent);
@@ -57,6 +58,7 @@
       }
 
       .capture-dot[data-state="starting"],
+      .capture-dot[data-state="loadingModel"],
       .capture-dot[data-state="stopping"] {
         background: #eab308;
         box-shadow: 0 0 0 3px
@@ -75,10 +77,16 @@
           color-mix(in srgb, #dc2626 20%, transparent);
       }
 
-      .meter-label {
+      .meter-label,
+      .recognition-runtime,
+      .settings-row {
         display: flex;
+        align-items: center;
         justify-content: space-between;
         gap: 12px;
+      }
+
+      .meter-label {
         margin-block-end: 6px;
       }
 
@@ -104,10 +112,92 @@
         transition: width 40ms linear;
       }
 
-      .capture-help {
-        margin-block: 14px 0;
+      .model-progress {
+        margin-block-start: 14px;
+      }
+
+      .model-progress progress {
+        width: 100%;
+        height: 16px;
+      }
+
+      .capture-help,
+      .settings-help,
+      #settings-status {
         color:
           color-mix(in srgb, currentColor 72%, transparent);
+      }
+
+      .capture-help {
+        margin-block: 14px 0;
+      }
+
+      .recognition-runtime {
+        justify-content: flex-start;
+        flex-wrap: wrap;
+        margin-block-end: 12px;
+      }
+
+      .recognition-runtime span {
+        display: inline-flex;
+        gap: 5px;
+      }
+
+      .recognition-log {
+        min-height: 96px;
+        max-height: 320px;
+        margin: 0;
+        padding: 12px 12px 12px 38px;
+        overflow-y: auto;
+        border-radius: 8px;
+        background:
+          color-mix(in srgb, currentColor 7%, transparent);
+      }
+
+      .recognition-log:empty::before {
+        display: list-item;
+        color:
+          color-mix(in srgb, currentColor 58%, transparent);
+        content: "認識結果はまだありません。";
+      }
+
+      .recognition-line {
+        padding-block: 4px;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
+
+      .recognition-line time {
+        margin-inline-end: 8px;
+        color:
+          color-mix(in srgb, currentColor 55%, transparent);
+        font-size: 0.82em;
+      }
+
+      .recognition-line[data-final="false"] {
+        color:
+          color-mix(in srgb, currentColor 58%, transparent);
+        font-style: italic;
+      }
+
+      .settings-row {
+        justify-content: flex-start;
+        flex-wrap: wrap;
+        margin-block-start: 18px;
+      }
+
+      select {
+        min-width: 150px;
+        padding: 7px 10px;
+        border: 1px solid currentColor;
+        border-radius: 6px;
+        font: inherit;
+      }
+
+      .settings-help,
+      #settings-status {
+        margin-block: 6px 0;
+        font-size: 0.92em;
       }
 
       .actions {
@@ -124,7 +214,8 @@
         cursor: pointer;
       }
 
-      button:disabled {
+      button:disabled,
+      select:disabled {
         cursor: wait;
         opacity: 0.65;
       }
@@ -176,7 +267,7 @@
             aria-hidden="true"
           ></span>
           <span>状態:</span>
-          <span id="capture-state-name">idle</span>
+          <span id="capture-state-name">停止中</span>
         </p>
 
         <div class="meter-label">
@@ -199,10 +290,72 @@
           ></div>
         </div>
 
+        <div
+          id="model-progress-container"
+          class="model-progress"
+          hidden
+        >
+          <div class="meter-label">
+            <span>モデル読込</span>
+            <output id="model-progress-value">0%</output>
+          </div>
+          <progress
+            id="model-progress"
+            max="100"
+            value="0"
+          ></progress>
+        </div>
+
         <p class="capture-help">
           x.comの動画を再生し、拡張機能のツールバーアイコンまたは
           Ctrl+Shift+9でキャプチャを開始・停止します。
         </p>
+      </section>
+
+      <section
+        class="recognition-card"
+        aria-labelledby="recognition-heading"
+      >
+        <h2 id="recognition-heading">認識ログ</h2>
+
+        <p class="recognition-runtime">
+          <span>
+            モデル:
+            <strong id="active-model">—</strong>
+          </span>
+          <span>
+            実行デバイス:
+            <strong id="active-device">—</strong>
+          </span>
+        </p>
+
+        <ol
+          id="recognition-log"
+          class="recognition-log"
+          aria-live="polite"
+          aria-relevant="additions text"
+        ></ol>
+
+        <div class="settings-row">
+          <label for="model-select">
+            次回使用するモデル
+          </label>
+          <select id="model-select">
+            <option value="tiny">tiny</option>
+            <option value="base">base</option>
+            <option value="small">small</option>
+            <option value="turbo">turbo</option>
+          </select>
+        </div>
+
+        <p class="settings-help">
+          適用は次回キャプチャ開始時
+        </p>
+        <p
+          id="settings-status"
+          role="status"
+          aria-live="polite"
+        ></p>
       </section>
 
       <section aria-labelledby="diagnostics-heading">

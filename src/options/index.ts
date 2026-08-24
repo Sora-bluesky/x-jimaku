@@ -8,9 +8,16 @@ import {
   type OptionsPageProbeResult,
   type OptionsPageProbeResultMessage,
   type ProbeSnapshot,
+  type SwRecognitionMessage,
   type TranslatorProbeResult,
   type WebGpuProbeResult,
 } from "../shared/messages";
+import {
+  isWhisperModel,
+  readSettings,
+  SETTINGS_STORAGE_KEY,
+  writeSettings,
+} from "../shared/settings";
 import type {
   CaptureState,
   CaptureStatus,
@@ -39,6 +46,7 @@ type TableValue =
 const OPTIONS_PORT_NAME = "options";
 const INITIAL_RECONNECT_DELAY_MS = 250;
 const MAX_RECONNECT_DELAY_MS = 4_000;
+const MAX_RECOGNITION_LINES = 50;
 
 const runDiagnosticsButton =
   requireElement<HTMLButtonElement>(
@@ -49,9 +57,13 @@ const runTranslatorButton =
     "run-translator",
   );
 const fetchLastButton =
-  requireElement<HTMLButtonElement>("fetch-last");
+  requireElement<HTMLButtonElement>(
+    "fetch-last",
+  );
 const statusElement =
-  requireElement<HTMLElement>("probe-status");
+  requireElement<HTMLElement>(
+    "probe-status",
+  );
 const captureStateDot =
   requireElement<HTMLElement>(
     "capture-state-dot",
@@ -61,12 +73,48 @@ const captureStateName =
     "capture-state-name",
   );
 const levelMeter =
-  requireElement<HTMLElement>("level-meter");
+  requireElement<HTMLElement>(
+    "level-meter",
+  );
 const levelFill =
-  requireElement<HTMLElement>("level-fill");
+  requireElement<HTMLElement>(
+    "level-fill",
+  );
 const levelValue =
   requireElement<HTMLOutputElement>(
     "level-value",
+  );
+const modelProgressContainer =
+  requireElement<HTMLElement>(
+    "model-progress-container",
+  );
+const modelProgress =
+  requireElement<HTMLProgressElement>(
+    "model-progress",
+  );
+const modelProgressValue =
+  requireElement<HTMLOutputElement>(
+    "model-progress-value",
+  );
+const activeModel =
+  requireElement<HTMLElement>(
+    "active-model",
+  );
+const activeDevice =
+  requireElement<HTMLElement>(
+    "active-device",
+  );
+const recognitionLog =
+  requireElement<HTMLOListElement>(
+    "recognition-log",
+  );
+const modelSelect =
+  requireElement<HTMLSelectElement>(
+    "model-select",
+  );
+const settingsStatus =
+  requireElement<HTMLElement>(
+    "settings-status",
   );
 const environmentResults =
   requireElement<HTMLTableSectionElement>(
@@ -86,15 +134,26 @@ const storedResults =
   );
 
 const optionsWebGpuPromise = probeWebGpu();
+const recognitionElements =
+  new Map<number, HTMLLIElement>();
 
-let optionsPort: chrome.runtime.Port | null = null;
+let optionsPort:
+  | chrome.runtime.Port
+  | null = null;
 let reconnectTimerId: number | null = null;
-let reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
+let reconnectDelayMs =
+  INITIAL_RECONNECT_DELAY_MS;
 let meterTarget = 0;
 let meterCurrent = 0;
 let meterAnimationPending = false;
+let renderedCaptureRequestId:
+  | string
+  | null = null;
 
-console.log("[options]", "diagnostics page loaded");
+console.log(
+  "[options]",
+  "diagnostics page loaded",
+);
 
 renderRows(environmentResults, [
   [
@@ -104,7 +163,8 @@ renderRows(environmentResults, [
   ["User agent", navigator.userAgent],
   [
     "Chrome version",
-    getProbeEnvironment().chromeVersion ?? "不明",
+    getProbeEnvironment().chromeVersion ??
+      "不明",
   ],
 ]);
 
@@ -122,6 +182,7 @@ renderCaptureState({
 });
 
 connectOptionsPort();
+void initializeSettings();
 
 void optionsWebGpuPromise.then((result) => {
   console.log(
@@ -132,17 +193,58 @@ void optionsWebGpuPromise.then((result) => {
   renderWebGpu(result);
 });
 
-runDiagnosticsButton.addEventListener("click", () => {
-  void runBackgroundDiagnostics();
-});
+runDiagnosticsButton.addEventListener(
+  "click",
+  () => {
+    void runBackgroundDiagnostics();
+  },
+);
 
-runTranslatorButton.addEventListener("click", () => {
-  void runOptionsTranslatorProbe();
-});
+runTranslatorButton.addEventListener(
+  "click",
+  () => {
+    void runOptionsTranslatorProbe();
+  },
+);
 
-fetchLastButton.addEventListener("click", () => {
-  void fetchLastProbeResults();
-});
+fetchLastButton.addEventListener(
+  "click",
+  () => {
+    void fetchLastProbeResults();
+  },
+);
+
+modelSelect.addEventListener(
+  "change",
+  () => {
+    void saveSelectedModel();
+  },
+);
+
+chrome.storage.onChanged.addListener(
+  (changes, areaName) => {
+    if (
+      areaName !== "sync" ||
+      changes[SETTINGS_STORAGE_KEY] ===
+        undefined
+    ) {
+      return;
+    }
+
+    const next =
+      changes[SETTINGS_STORAGE_KEY]
+        .newValue as unknown;
+
+    if (
+      typeof next === "object" &&
+      next !== null &&
+      "model" in next &&
+      isWhisperModel(next.model)
+    ) {
+      modelSelect.value = next.model;
+    }
+  },
+);
 
 function connectOptionsPort(): void {
   if (optionsPort !== null) {
@@ -150,7 +252,9 @@ function connectOptionsPort(): void {
   }
 
   if (reconnectTimerId !== null) {
-    globalThis.clearTimeout(reconnectTimerId);
+    globalThis.clearTimeout(
+      reconnectTimerId,
+    );
     reconnectTimerId = null;
   }
 
@@ -160,21 +264,38 @@ function connectOptionsPort(): void {
     });
 
     optionsPort = port;
-    reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
+    reconnectDelayMs =
+      INITIAL_RECONNECT_DELAY_MS;
 
     port.onMessage.addListener(
       (message: unknown) => {
         if (
-          isMessageOfType(message, "OFF_STATE")
+          isMessageOfType(
+            message,
+            "OFF_STATE",
+          )
         ) {
           renderCaptureState(message.state);
           return;
         }
 
         if (
-          isMessageOfType(message, "OFF_LEVEL")
+          isMessageOfType(
+            message,
+            "OFF_LEVEL",
+          )
         ) {
           updateMeter(message.rms);
+          return;
+        }
+
+        if (
+          isMessageOfType(
+            message,
+            "SW_RECOG",
+          )
+        ) {
+          renderRecognitionLine(message);
         }
       },
     );
@@ -221,10 +342,59 @@ function schedulePortReconnect(): void {
     MAX_RECONNECT_DELAY_MS,
   );
 
-  reconnectTimerId = globalThis.setTimeout(() => {
-    reconnectTimerId = null;
-    connectOptionsPort();
-  }, delay);
+  reconnectTimerId =
+    window.setTimeout(() => {
+      reconnectTimerId = null;
+      connectOptionsPort();
+    }, delay);
+}
+
+async function initializeSettings(): Promise<void> {
+  try {
+    const settings = await readSettings();
+    modelSelect.value = settings.model;
+  } catch (error) {
+    console.error(
+      "[options]",
+      "could not read settings",
+      error,
+    );
+    settingsStatus.textContent =
+      `設定の読込に失敗しました: ${toProbeError(error).message}`;
+  }
+}
+
+async function saveSelectedModel(): Promise<void> {
+  const selected = modelSelect.value;
+
+  if (!isWhisperModel(selected)) {
+    settingsStatus.textContent =
+      "選択されたモデルが不正です。";
+    return;
+  }
+
+  modelSelect.disabled = true;
+  settingsStatus.textContent =
+    "設定を保存しています…";
+
+  try {
+    await writeSettings({
+      model: selected,
+    });
+
+    settingsStatus.textContent =
+      `${selected}を保存しました。次回のキャプチャ開始時に適用します。`;
+  } catch (error) {
+    console.error(
+      "[options]",
+      "could not save settings",
+      error,
+    );
+    settingsStatus.textContent =
+      `設定の保存に失敗しました: ${toProbeError(error).message}`;
+  } finally {
+    modelSelect.disabled = false;
+  }
 }
 
 async function runBackgroundDiagnostics(): Promise<void> {
@@ -234,13 +404,16 @@ async function runBackgroundDiagnostics(): Promise<void> {
   );
 
   const requestId =
-    createProbeRequestId("options-diagnostics");
+    createProbeRequestId(
+      "options-diagnostics",
+    );
 
   try {
-    const response = (await chrome.runtime.sendMessage({
-      t: "RUN_DIAGNOSTICS",
-      requestId,
-    })) as unknown;
+    const response =
+      (await chrome.runtime.sendMessage({
+        t: "RUN_DIAGNOSTICS",
+        requestId,
+      })) as unknown;
 
     if (
       isMessageOfType(
@@ -262,10 +435,15 @@ async function runBackgroundDiagnostics(): Promise<void> {
     }
 
     if (
-      isMessageOfType(response, "PROBE_ERROR") &&
+      isMessageOfType(
+        response,
+        "PROBE_ERROR",
+      ) &&
       response.requestId === requestId
     ) {
-      throw new Error(response.error.message);
+      throw new Error(
+        response.error.message,
+      );
     }
 
     throw new Error(
@@ -281,7 +459,10 @@ async function runBackgroundDiagnostics(): Promise<void> {
       `診断に失敗しました: ${toProbeError(error).message}`,
     );
   } finally {
-    setBusy(runDiagnosticsButton, false);
+    setBusy(
+      runDiagnosticsButton,
+      false,
+    );
   }
 }
 
@@ -292,25 +473,30 @@ async function runOptionsTranslatorProbe(): Promise<void> {
   );
 
   const requestId =
-    createProbeRequestId("options-translator");
+    createProbeRequestId(
+      "options-translator",
+    );
   const startedAt = nowIso();
 
   try {
-    const translatorPromise = probeTranslator();
-    const [translator, webgpu] = await Promise.all([
-      translatorPromise,
-      optionsWebGpuPromise,
-    ]);
+    const translatorPromise =
+      probeTranslator();
+    const [translator, webgpu] =
+      await Promise.all([
+        translatorPromise,
+        optionsWebGpuPromise,
+      ]);
 
-    const result: OptionsPageProbeResult = {
-      context: "options-page",
-      requestId,
-      startedAt,
-      completedAt: nowIso(),
-      environment: getProbeEnvironment(),
-      webgpu,
-      translator,
-    };
+    const result:
+      OptionsPageProbeResult = {
+        context: "options-page",
+        requestId,
+        startedAt,
+        completedAt: nowIso(),
+        environment: getProbeEnvironment(),
+        webgpu,
+        translator,
+      };
 
     renderTranslator(translator);
     console.log(
@@ -319,18 +505,23 @@ async function runOptionsTranslatorProbe(): Promise<void> {
       result,
     );
 
-    const message: OptionsPageProbeResultMessage = {
-      t: "OPTIONS_PROBE_RESULT",
-      requestId,
-      result,
-    };
+    const message:
+      OptionsPageProbeResultMessage = {
+        t: "OPTIONS_PROBE_RESULT",
+        requestId,
+        result,
+      };
 
-    const response = (await chrome.runtime.sendMessage(
-      message,
-    )) as unknown;
+    const response =
+      (await chrome.runtime.sendMessage(
+        message,
+      )) as unknown;
 
     if (
-      isMessageOfType(response, "PROBE_STORED") &&
+      isMessageOfType(
+        response,
+        "PROBE_STORED",
+      ) &&
       response.requestId === requestId
     ) {
       setStatus(
@@ -340,7 +531,10 @@ async function runOptionsTranslatorProbe(): Promise<void> {
     }
 
     if (
-      isMessageOfType(response, "PROBE_ERROR") &&
+      isMessageOfType(
+        response,
+        "PROBE_ERROR",
+      ) &&
       response.requestId === requestId
     ) {
       setStatus(
@@ -362,7 +556,10 @@ async function runOptionsTranslatorProbe(): Promise<void> {
       `Translator診断に失敗しました: ${toProbeError(error).message}`,
     );
   } finally {
-    setBusy(runTranslatorButton, false);
+    setBusy(
+      runTranslatorButton,
+      false,
+    );
   }
 }
 
@@ -373,9 +570,10 @@ async function fetchLastProbeResults(): Promise<void> {
   );
 
   try {
-    const response = (await chrome.runtime.sendMessage({
-      t: "GET_LAST_PROBE",
-    })) as unknown;
+    const response =
+      (await chrome.runtime.sendMessage({
+        t: "GET_LAST_PROBE",
+      })) as unknown;
 
     if (
       isMessageOfType(
@@ -398,9 +596,14 @@ async function fetchLastProbeResults(): Promise<void> {
     }
 
     if (
-      isMessageOfType(response, "PROBE_ERROR")
+      isMessageOfType(
+        response,
+        "PROBE_ERROR",
+      )
     ) {
-      throw new Error(response.error.message);
+      throw new Error(
+        response.error.message,
+      );
     }
 
     throw new Error(
@@ -440,7 +643,8 @@ async function probeWebGpu(): Promise<WebGpuProbeResult> {
   }
 
   try {
-    const adapter = await gpu.requestAdapter();
+    const adapter =
+      await gpu.requestAdapter();
 
     return {
       context: "options-page",
@@ -449,7 +653,8 @@ async function probeWebGpu(): Promise<WebGpuProbeResult> {
       ...(adapter === null
         ? {}
         : {
-            adapterInfo: readAdapterInfo(adapter),
+            adapterInfo:
+              readAdapterInfo(adapter),
           }),
       startedAt,
       completedAt: nowIso(),
@@ -470,12 +675,14 @@ async function probeWebGpu(): Promise<WebGpuProbeResult> {
 
 async function probeTranslator(): Promise<TranslatorProbeResult> {
   const startedAt = nowIso();
-  const scope = globalThis as TranslatorScope;
+  const scope =
+    globalThis as TranslatorScope;
   const exposed = "Translator" in scope;
 
   if (
     !exposed ||
-    typeof scope.Translator?.availability !== "function"
+    typeof scope.Translator?.availability !==
+      "function"
   ) {
     return {
       context: "options-page",
@@ -527,10 +734,51 @@ async function probeTranslator(): Promise<TranslatorProbeResult> {
 function renderCaptureState(
   state: CaptureState,
 ): void {
-  captureStateName.textContent = state.status;
-  captureStateDot.dataset.state = state.status;
+  if (
+    state.requestId !== undefined &&
+    state.requestId !==
+      renderedCaptureRequestId &&
+    (
+      state.status === "starting" ||
+      state.status === "loadingModel" ||
+      state.status === "running"
+    )
+  ) {
+    clearRecognitionLog();
+    renderedCaptureRequestId =
+      state.requestId;
+  }
+
+  captureStateName.textContent =
+    captureStatusDescription(state.status);
+  captureStateDot.dataset.state =
+    state.status;
   captureStateDot.title =
     captureStatusDescription(state.status);
+
+  if (state.status === "loadingModel") {
+    const progress =
+      Math.max(
+        0,
+        Math.min(100, state.progress ?? 0),
+      );
+
+    captureStateName.textContent =
+      `モデル読込中（${Math.round(progress)}%）`;
+    modelProgressContainer.hidden = false;
+    modelProgress.value = progress;
+    modelProgressValue.value =
+      `${Math.round(progress)}%`;
+    modelProgressValue.textContent =
+      `${Math.round(progress)}%`;
+  } else {
+    modelProgressContainer.hidden = true;
+  }
+
+  activeModel.textContent =
+    state.model ?? "—";
+  activeDevice.textContent =
+    state.device ?? "—";
 
   if (state.status !== "running") {
     updateMeter(0);
@@ -541,7 +789,15 @@ function renderCaptureState(
     state.error !== undefined
   ) {
     captureStateName.textContent =
-      `${state.status}: ${state.error.message}`;
+      `エラー: ${state.error.message}`;
+  }
+
+  if (
+    state.status === "idle" &&
+    state.requestId === undefined
+  ) {
+    activeModel.textContent = "—";
+    activeDevice.textContent = "—";
   }
 }
 
@@ -553,13 +809,99 @@ function captureStatusDescription(
       return "停止中";
     case "starting":
       return "開始処理中";
+    case "loadingModel":
+      return "モデル読込中";
     case "running":
-      return "キャプチャ中";
+      return "音声認識中";
     case "stopping":
       return "停止処理中";
     case "error":
       return "エラー";
   }
+}
+
+function renderRecognitionLine(
+  message: SwRecognitionMessage,
+): void {
+  let item =
+    recognitionElements.get(message.id);
+
+  if (item === undefined) {
+    item = document.createElement("li");
+    item.className = "recognition-line";
+    item.dataset.id = String(message.id);
+    recognitionElements.set(
+      message.id,
+      item,
+    );
+    recognitionLog.append(item);
+  }
+
+  const time =
+    document.createElement("time");
+  time.dateTime = message.at;
+  time.textContent =
+    formatRecognitionTime(message.at);
+
+  const text =
+    document.createElement("span");
+  text.textContent = message.text;
+
+  item.dataset.final =
+    String(message.final);
+  item.replaceChildren(time, text);
+
+  trimRecognitionLog();
+  recognitionLog.scrollTop =
+    recognitionLog.scrollHeight;
+}
+
+function clearRecognitionLog(): void {
+  recognitionElements.clear();
+  recognitionLog.replaceChildren();
+}
+
+function trimRecognitionLog(): void {
+  while (
+    recognitionLog.children.length >
+    MAX_RECOGNITION_LINES
+  ) {
+    const first =
+      recognitionLog.firstElementChild;
+
+    if (!(first instanceof HTMLLIElement)) {
+      first?.remove();
+      continue;
+    }
+
+    const id = Number(first.dataset.id);
+
+    if (Number.isSafeInteger(id)) {
+      recognitionElements.delete(id);
+    }
+
+    first.remove();
+  }
+}
+
+function formatRecognitionTime(
+  timestamp: string,
+): string {
+  const date = new Date(timestamp);
+
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+
+  return date.toLocaleTimeString(
+    "ja-JP",
+    {
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false,
+    },
+  );
 }
 
 function updateMeter(rms: number): void {
@@ -571,12 +913,16 @@ function updateMeter(rms: number): void {
     1,
     Math.sqrt(Math.min(1, safeRms)),
   );
-  levelValue.value = safeRms.toFixed(4);
-  levelValue.textContent = safeRms.toFixed(4);
+  levelValue.value =
+    safeRms.toFixed(4);
+  levelValue.textContent =
+    safeRms.toFixed(4);
 
   if (!meterAnimationPending) {
     meterAnimationPending = true;
-    requestAnimationFrame(animateMeter);
+    requestAnimationFrame(
+      animateMeter,
+    );
   }
 }
 
@@ -585,8 +931,9 @@ function animateMeter(): void {
     (meterTarget - meterCurrent) * 0.24;
 
   if (
-    Math.abs(meterTarget - meterCurrent) <
-    0.001
+    Math.abs(
+      meterTarget - meterCurrent,
+    ) < 0.001
   ) {
     meterCurrent = meterTarget;
   }
@@ -596,14 +943,17 @@ function animateMeter(): void {
     Math.min(100, meterCurrent * 100),
   );
 
-  levelFill.style.width = `${percentage}%`;
+  levelFill.style.width =
+    `${percentage}%`;
   levelMeter.setAttribute(
     "aria-valuenow",
     percentage.toFixed(1),
   );
 
   if (meterCurrent !== meterTarget) {
-    requestAnimationFrame(animateMeter);
+    requestAnimationFrame(
+      animateMeter,
+    );
     return;
   }
 
@@ -614,9 +964,18 @@ function renderWebGpu(
   result: WebGpuProbeResult,
 ): void {
   renderRows(webGpuResults, [
-    ["navigator.gpu", result.apiAvailable],
-    ["Adapter available", result.adapterAvailable],
-    ["Adapter info", result.adapterInfo],
+    [
+      "navigator.gpu",
+      result.apiAvailable,
+    ],
+    [
+      "Adapter available",
+      result.adapterAvailable,
+    ],
+    [
+      "Adapter info",
+      result.adapterInfo,
+    ],
     ["Started", result.startedAt],
     ["Completed", result.completedAt],
     ["Error", result.error],
@@ -627,8 +986,14 @@ function renderTranslator(
   result: TranslatorProbeResult,
 ): void {
   renderRows(translatorResults, [
-    ["Translator exposed", result.exposed],
-    ["Availability", result.availability],
+    [
+      "Translator exposed",
+      result.exposed,
+    ],
+    [
+      "Availability",
+      result.availability,
+    ],
     ["Started", result.startedAt],
     ["Completed", result.completedAt],
     ["Error", result.error],
@@ -673,18 +1038,25 @@ function renderSnapshot(
 function renderRows(
   container: HTMLTableSectionElement,
   rows: ReadonlyArray<
-    readonly [label: string, value: TableValue]
+    readonly [
+      label: string,
+      value: TableValue,
+    ]
   >,
 ): void {
   container.replaceChildren(
     ...rows.map(([label, value]) => {
-      const row = document.createElement("tr");
-      const heading = document.createElement("th");
-      const cell = document.createElement("td");
+      const row =
+        document.createElement("tr");
+      const heading =
+        document.createElement("th");
+      const cell =
+        document.createElement("td");
 
       heading.scope = "row";
       heading.textContent = label;
-      cell.textContent = formatValue(value);
+      cell.textContent =
+        formatValue(value);
       row.append(heading, cell);
 
       return row;
@@ -692,13 +1064,22 @@ function renderRows(
   );
 }
 
-function formatValue(value: TableValue): string {
-  if (value === undefined || value === null) {
+function formatValue(
+  value: TableValue,
+): string {
+  if (
+    value === undefined ||
+    value === null
+  ) {
     return "—";
   }
 
   if (typeof value === "object") {
-    return JSON.stringify(value, null, 2);
+    return JSON.stringify(
+      value,
+      null,
+      2,
+    );
   }
 
   return String(value);
@@ -716,11 +1097,12 @@ function readAdapterInfo(
     return undefined;
   }
 
-  const record = rawInfo as Record<string, unknown>;
-  const vendor = nonEmptyString(record.vendor);
-  const architecture = nonEmptyString(
-    record.architecture,
-  );
+  const record =
+    rawInfo as Record<string, unknown>;
+  const vendor =
+    nonEmptyString(record.vendor);
+  const architecture =
+    nonEmptyString(record.architecture);
 
   if (
     vendor === undefined &&
@@ -730,7 +1112,9 @@ function readAdapterInfo(
   }
 
   return {
-    ...(vendor === undefined ? {} : { vendor }),
+    ...(vendor === undefined
+      ? {}
+      : { vendor }),
     ...(architecture === undefined
       ? {}
       : { architecture }),
@@ -740,7 +1124,10 @@ function readAdapterInfo(
 function nonEmptyString(
   value: unknown,
 ): string | undefined {
-  return typeof value === "string" && value.length > 0
+  return (
+    typeof value === "string" &&
+    value.length > 0
+  )
     ? value
     : undefined;
 }
@@ -756,14 +1143,19 @@ function setBusy(
   );
 }
 
-function setStatus(message: string): void {
+function setStatus(
+  message: string,
+): void {
   statusElement.textContent = message;
 }
 
-function requireElement<T extends HTMLElement>(
+function requireElement<
+  T extends HTMLElement,
+>(
   id: string,
 ): T {
-  const element = document.getElementById(id);
+  const element =
+    document.getElementById(id);
 
   if (element === null) {
     throw new Error(
