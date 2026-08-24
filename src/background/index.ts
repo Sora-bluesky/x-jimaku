@@ -1306,6 +1306,13 @@ function failActiveCaptureUnexpectedly(
         requestId,
       );
     }
+
+    if (offscreenPort !== null) {
+      postStopToOffscreen(
+        offscreenPort,
+        requestId,
+      );
+    }
   }
 
   clearSessionTracking();
