@@ -1035,14 +1035,19 @@ function postRecognition(
     return;
   }
 
-  if (isMostlyJapanese(text)) {
+  const skipTranslation =
+    isMostlyJapanese(text);
+
+  if (!line.final) {
     postToBackground({
       t: "OFF_RECOG",
       id: line.id,
       text,
-      final: line.final,
+      final: false,
       at: line.at,
-      ja: text,
+      ...(skipTranslation
+        ? { ja: text }
+        : {}),
     });
     return;
   }
@@ -1051,19 +1056,16 @@ function postRecognition(
     t: "OFF_RECOG",
     id: line.id,
     text,
-    final: line.final,
+    final: true,
     at: line.at,
   });
-
-  if (!line.final) {
-    return;
-  }
 
   activeTranslationEngine?.enqueue({
     id: line.id,
     text,
     final: true,
     at: line.at,
+    skipTranslation,
   });
 }
 

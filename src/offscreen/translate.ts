@@ -16,6 +16,11 @@ export interface ContentTranslationResponse {
   ja: string;
 }
 
+export interface TranslationQueueEntry
+  extends RecognitionPayload {
+  skipTranslation?: boolean;
+}
+
 export interface TranslationEngineOptions {
   requestContentTranslation(
     text: string,
@@ -42,7 +47,7 @@ export class TranslationEngine {
   private readonly options:
     TranslationEngineOptions;
   private readonly queue:
-    RecognitionPayload[] = [];
+    TranslationQueueEntry[] = [];
   private readonly failedPaths =
     new Set<TranslationPath>();
 
@@ -92,12 +97,18 @@ export class TranslationEngine {
     return operation;
   }
 
-  enqueue(line: RecognitionPayload): void {
+  enqueue(line: TranslationQueueEntry): void {
+    const skipTranslation =
+      line.skipTranslation === true;
+
     if (
       this.destroyed ||
       !line.final ||
       line.text.trim() === "" ||
-      this.path === "none"
+      (
+        this.path === "none" &&
+        !skipTranslation
+      )
     ) {
       return;
     }
@@ -115,10 +126,13 @@ export class TranslationEngine {
       if (dropped !== undefined) {
         console.warn(
           "[translate]",
-          "dropped oldest untranslated committed clause",
+          "dropped oldest pending committed clause",
           {
             id: dropped.id,
             text: dropped.text,
+            skipTranslation:
+              dropped.skipTranslation ===
+              true,
           },
         );
       }
@@ -127,6 +141,7 @@ export class TranslationEngine {
     this.queue.push({
       ...line,
       final: true,
+      skipTranslation,
     });
     this.runQueue();
   }
@@ -150,9 +165,23 @@ export class TranslationEngine {
   private runQueue(): void {
     if (
       this.destroyed ||
-      this.processing ||
-      this.path === null ||
-      this.path === "none"
+      this.processing
+    ) {
+      return;
+    }
+
+    const next = this.queue[0];
+
+    if (next === undefined) {
+      return;
+    }
+
+    if (
+      next.skipTranslation !== true &&
+      (
+        this.path === null ||
+        this.path === "none"
+      )
     ) {
       return;
     }
@@ -164,17 +193,19 @@ export class TranslationEngine {
     }
 
     this.processing = true;
-    void this.translateClause(line);
+    void this.processClause(line);
   }
 
-  private async translateClause(
-    line: RecognitionPayload,
+  private async processClause(
+    line: TranslationQueueEntry,
   ): Promise<void> {
     try {
       const ja =
-        await this.translateWithFallback(
-          line.text,
-        );
+        line.skipTranslation === true
+          ? line.text
+          : await this.translateWithFallback(
+              line.text,
+            );
 
       if (
         this.destroyed ||
@@ -535,9 +566,16 @@ export class TranslationEngine {
     this.path = path;
 
     if (path === "none") {
+      const skipEntries =
+        this.queue.filter(
+          (line) =>
+            line.skipTranslation === true,
+        );
+
       this.queue.splice(
         0,
         this.queue.length,
+        ...skipEntries,
       );
     }
 
