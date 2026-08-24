@@ -1,9 +1,17 @@
+import {
+  isWhisperDevice,
+  isWhisperModel,
+  type WhisperDevice,
+  type WhisperModel,
+} from "./settings";
+
 export const CAPTURE_STATE_STORAGE_KEY =
   "m1.captureState" as const;
 
 export type CaptureStatus =
   | "idle"
   | "starting"
+  | "loadingModel"
   | "running"
   | "stopping"
   | "error";
@@ -19,21 +27,38 @@ export interface CaptureState {
   updatedAt: string;
   requestId?: string;
   tabId?: number;
+  progress?: number;
+  model?: WhisperModel;
+  device?: WhisperDevice;
   error?: CaptureStateError;
 }
 
 export interface CaptureStateDetails {
   requestId?: string;
   tabId?: number;
+  progress?: number;
+  model?: WhisperModel;
+  device?: WhisperDevice;
   error?: CaptureStateError;
 }
 
 const ALLOWED_TRANSITIONS: Readonly<
   Record<CaptureStatus, ReadonlySet<CaptureStatus>>
 > = {
-  idle: new Set(["idle", "starting", "error"]),
+  idle: new Set([
+    "idle",
+    "starting",
+    "error",
+  ]),
   starting: new Set([
     "starting",
+    "loadingModel",
+    "running",
+    "stopping",
+    "error",
+  ]),
+  loadingModel: new Set([
+    "loadingModel",
     "running",
     "stopping",
     "error",
@@ -67,6 +92,19 @@ export function createCaptureState(
     ...(details.tabId === undefined
       ? {}
       : { tabId: details.tabId }),
+    ...(details.progress === undefined
+      ? {}
+      : {
+          progress: clampProgress(
+            details.progress,
+          ),
+        }),
+    ...(details.model === undefined
+      ? {}
+      : { model: details.model }),
+    ...(details.device === undefined
+      ? {}
+      : { device: details.device }),
     ...(details.error === undefined
       ? {}
       : { error: details.error }),
@@ -79,7 +117,9 @@ export function transitionCaptureState(
   details: CaptureStateDetails = {},
 ): CaptureState {
   if (
-    !ALLOWED_TRANSITIONS[current.status].has(nextStatus)
+    !ALLOWED_TRANSITIONS[current.status].has(
+      nextStatus,
+    )
   ) {
     throw new Error(
       `Invalid capture transition: ${current.status} -> ${nextStatus}`,
@@ -88,23 +128,60 @@ export function transitionCaptureState(
 
   const preserveSession =
     nextStatus === "starting" ||
+    nextStatus === "loadingModel" ||
     nextStatus === "running" ||
     nextStatus === "stopping";
 
   const requestId =
     details.requestId ??
-    (preserveSession ? current.requestId : undefined);
+    (
+      preserveSession
+        ? current.requestId
+        : undefined
+    );
   const tabId =
     details.tabId ??
-    (preserveSession ? current.tabId : undefined);
+    (
+      preserveSession
+        ? current.tabId
+        : undefined
+    );
+  const progress =
+    details.progress ??
+    (
+      preserveSession
+        ? current.progress
+        : undefined
+    );
+  const model =
+    details.model ??
+    (
+      preserveSession
+        ? current.model
+        : undefined
+    );
+  const device =
+    details.device ??
+    (
+      preserveSession
+        ? current.device
+        : undefined
+    );
   const error =
     nextStatus === "error"
       ? details.error ?? current.error
       : undefined;
 
   return createCaptureState(nextStatus, {
-    ...(requestId === undefined ? {} : { requestId }),
+    ...(requestId === undefined
+      ? {}
+      : { requestId }),
     ...(tabId === undefined ? {} : { tabId }),
+    ...(progress === undefined
+      ? {}
+      : { progress }),
+    ...(model === undefined ? {} : { model }),
+    ...(device === undefined ? {} : { device }),
     ...(error === undefined ? {} : { error }),
   });
 }
@@ -140,6 +217,32 @@ export function isCaptureState(
     return false;
   }
 
+  if (
+    value.progress !== undefined &&
+    (
+      typeof value.progress !== "number" ||
+      !Number.isFinite(value.progress) ||
+      value.progress < 0 ||
+      value.progress > 100
+    )
+  ) {
+    return false;
+  }
+
+  if (
+    value.model !== undefined &&
+    !isWhisperModel(value.model)
+  ) {
+    return false;
+  }
+
+  if (
+    value.device !== undefined &&
+    !isWhisperDevice(value.device)
+  ) {
+    return false;
+  }
+
   return (
     value.error === undefined ||
     isCaptureStateError(value.error)
@@ -152,10 +255,21 @@ export function isCaptureStatus(
   return (
     value === "idle" ||
     value === "starting" ||
+    value === "loadingModel" ||
     value === "running" ||
     value === "stopping" ||
     value === "error"
   );
+}
+
+function clampProgress(
+  progress: number,
+): number {
+  if (!Number.isFinite(progress)) {
+    return 0;
+  }
+
+  return Math.max(0, Math.min(100, progress));
 }
 
 function isCaptureStateError(

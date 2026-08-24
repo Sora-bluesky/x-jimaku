@@ -1,11 +1,22 @@
 const TARGET_SAMPLE_RATE = 16_000;
 const RING_BUFFER_SECONDS = 30;
 const RMS_WINDOW_SECONDS = 0.1;
+const ENERGY_HOP_SECONDS = 0.02;
 const LEVEL_INTERVAL_MS = 100;
+
+const ENERGY_HOP_SAMPLES = Math.round(
+  TARGET_SAMPLE_RATE * ENERGY_HOP_SECONDS,
+);
 
 export interface AudioCaptureCallbacks {
   onLevel(rms: number): void;
   onEnded(requestId: string): void;
+}
+
+export interface AudioEnergyFrame {
+  startOffset: number;
+  endOffset: number;
+  rms: number;
 }
 
 export class AudioCapture {
@@ -28,12 +39,18 @@ export class AudioCapture {
   private requestId: string | null = null;
   private callbacks: AudioCaptureCallbacks | null = null;
   private cleanupPromise: Promise<void> | null = null;
-  private fallbackSamples: Float32Array = new Float32Array(0);
   private sourceSampleRate = TARGET_SAMPLE_RATE;
   private writePos = 0;
-  private committedOffset = 0;
+  private totalSamplesWritten = 0;
   private lastLevelEmittedAt =
     Number.NEGATIVE_INFINITY;
+  private energyWindowSumSquares = 0;
+  private energyWindowSampleCount = 0;
+  private readonly energyHistory:
+    AudioEnergyFrame[] = [];
+  private downsampler:
+    | StreamingLinearDownsampler
+    | null = null;
 
   isActive(): boolean {
     return (
@@ -41,6 +58,61 @@ export class AudioCapture {
       this.playbackContext !== null ||
       this.captureContext !== null
     );
+  }
+
+  getWriteOffset(): number {
+    return this.totalSamplesWritten;
+  }
+
+  getCapacitySamples(): number {
+    return this.ringBuffer.length;
+  }
+
+  getEnergyHistory(): readonly AudioEnergyFrame[] {
+    return this.energyHistory.slice();
+  }
+
+  copySamples(
+    startOffset: number,
+    endOffset: number,
+  ): Float32Array {
+    const availableStart = Math.max(
+      0,
+      this.totalSamplesWritten -
+      this.ringBuffer.length,
+    );
+
+    if (
+      !Number.isSafeInteger(startOffset) ||
+      !Number.isSafeInteger(endOffset) ||
+      startOffset < availableStart ||
+      endOffset < startOffset ||
+      endOffset > this.totalSamplesWritten
+    ) {
+      throw new RangeError(
+        `Requested audio range [${startOffset}, ${endOffset}) is outside [${availableStart}, ${this.totalSamplesWritten})`,
+      );
+    }
+
+    const output = new Float32Array(
+      endOffset - startOffset,
+    );
+
+    for (
+      let index = 0;
+      index < output.length;
+      index += 1
+    ) {
+      const absoluteOffset =
+        startOffset + index;
+      const ringIndex =
+        absoluteOffset % this.ringBuffer.length;
+
+      output[index] =
+        this.ringBuffer[ringIndex] ?? 0;
+    }
+
+    return output;
   }
 
   async start(
@@ -58,9 +130,13 @@ export class AudioCapture {
     this.requestId = requestId;
     this.callbacks = callbacks;
     this.writePos = 0;
-    this.committedOffset = 0;
-    this.fallbackSamples = new Float32Array(0);
+    this.totalSamplesWritten = 0;
+    this.sourceSampleRate = TARGET_SAMPLE_RATE;
+    this.downsampler = null;
     this.ringBuffer.fill(0);
+    this.energyHistory.length = 0;
+    this.energyWindowSumSquares = 0;
+    this.energyWindowSampleCount = 0;
     this.lastLevelEmittedAt =
       Number.NEGATIVE_INFINITY;
 
@@ -158,6 +234,12 @@ export class AudioCapture {
     this.sourceSampleRate = context.sampleRate;
 
     if (context.sampleRate !== TARGET_SAMPLE_RATE) {
+      this.downsampler =
+        new StreamingLinearDownsampler(
+          context.sampleRate,
+          TARGET_SAMPLE_RATE,
+        );
+
       console.warn(
         "[audio]",
         "capture context requires fallback downsampling",
@@ -218,35 +300,12 @@ export class AudioCapture {
       return;
     }
 
-    this.fallbackSamples = concatenateSamples(
-      this.fallbackSamples,
-      frame,
-    );
+    const downsampled =
+      this.downsampler?.push(frame) ??
+      new Float32Array(0);
 
-    const sourceChunkSize = Math.max(
-      1,
-      Math.round(this.sourceSampleRate / 10),
-    );
-
-    while (
-      this.fallbackSamples.length >= sourceChunkSize
-    ) {
-      const sourceChunk =
-        this.fallbackSamples.slice(
-          0,
-          sourceChunkSize,
-        );
-
-      this.fallbackSamples =
-        this.fallbackSamples.slice(sourceChunkSize);
-
-      this.appendSamples(
-        downsampleLinear(
-          sourceChunk,
-          this.sourceSampleRate,
-          TARGET_SAMPLE_RATE,
-        ),
-      );
+    if (downsampled.length > 0) {
+      this.appendSamples(downsampled);
     }
 
     this.maybeEmitLevel();
@@ -255,15 +314,72 @@ export class AudioCapture {
   private appendSamples(
     samples: Float32Array,
   ): void {
-    for (let index = 0; index < samples.length; index += 1) {
-      this.ringBuffer[this.writePos] =
-        samples[index] ?? 0;
-      this.writePos =
-        (this.writePos + 1) %
-        this.ringBuffer.length;
-    }
+    for (
+      let index = 0;
+      index < samples.length;
+      index += 1
+    ) {
+      const sample = samples[index] ?? 0;
 
-    this.committedOffset += samples.length;
+      this.ringBuffer[this.writePos] = sample;
+      this.writePos =
+        (
+          this.writePos + 1
+        ) % this.ringBuffer.length;
+      this.totalSamplesWritten += 1;
+
+      this.energyWindowSumSquares +=
+        sample * sample;
+      this.energyWindowSampleCount += 1;
+
+      if (
+        this.energyWindowSampleCount >=
+        ENERGY_HOP_SAMPLES
+      ) {
+        this.appendEnergyFrame();
+      }
+    }
+  }
+
+  private appendEnergyFrame(): void {
+    const endOffset =
+      this.totalSamplesWritten;
+    const sampleCount =
+      this.energyWindowSampleCount;
+    const rms =
+      sampleCount === 0
+        ? 0
+        : Math.sqrt(
+            this.energyWindowSumSquares /
+            sampleCount,
+          );
+
+    this.energyHistory.push({
+      startOffset:
+        endOffset - sampleCount,
+      endOffset,
+      rms,
+    });
+
+    this.energyWindowSumSquares = 0;
+    this.energyWindowSampleCount = 0;
+
+    const maximumFrames =
+      Math.ceil(
+        this.ringBuffer.length /
+        ENERGY_HOP_SAMPLES,
+      ) + 2;
+
+    if (
+      this.energyHistory.length >
+      maximumFrames
+    ) {
+      this.energyHistory.splice(
+        0,
+        this.energyHistory.length -
+        maximumFrames,
+      );
+    }
   }
 
   private maybeEmitLevel(): void {
@@ -284,12 +400,13 @@ export class AudioCapture {
 
   private computeRecentRms(): number {
     const availableSamples = Math.min(
-      this.committedOffset,
+      this.totalSamplesWritten,
       this.ringBuffer.length,
     );
     const windowSamples = Math.min(
       Math.round(
-        TARGET_SAMPLE_RATE * RMS_WINDOW_SECONDS,
+        TARGET_SAMPLE_RATE *
+        RMS_WINDOW_SECONDS,
       ),
       availableSamples,
     );
@@ -315,16 +432,20 @@ export class AudioCapture {
         this.ringBuffer[readPos] ?? 0;
       sumSquares += sample * sample;
       readPos =
-        (readPos + 1) %
-        this.ringBuffer.length;
+        (
+          readPos + 1
+        ) % this.ringBuffer.length;
     }
 
-    return Math.sqrt(sumSquares / windowSamples);
+    return Math.sqrt(
+      sumSquares / windowSamples,
+    );
   }
 
   private handleTrackEnded(): void {
     const endedRequestId = this.requestId;
-    const endedCallback = this.callbacks?.onEnded;
+    const endedCallback =
+      this.callbacks?.onEnded;
 
     if (
       endedRequestId === null ||
@@ -368,9 +489,12 @@ export class AudioCapture {
     const stream = this.stream;
     const playbackContext =
       this.playbackContext;
-    const captureContext = this.captureContext;
-    const playbackSource = this.playbackSource;
-    const captureSource = this.captureSource;
+    const captureContext =
+      this.captureContext;
+    const playbackSource =
+      this.playbackSource;
+    const captureSource =
+      this.captureSource;
     const workletNode = this.workletNode;
     const silentGain = this.silentGain;
 
@@ -383,7 +507,8 @@ export class AudioCapture {
     this.silentGain = null;
     this.requestId = null;
     this.callbacks = null;
-    this.fallbackSamples = new Float32Array(0);
+    this.downsampler?.reset();
+    this.downsampler = null;
 
     if (workletNode !== null) {
       workletNode.port.onmessage = null;
@@ -436,21 +561,109 @@ export class AudioCapture {
   }
 }
 
+export class StreamingLinearDownsampler {
+  private readonly sourceStep: number;
+  private bufferedSamples: Float32Array =
+    new Float32Array(0);
+  private nextSourcePosition = 0;
+
+  constructor(
+    sourceSampleRate: number,
+    targetSampleRate: number =
+      TARGET_SAMPLE_RATE,
+  ) {
+    validateSampleRates(
+      sourceSampleRate,
+      targetSampleRate,
+    );
+
+    this.sourceStep =
+      sourceSampleRate / targetSampleRate;
+  }
+
+  push(input: Float32Array): Float32Array {
+    if (input.length === 0) {
+      return new Float32Array(0);
+    }
+
+    this.bufferedSamples = concatenateSamples(
+      this.bufferedSamples,
+      input,
+    );
+
+    const finalInterpolatablePosition =
+      this.bufferedSamples.length - 1;
+
+    if (
+      this.nextSourcePosition >=
+      finalInterpolatablePosition
+    ) {
+      return new Float32Array(0);
+    }
+
+    const outputLength = Math.ceil(
+      (
+        finalInterpolatablePosition -
+        this.nextSourcePosition
+      ) / this.sourceStep,
+    );
+    const output =
+      new Float32Array(outputLength);
+
+    let sourcePosition =
+      this.nextSourcePosition;
+
+    for (
+      let outputIndex = 0;
+      outputIndex < outputLength;
+      outputIndex += 1
+    ) {
+      const leftIndex =
+        Math.floor(sourcePosition);
+      const rightIndex = leftIndex + 1;
+      const fraction =
+        sourcePosition - leftIndex;
+      const left =
+        this.bufferedSamples[leftIndex] ?? 0;
+      const right =
+        this.bufferedSamples[rightIndex] ??
+        left;
+
+      output[outputIndex] =
+        left + (right - left) * fraction;
+      sourcePosition += this.sourceStep;
+    }
+
+    const dropCount = Math.min(
+      Math.floor(sourcePosition),
+      this.bufferedSamples.length - 1,
+    );
+
+    this.bufferedSamples =
+      this.bufferedSamples.slice(dropCount);
+    this.nextSourcePosition =
+      sourcePosition - dropCount;
+
+    return output;
+  }
+
+  reset(): void {
+    this.bufferedSamples =
+      new Float32Array(0);
+    this.nextSourcePosition = 0;
+  }
+}
+
 export function downsampleLinear(
   input: Float32Array,
   sourceSampleRate: number,
-  targetSampleRate: number = TARGET_SAMPLE_RATE,
+  targetSampleRate: number =
+    TARGET_SAMPLE_RATE,
 ): Float32Array {
-  if (
-    !Number.isFinite(sourceSampleRate) ||
-    sourceSampleRate <= 0 ||
-    !Number.isFinite(targetSampleRate) ||
-    targetSampleRate <= 0
-  ) {
-    throw new RangeError(
-      "Sample rates must be finite positive numbers",
-    );
-  }
+  validateSampleRates(
+    sourceSampleRate,
+    targetSampleRate,
+  );
 
   if (input.length === 0) {
     return new Float32Array(0);
@@ -468,7 +681,8 @@ export function downsampleLinear(
       sourceSampleRate,
     ),
   );
-  const output = new Float32Array(outputLength);
+  const output =
+    new Float32Array(outputLength);
   const sourceStep =
     sourceSampleRate / targetSampleRate;
 
@@ -490,13 +704,30 @@ export function downsampleLinear(
     const fraction =
       sourcePosition - leftIndex;
     const left = input[leftIndex] ?? 0;
-    const right = input[rightIndex] ?? left;
+    const right =
+      input[rightIndex] ?? left;
 
     output[outputIndex] =
       left + (right - left) * fraction;
   }
 
   return output;
+}
+
+function validateSampleRates(
+  sourceSampleRate: number,
+  targetSampleRate: number,
+): void {
+  if (
+    !Number.isFinite(sourceSampleRate) ||
+    sourceSampleRate <= 0 ||
+    !Number.isFinite(targetSampleRate) ||
+    targetSampleRate <= 0
+  ) {
+    throw new RangeError(
+      "Sample rates must be finite positive numbers",
+    );
+  }
 }
 
 function concatenateSamples(

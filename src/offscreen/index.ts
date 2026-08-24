@@ -2,6 +2,7 @@ import {
   getProbeEnvironment,
   isCapturePortMessage,
   isMessageOfType,
+  isWhisperWorkerOutputMessage,
   nowIso,
   toProbeError,
   type AdapterInfo,
@@ -11,16 +12,27 @@ import {
   type ProbeFailureMessage,
   type TranslatorProbeResult,
   type WebGpuProbeResult,
+  type WhisperInitMessage,
+  type WhisperWorkerOutputMessage,
   type WorkerProbeRequest,
 } from "../shared/messages";
 import {
   createCaptureState,
   type CaptureState,
 } from "../shared/state";
+import type {
+  Settings,
+  WhisperDevice,
+  WhisperModel,
+} from "../shared/settings";
 import {
   AudioCapture,
   type AudioCaptureCallbacks,
 } from "./audio-capture";
+import {
+  WhisperSegmenter,
+  type RecognitionLine,
+} from "./segmenter";
 
 interface GpuLike {
   requestAdapter(): Promise<GpuAdapterLike | null>;
@@ -33,6 +45,16 @@ interface GpuAdapterLike {
 type TranslatorScope = typeof globalThis & {
   Translator?: TranslatorFactory;
 };
+
+interface WhisperSessionCallbacks {
+  onProgress(message: {
+    file: string;
+    progress: number;
+    loaded: number;
+    total: number;
+  }): void;
+  onFatal(error: Error): void;
+}
 
 const OFFSCREEN_PORT_NAME = "offscreen";
 const INITIAL_RECONNECT_DELAY_MS = 100;
@@ -48,6 +70,18 @@ let localCaptureState =
 let latestRms = 0;
 let captureOperationTail: Promise<void> =
   Promise.resolve();
+let activeWhisperSession:
+  | WhisperSession
+  | null = null;
+let activeSegmenter:
+  | WhisperSegmenter
+  | null = null;
+let activeRecognitionRequestId:
+  | string
+  | null = null;
+let lastModelProgress = 0;
+
+const requestedStopIds = new Set<string>();
 
 console.log("[offscreen]", "document ready");
 
@@ -73,11 +107,12 @@ chrome.runtime.onMessage.addListener(
 
     void runOffscreenProbe(message.requestId)
       .then((result) => {
-        const response: OffscreenProbeResultMessage = {
-          t: "OFFSCREEN_PROBE_RESULT",
-          requestId: message.requestId,
-          result,
-        };
+        const response:
+          OffscreenProbeResultMessage = {
+            t: "OFFSCREEN_PROBE_RESULT",
+            requestId: message.requestId,
+            result,
+          };
 
         console.log(
           "[offscreen]",
@@ -124,7 +159,8 @@ function connectBackgroundPort(): void {
     });
 
     backgroundPort = port;
-    reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
+    reconnectDelayMs =
+      INITIAL_RECONNECT_DELAY_MS;
 
     port.onMessage.addListener(
       (message: unknown) => {
@@ -140,18 +176,34 @@ function connectBackgroundPort(): void {
         if (
           isMessageOfType(message, "OFF_START")
         ) {
+          requestedStopIds.delete(
+            message.requestId,
+          );
+
           void enqueueCaptureOperation(() =>
             handleCaptureStart(
               message.streamId,
               message.requestId,
+              message.settings,
             ),
           );
           return;
         }
 
-        if (isMessageOfType(message, "OFF_STOP")) {
+        if (
+          isMessageOfType(message, "OFF_STOP")
+        ) {
+          requestedStopIds.add(
+            message.requestId,
+          );
+          terminateRecognition(
+            message.requestId,
+          );
+
           void enqueueCaptureOperation(() =>
-            handleCaptureStop(message.requestId),
+            handleCaptureStop(
+              message.requestId,
+            ),
           );
         }
       },
@@ -202,10 +254,13 @@ function scheduleReconnect(): void {
     MAX_RECONNECT_DELAY_MS,
   );
 
-  reconnectTimerId = globalThis.setTimeout(() => {
-    reconnectTimerId = null;
-    connectBackgroundPort();
-  }, delay);
+  reconnectTimerId = self.setTimeout(
+    () => {
+      reconnectTimerId = null;
+      connectBackgroundPort();
+    },
+    delay,
+  );
 }
 
 function enqueueCaptureOperation(
@@ -231,11 +286,17 @@ function enqueueCaptureOperation(
 async function handleCaptureStart(
   streamId: string,
   requestId: string,
+  settings: Settings,
 ): Promise<void> {
   if (audioCapture.isActive()) {
     if (
       localCaptureState.requestId === requestId &&
-      localCaptureState.status === "running"
+      (
+        localCaptureState.status === "starting" ||
+        localCaptureState.status ===
+          "loadingModel" ||
+        localCaptureState.status === "running"
+      )
     ) {
       postState();
       return;
@@ -267,17 +328,37 @@ async function handleCaptureStart(
     },
 
     onEnded(endedRequestId) {
+      requestedStopIds.add(endedRequestId);
+      terminateRecognition(endedRequestId);
+
       void enqueueCaptureOperation(async () => {
         if (
           localCaptureState.requestId !==
           endedRequestId
         ) {
+          requestedStopIds.delete(
+            endedRequestId,
+          );
           return;
         }
 
         publishState(
           createCaptureState("stopping", {
             requestId: endedRequestId,
+            ...(localCaptureState.model ===
+            undefined
+              ? {}
+              : {
+                  model:
+                    localCaptureState.model,
+                }),
+            ...(localCaptureState.device ===
+            undefined
+              ? {}
+              : {
+                  device:
+                    localCaptureState.device,
+                }),
           }),
         );
 
@@ -289,9 +370,15 @@ async function handleCaptureStart(
             requestId: endedRequestId,
           }),
         );
+
+        requestedStopIds.delete(
+          endedRequestId,
+        );
       });
     },
   };
+
+  let model: WhisperModel | undefined;
 
   try {
     await audioCapture.start(
@@ -300,21 +387,234 @@ async function handleCaptureStart(
       callbacks,
     );
 
+    if (requestedStopIds.has(requestId)) {
+      return;
+    }
+
+    model = settings.model;
+
+    if (requestedStopIds.has(requestId)) {
+      return;
+    }
+
+    lastModelProgress = 0;
+
+    publishState(
+      createCaptureState("loadingModel", {
+        requestId,
+        model,
+        progress: 0,
+      }),
+    );
+
+    const ortBaseUrl =
+      chrome.runtime.getURL("ort/");
+
+    const createSession = (
+      sessionWorker: Worker,
+    ): WhisperSession => {
+      let session: WhisperSession;
+
+      session = new WhisperSession(
+        sessionWorker,
+        {
+          onProgress(message) {
+            if (
+              activeWhisperSession !== session ||
+              requestedStopIds.has(requestId)
+            ) {
+              return;
+            }
+
+            const progress = Math.max(
+              lastModelProgress,
+              Math.round(message.progress),
+            );
+
+            if (
+              progress === lastModelProgress &&
+              localCaptureState.status ===
+                "loadingModel"
+            ) {
+              return;
+            }
+
+            lastModelProgress = progress;
+
+            publishState(
+              createCaptureState(
+                "loadingModel",
+                {
+                  requestId,
+                  model,
+                  progress,
+                },
+              ),
+            );
+          },
+
+          onFatal(error) {
+            if (
+              activeWhisperSession !== session
+            ) {
+              return;
+            }
+
+            void handleRecognitionFatal(
+              requestId,
+              error,
+            );
+          },
+        },
+      );
+
+      return session;
+    };
+
+    let worker = createWhisperWorker();
+    let session = createSession(worker);
+
+    activeWhisperSession = session;
+    activeRecognitionRequestId = requestId;
+
+    let device: WhisperDevice;
+
+    try {
+      device = await session.initialize(
+        model,
+        ortBaseUrl,
+      );
+    } catch (webGpuError) {
+      if (
+        !isWebGpuInitializationFailure(
+          webGpuError,
+        )
+      ) {
+        throw webGpuError;
+      }
+
+      console.warn(
+        "[offscreen]",
+        "WebGPU initialization failed; retrying in a fresh worker with WASM",
+        webGpuError,
+      );
+
+      session.terminate();
+
+      if (activeWhisperSession === session) {
+        activeWhisperSession = null;
+      }
+
+      if (requestedStopIds.has(requestId)) {
+        return;
+      }
+
+      lastModelProgress = 0;
+
+      publishState(
+        createCaptureState("loadingModel", {
+          requestId,
+          model,
+          progress: 0,
+        }),
+      );
+
+      try {
+        worker = createWhisperWorker();
+        session = createSession(worker);
+
+        activeWhisperSession = session;
+        activeRecognitionRequestId =
+          requestId;
+
+        device = await session.initialize(
+          model,
+          ortBaseUrl,
+          "wasm",
+        );
+      } catch (wasmError) {
+        throw combineInitializationErrors(
+          webGpuError,
+          wasmError,
+        );
+      }
+    }
+
+    if (
+      requestedStopIds.has(requestId) ||
+      activeWhisperSession !== session
+    ) {
+      return;
+    }
+
+    activeSegmenter =
+      new WhisperSegmenter({
+        worker,
+        getWriteOffset: () =>
+          audioCapture.getWriteOffset(),
+        getCapacitySamples: () =>
+          audioCapture.getCapacitySamples(),
+        copySamples: (
+          startOffset,
+          endOffset,
+        ) =>
+          audioCapture.copySamples(
+            startOffset,
+            endOffset,
+          ),
+        getEnergyHistory: () =>
+          audioCapture.getEnergyHistory(),
+        onLine: postRecognition,
+        onError(message) {
+          console.warn(
+            "[offscreen]",
+            "non-fatal recognition failure",
+            message,
+          );
+        },
+      });
+
+    activeSegmenter.start();
+
     publishState(
       createCaptureState("running", {
         requestId,
+        model,
+        device,
+        progress: 100,
       }),
     );
 
     console.log("[offscreen]", "capture running", {
       requestId,
+      model,
+      device,
     });
   } catch (error) {
+    if (
+      requestedStopIds.has(requestId) ||
+      isAbortError(error)
+    ) {
+      return;
+    }
+
     console.error(
       "[offscreen]",
       "capture start failed",
       error,
     );
+
+    terminateRecognition(requestId);
+
+    try {
+      await audioCapture.stop();
+    } catch (cleanupError) {
+      console.error(
+        "[offscreen]",
+        "capture cleanup after startup failure failed",
+        cleanupError,
+      );
+    }
 
     latestRms = 0;
     postLevel();
@@ -322,6 +622,9 @@ async function handleCaptureStart(
     publishState(
       createCaptureState("error", {
         requestId,
+        ...(model === undefined
+          ? {}
+          : { model }),
         error: toProbeError(error),
       }),
     );
@@ -334,8 +637,19 @@ async function handleCaptureStop(
   publishState(
     createCaptureState("stopping", {
       requestId,
+      ...(localCaptureState.model === undefined
+        ? {}
+        : { model: localCaptureState.model }),
+      ...(localCaptureState.device === undefined
+        ? {}
+        : {
+            device:
+              localCaptureState.device,
+          }),
     }),
   );
+
+  terminateRecognition(requestId);
 
   try {
     await audioCapture.stop();
@@ -365,7 +679,106 @@ async function handleCaptureStop(
         error: toProbeError(error),
       }),
     );
+  } finally {
+    requestedStopIds.delete(requestId);
   }
+}
+
+async function handleRecognitionFatal(
+  requestId: string,
+  error: Error,
+): Promise<void> {
+  if (
+    activeRecognitionRequestId !== requestId ||
+    localCaptureState.requestId !== requestId
+  ) {
+    return;
+  }
+
+  terminateRecognition(requestId);
+
+  await enqueueCaptureOperation(async () => {
+    if (
+      localCaptureState.requestId !== requestId ||
+      requestedStopIds.has(requestId)
+    ) {
+      return;
+    }
+
+    try {
+      await audioCapture.stop();
+    } catch (cleanupError) {
+      console.error(
+        "[offscreen]",
+        "audio cleanup after fatal recognition failure failed",
+        cleanupError,
+      );
+    }
+
+    latestRms = 0;
+    postLevel();
+
+    publishState(
+      createCaptureState("error", {
+        requestId,
+        ...(localCaptureState.model === undefined
+          ? {}
+          : {
+              model:
+                localCaptureState.model,
+            }),
+        ...(localCaptureState.device === undefined
+          ? {}
+          : {
+              device:
+                localCaptureState.device,
+            }),
+        error: toProbeError(error),
+      }),
+    );
+  });
+}
+
+function terminateRecognition(
+  requestId?: string,
+): void {
+  if (
+    requestId !== undefined &&
+    activeRecognitionRequestId !== null &&
+    activeRecognitionRequestId !== requestId
+  ) {
+    return;
+  }
+
+  activeSegmenter?.stop();
+  activeSegmenter = null;
+
+  activeWhisperSession?.terminate();
+  activeWhisperSession = null;
+  activeRecognitionRequestId = null;
+  lastModelProgress = 0;
+}
+
+function createWhisperWorker(): Worker {
+  return new Worker(
+    new URL(
+      "../worker/whisper.worker.ts",
+      import.meta.url,
+    ),
+    { type: "module" },
+  );
+}
+
+function postRecognition(
+  line: RecognitionLine,
+): void {
+  postToBackground({
+    t: "OFF_RECOG",
+    id: line.id,
+    text: line.text,
+    final: line.final,
+    at: line.at,
+  });
 }
 
 function publishState(
@@ -409,17 +822,290 @@ function postToBackground(
   }
 }
 
+class WhisperSession {
+  private readonly worker: Worker;
+  private readonly callbacks:
+    WhisperSessionCallbacks;
+
+  private initialized = false;
+  private terminated = false;
+  private initializationResolve:
+    | ((device: WhisperDevice) => void)
+    | null = null;
+  private initializationReject:
+    | ((error: Error) => void)
+    | null = null;
+
+  constructor(
+    worker: Worker,
+    callbacks: WhisperSessionCallbacks,
+  ) {
+    this.worker = worker;
+    this.callbacks = callbacks;
+
+    worker.addEventListener(
+      "message",
+      this.handleMessage,
+    );
+    worker.addEventListener(
+      "error",
+      this.handleError,
+    );
+  }
+
+  initialize(
+    model: WhisperModel,
+    ortBaseUrl: string,
+    forceDevice?: WhisperDevice,
+  ): Promise<WhisperDevice> {
+    if (this.terminated) {
+      return Promise.reject(
+        new DOMException(
+          "Whisper worker was terminated",
+          "AbortError",
+        ),
+      );
+    }
+
+    if (
+      this.initializationResolve !== null ||
+      this.initialized
+    ) {
+      return Promise.reject(
+        new DOMException(
+          "Whisper initialization has already started",
+          "InvalidStateError",
+        ),
+      );
+    }
+
+    const promise =
+      new Promise<WhisperDevice>(
+        (resolve, reject) => {
+          this.initializationResolve = resolve;
+          this.initializationReject = reject;
+        },
+      );
+
+    const message: WhisperInitMessage = {
+      t: "WHISPER_INIT",
+      model,
+      ortBaseUrl,
+      ...(forceDevice === undefined
+        ? {}
+        : { forceDevice }),
+    };
+
+    try {
+      this.worker.postMessage(message);
+    } catch (error) {
+      this.rejectInitialization(
+        errorToError(error),
+      );
+    }
+
+    return promise;
+  }
+
+  terminate(): void {
+    if (this.terminated) {
+      return;
+    }
+
+    this.terminated = true;
+
+    this.worker.removeEventListener(
+      "message",
+      this.handleMessage,
+    );
+    this.worker.removeEventListener(
+      "error",
+      this.handleError,
+    );
+
+    this.rejectInitialization(
+      new DOMException(
+        "Whisper worker was terminated",
+        "AbortError",
+      ),
+    );
+
+    this.worker.terminate();
+  }
+
+  private readonly handleMessage = (
+    event: MessageEvent<unknown>,
+  ): void => {
+    if (
+      this.terminated ||
+      !isWhisperWorkerOutputMessage(event.data)
+    ) {
+      return;
+    }
+
+    this.processMessage(event.data);
+  };
+
+  private processMessage(
+    message: WhisperWorkerOutputMessage,
+  ): void {
+    switch (message.t) {
+      case "WHISPER_PROGRESS":
+        this.callbacks.onProgress(message);
+        return;
+
+      case "WHISPER_READY":
+        this.initialized = true;
+        this.resolveInitialization(
+          message.device,
+        );
+        return;
+
+      case "WHISPER_ERROR": {
+        const error =
+          new WhisperMessageError(
+            message.message,
+            message.fatal,
+            message.attemptedDevice,
+          );
+
+        if (!this.initialized) {
+          this.rejectInitialization(error);
+          return;
+        }
+
+        if (message.fatal) {
+          this.callbacks.onFatal(error);
+        }
+        return;
+      }
+
+      case "WHISPER_RESULT":
+        return;
+    }
+  }
+
+  private readonly handleError = (
+    event: ErrorEvent,
+  ): void => {
+    event.preventDefault();
+
+    const error = new Error(
+      event.message ||
+      "Whisper worker execution failed",
+    );
+    error.name = "WhisperWorkerError";
+
+    if (!this.initialized) {
+      this.rejectInitialization(error);
+      return;
+    }
+
+    this.callbacks.onFatal(error);
+  };
+
+  private resolveInitialization(
+    device: WhisperDevice,
+  ): void {
+    const resolve =
+      this.initializationResolve;
+
+    this.initializationResolve = null;
+    this.initializationReject = null;
+    resolve?.(device);
+  }
+
+  private rejectInitialization(
+    error: Error,
+  ): void {
+    const reject =
+      this.initializationReject;
+
+    this.initializationResolve = null;
+    this.initializationReject = null;
+    reject?.(error);
+  }
+}
+
+class WhisperMessageError extends Error {
+  readonly detail: string;
+  readonly fatal: boolean;
+  readonly attemptedDevice:
+    | WhisperDevice
+    | undefined;
+
+  constructor(
+    detail: string,
+    fatal: boolean,
+    attemptedDevice?: WhisperDevice,
+  ) {
+    super(
+      attemptedDevice === undefined
+        ? detail
+        : `Whisper initialization failed on ${formatWhisperDevice(attemptedDevice)} (${detail})`,
+    );
+
+    this.name = "WhisperError";
+    this.detail = detail;
+    this.fatal = fatal;
+    this.attemptedDevice = attemptedDevice;
+  }
+}
+
+function isWebGpuInitializationFailure(
+  error: unknown,
+): error is WhisperMessageError {
+  return (
+    error instanceof WhisperMessageError &&
+    error.fatal &&
+    error.attemptedDevice === "webgpu"
+  );
+}
+
+function combineInitializationErrors(
+  webGpuError: unknown,
+  wasmError: unknown,
+): Error {
+  const error = new Error(
+    `Whisper initialization failed on WebGPU (${initializationErrorDetail(webGpuError)}) and WASM (${initializationErrorDetail(wasmError)})`,
+  );
+
+  error.name = "WhisperError";
+  return error;
+}
+
+function initializationErrorDetail(
+  error: unknown,
+): string {
+  if (error instanceof WhisperMessageError) {
+    return error.detail;
+  }
+
+  return errorToError(error).message;
+}
+
+function formatWhisperDevice(
+  device: WhisperDevice,
+): string {
+  return device === "webgpu"
+    ? "WebGPU"
+    : "WASM";
+}
+
 async function runOffscreenProbe(
   requestId: string,
 ): Promise<OffscreenProbeResult> {
   const startedAt = nowIso();
 
-  const [documentWebGpu, translator, workerWebGpu] =
-    await Promise.all([
-      probeWebGpu("offscreen-document"),
-      probeTranslator(),
-      probeWorkerWebGpu(requestId),
-    ]);
+  const [
+    documentWebGpu,
+    translator,
+    workerWebGpu,
+  ] = await Promise.all([
+    probeWebGpu("offscreen-document"),
+    probeTranslator(),
+    probeWorkerWebGpu(requestId),
+  ]);
 
   console.log(
     "[offscreen]",
@@ -482,7 +1168,8 @@ async function probeWebGpu(
       ...(adapter === null
         ? {}
         : {
-            adapterInfo: readAdapterInfo(adapter),
+            adapterInfo:
+              readAdapterInfo(adapter),
           }),
       startedAt,
       completedAt: nowIso(),
@@ -508,7 +1195,8 @@ async function probeTranslator(): Promise<TranslatorProbeResult> {
 
   if (
     !exposed ||
-    typeof scope.Translator?.availability !== "function"
+    typeof scope.Translator?.availability !==
+      "function"
   ) {
     return {
       context: "offscreen-document",
@@ -572,67 +1260,76 @@ async function probeWorkerWebGpu(
       { type: "module" },
     );
   } catch (error) {
-    return createWorkerFailure(startedAt, error);
+    return createWorkerFailure(
+      startedAt,
+      error,
+    );
   }
 
-  return new Promise<WebGpuProbeResult>((resolve) => {
-    const finish = (
-      result: WebGpuProbeResult,
-    ): void => {
-      worker.removeEventListener(
+  return new Promise<WebGpuProbeResult>(
+    (resolve) => {
+      const finish = (
+        result: WebGpuProbeResult,
+      ): void => {
+        worker.removeEventListener(
+          "message",
+          handleMessage,
+        );
+        worker.removeEventListener(
+          "error",
+          handleError,
+        );
+        worker.terminate();
+        resolve(result);
+      };
+
+      const handleMessage = (
+        event: MessageEvent<unknown>,
+      ): void => {
+        if (
+          isMessageOfType(
+            event.data,
+            "WORKER_PROBE_RESULT",
+          ) &&
+          event.data.requestId === requestId
+        ) {
+          finish(event.data.result);
+        }
+      };
+
+      const handleError = (
+        event: ErrorEvent,
+      ): void => {
+        event.preventDefault();
+
+        finish(
+          createWorkerFailure(
+            startedAt,
+            new Error(
+              event.message ||
+              "Dedicated worker failed",
+            ),
+          ),
+        );
+      };
+
+      worker.addEventListener(
         "message",
         handleMessage,
       );
-      worker.removeEventListener(
+      worker.addEventListener(
         "error",
         handleError,
       );
-      worker.terminate();
-      resolve(result);
-    };
 
-    const handleMessage = (
-      event: MessageEvent<unknown>,
-    ): void => {
-      if (
-        isMessageOfType(
-          event.data,
-          "WORKER_PROBE_RESULT",
-        ) &&
-        event.data.requestId === requestId
-      ) {
-        finish(event.data.result);
-      }
-    };
+      const request: WorkerProbeRequest = {
+        t: "WORKER_PROBE",
+        requestId,
+      };
 
-    const handleError = (
-      event: ErrorEvent,
-    ): void => {
-      event.preventDefault();
-
-      finish(
-        createWorkerFailure(
-          startedAt,
-          new Error(
-            event.message || "Dedicated worker failed",
-          ),
-        ),
-      );
-    };
-
-    worker.addEventListener(
-      "message",
-      handleMessage,
-    );
-    worker.addEventListener("error", handleError);
-
-    const request: WorkerProbeRequest = {
-      t: "WORKER_PROBE",
-      requestId,
-    };
-
-    worker.postMessage(request);
-  });
+      worker.postMessage(request);
+    },
+  );
 }
 
 function createWorkerFailure(
@@ -662,11 +1359,12 @@ function readAdapterInfo(
     return undefined;
   }
 
-  const record = rawInfo as Record<string, unknown>;
-  const vendor = nonEmptyString(record.vendor);
-  const architecture = nonEmptyString(
-    record.architecture,
-  );
+  const record =
+    rawInfo as Record<string, unknown>;
+  const vendor =
+    nonEmptyString(record.vendor);
+  const architecture =
+    nonEmptyString(record.architecture);
 
   if (
     vendor === undefined &&
@@ -676,7 +1374,9 @@ function readAdapterInfo(
   }
 
   return {
-    ...(vendor === undefined ? {} : { vendor }),
+    ...(vendor === undefined
+      ? {}
+      : { vendor }),
     ...(architecture === undefined
       ? {}
       : { architecture }),
@@ -686,7 +1386,29 @@ function readAdapterInfo(
 function nonEmptyString(
   value: unknown,
 ): string | undefined {
-  return typeof value === "string" && value.length > 0
+  return (
+    typeof value === "string" &&
+    value.length > 0
+  )
     ? value
     : undefined;
+}
+
+function errorToError(
+  error: unknown,
+): Error {
+  if (error instanceof Error) {
+    return error;
+  }
+
+  return new Error(String(error));
+}
+
+function isAbortError(
+  error: unknown,
+): boolean {
+  return (
+    error instanceof DOMException &&
+    error.name === "AbortError"
+  );
 }
