@@ -1,21 +1,26 @@
 # x-jimaku
 
-X (x.com) の動画にリアルタイム日本語字幕を重ねる Chrome 拡張（Manifest V3）。
+[English](README.md) | [日本語](README.ja.md)
 
-- 音声認識: ローカル Whisper（transformers.js + WebGPU、クラウド API 不使用・無料）
-- 翻訳: Chrome 内蔵 Translator API（端末内の軽量翻訳モデル・GPU 不要）
-- 方式: `chrome.tabCapture` でタブ音声を取得し、数秒遅れで動画下部に字幕を表示
-- ON 中は対象動画に「字幕ON」チップを表示
+A Chrome extension (Manifest V3) that overlays live Japanese subtitles on videos playing on x.com.
 
-## ステータス
+Speech recognition runs locally with Whisper (transformers.js + WebGPU), and translation uses Chrome's built-in Translator API. Nothing leaves your machine: no cloud APIs, no API keys, no usage fees.
 
-**設計完了・実装未着手**（2026-08-24）
+How it works: the extension captures tab audio with `chrome.tabCapture`, transcribes it in an offscreen document, translates English to Japanese on-device, and draws captions under the video a few seconds behind playback. While the extension is on, the target video shows a small "subtitles on" chip.
 
-## 開発（予定）
+## Status
+
+Design stage, no working code yet (2026-08-24).
+
+## Development (planned)
 
 ```
 npm install
-npm run build   # dist/ を chrome://extensions で load unpacked
+npm run build   # then load dist/ unpacked at chrome://extensions
 ```
 
-要件: Chrome 138+（Translator API）、WebGPU 対応環境推奨。
+Requires Chrome 138 or later (Translator API). WebGPU is recommended. Without it the extension falls back to WASM with a smaller Whisper model.
+
+## License
+
+MIT
