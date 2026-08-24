@@ -103,10 +103,10 @@ export class CaptionOverlay {
   private progress: number | undefined;
 
   private highestFinalId: number | null = null;
-  private highestShownFinalId:
+  private highestShownDisplayId:
     | number
     | null = null;
-  private activeShownFinalId:
+  private activeShownDisplayId:
     | number
     | null = null;
 
@@ -317,7 +317,7 @@ export class CaptionOverlay {
     this.captionBarEnabled = false;
     this.captionActive = false;
     this.suppressedAfterFade = true;
-    this.activeShownFinalId = null;
+    this.activeShownDisplayId = null;
 
     this.finalId = null;
     this.finalAt = null;
@@ -433,19 +433,13 @@ export class CaptionOverlay {
     text: string,
     ja: string,
   ): void {
-    const highestShownFinalId =
-      this.highestShownFinalId;
+    const highestShownDisplayId =
+      this.highestShownDisplayId;
 
     if (
-      highestShownFinalId !== null &&
-      line.id < highestShownFinalId
-    ) {
-      return;
-    }
-
-    if (
-      highestShownFinalId === line.id &&
-      this.activeShownFinalId !== line.id
+      highestShownDisplayId !== null &&
+      line.id <= highestShownDisplayId &&
+      this.activeShownDisplayId !== line.id
     ) {
       return;
     }
@@ -559,6 +553,17 @@ export class CaptionOverlay {
     text: string,
     ja: string,
   ): void {
+    const highestShownDisplayId =
+      this.highestShownDisplayId;
+
+    if (
+      highestShownDisplayId !== null &&
+      line.id <= highestShownDisplayId &&
+      this.activeShownDisplayId !== line.id
+    ) {
+      return;
+    }
+
     if (
       (
         this.highestFinalId !== null &&
@@ -778,10 +783,10 @@ export class CaptionOverlay {
     this.liveEnglishText = text;
 
     if (
-      this.activeShownFinalId !== null &&
-      id > this.activeShownFinalId
+      this.activeShownDisplayId !== null &&
+      id > this.activeShownDisplayId
     ) {
-      this.activeShownFinalId = null;
+      this.activeShownDisplayId = null;
     }
 
     return changed;
@@ -815,16 +820,16 @@ export class CaptionOverlay {
     this.japaneseDisplayText = text;
 
     if (
-      this.activeShownFinalId !== null &&
+      this.activeShownDisplayId !== null &&
       (
-        id > this.activeShownFinalId ||
+        id > this.activeShownDisplayId ||
         (
-          id === this.activeShownFinalId &&
+          id === this.activeShownDisplayId &&
           source === "interim"
         )
       )
     ) {
-      this.activeShownFinalId = null;
+      this.activeShownDisplayId = null;
     }
 
     return changed;
@@ -894,15 +899,17 @@ export class CaptionOverlay {
     );
 
     if (!hasVisibleText) {
+      this.activeShownDisplayId = null;
       return;
     }
 
-    this.recordVisibleFinal();
+    this.recordVisibleDisplay();
   }
 
   private clearRenderedCaption(): void {
     this.primaryLine.textContent = "";
     this.originalLine.textContent = "";
+    this.activeShownDisplayId = null;
     this.captionLine.classList.remove(
       "is-fading",
     );
@@ -911,29 +918,27 @@ export class CaptionOverlay {
     );
   }
 
-  private recordVisibleFinal(): void {
-    let visibleFinalId: number | null = null;
+  private recordVisibleDisplay(): void {
+    let visibleDisplayId: number | null = null;
 
     if (
       this.translationPath === "none" &&
-      this.liveEnglishSource === "final" &&
       this.liveEnglishId !== null &&
       this.primaryLine.textContent !== ""
     ) {
-      visibleFinalId = this.liveEnglishId;
+      visibleDisplayId = this.liveEnglishId;
     }
 
     if (
       this.translationPath !== "none" &&
-      this.japaneseDisplaySource === "final" &&
       this.japaneseDisplayId !== null &&
       this.primaryLine.textContent !== ""
     ) {
-      visibleFinalId =
-        visibleFinalId === null
+      visibleDisplayId =
+        visibleDisplayId === null
           ? this.japaneseDisplayId
           : Math.max(
-              visibleFinalId,
+              visibleDisplayId,
               this.japaneseDisplayId,
             );
     }
@@ -941,31 +946,31 @@ export class CaptionOverlay {
     if (
       this.translationPath !== "none" &&
       this.showOriginal &&
-      this.liveEnglishSource === "final" &&
       this.liveEnglishId !== null &&
       this.originalLine.textContent !== ""
     ) {
-      visibleFinalId =
-        visibleFinalId === null
+      visibleDisplayId =
+        visibleDisplayId === null
           ? this.liveEnglishId
           : Math.max(
-              visibleFinalId,
+              visibleDisplayId,
               this.liveEnglishId,
             );
     }
 
-    this.activeShownFinalId = visibleFinalId;
+    this.activeShownDisplayId =
+      visibleDisplayId;
 
-    if (visibleFinalId === null) {
+    if (visibleDisplayId === null) {
       return;
     }
 
-    this.highestShownFinalId =
-      this.highestShownFinalId === null
-        ? visibleFinalId
+    this.highestShownDisplayId =
+      this.highestShownDisplayId === null
+        ? visibleDisplayId
         : Math.max(
-            this.highestShownFinalId,
-            visibleFinalId,
+            this.highestShownDisplayId,
+            visibleDisplayId,
           );
   }
 
@@ -1711,7 +1716,7 @@ export class CaptionOverlay {
 
             this.captionActive = false;
             this.suppressedAfterFade = true;
-            this.activeShownFinalId = null;
+            this.activeShownDisplayId = null;
             this.japaneseDisplayText = "";
             this.clearRenderedCaption();
             this.updateLayout();
