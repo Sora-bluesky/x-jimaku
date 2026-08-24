@@ -17,7 +17,7 @@ A Chrome extension (Manifest V3) that overlays live Japanese subtitles on videos
 
 ## How it works
 
-The content script grabs the target `<video>` element's audio with `captureStream()`, resamples it to 16kHz PCM, and streams it to an offscreen document running Whisper (via transformers.js) for local English speech recognition, using WebGPU where available and falling back to WASM otherwise. Recognized text is translated from English to Japanese with Chrome's built-in Translator API, which also runs on-device. The result is drawn as an overlay under the video: Japanese on top, the smaller English source line below it, with in-progress lines re-translated roughly every two seconds as more audio comes in.
+The content script grabs the target `<video>` element's audio with `captureStream()`, resamples it to 16kHz PCM, and streams it to an offscreen document running Whisper (via transformers.js) for local English speech recognition, using WebGPU where available and falling back to WASM otherwise. Recognized text is translated from English to Japanese with Chrome's built-in Translator API, which also runs on-device. The result is drawn as a fixed caption bar over the bottom of the video, showing Japanese only by default (an options-page setting adds the smaller English source line), with in-progress lines re-translated roughly every two seconds as more audio comes in.
 
 ```
 video element --captureStream()--> 16kHz PCM
@@ -39,8 +39,8 @@ Chrome Web Store listing is not available yet. Install from a GitHub Release:
 
 1. Play a video on x.com.
 2. Click the extension icon in the toolbar (or press Ctrl+Shift+9). Supported videos not yet loaded show a subtitle-related tag.
-3. The target video shows "Subtitles loading… %" while the model loads, then a "Subtitles ON" chip once captioning starts.
-4. Click again to stop. Videos the extension can't caption show an "Unsupported" badge.
+3. The target video shows a 「字幕 準備中…%」 chip while the model loads, then a 「字幕ON」 chip once captioning starts (chip labels are in Japanese).
+4. Click again to stop. Other visible videos show a faint 「対象外」 (not targeted) badge.
 
 ## Models
 

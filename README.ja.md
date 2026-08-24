@@ -17,7 +17,7 @@ X (x.com) の動画にリアルタイム日本語字幕を重ねる Chrome 拡�
 
 ## 仕組み
 
-content script が対象の `<video>` 要素の音声を `captureStream()` で直接タップし、16kHz PCM にリサンプルして offscreen document 内の Whisper（transformers.js 経由）へ送る。WebGPU が使える環境ではそちらで、使えない環境では WASM に自動フォールバックしてローカルで英語音声認識を行う。認識したテキストは Chrome 内蔵の Translator API で英語から日本語へ翻訳する（これも端末内処理）。結果は動画下部にオーバーレイ表示され、日本語字幕の下に小さく英語原文が添えられる。確定していない暫定行は、音声が増えるごとに約2秒おきに再翻訳される。
+content script が対象の `<video>` 要素の音声を `captureStream()` で直接タップし、16kHz PCM にリサンプルして offscreen document 内の Whisper（transformers.js 経由）へ送る。WebGPU が使える環境ではそちらで、使えない環境では WASM に自動フォールバックしてローカルで英語音声認識を行う。認識したテキストは Chrome 内蔵の Translator API で英語から日本語へ翻訳する（これも端末内処理）。結果は動画下部の高さ固定の字幕バーに表示される。既定では日本語のみで、オプションページの設定で英語原文の小さい行を併記できる。確定していない暫定行は、音声が増えるごとに約2秒おきに再翻訳される。
 
 ```
 video要素 --captureStream()--> 16kHz PCM
