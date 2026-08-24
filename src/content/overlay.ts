@@ -2,6 +2,21 @@ import type {
   TranslationPath,
 } from "../shared/messages";
 
+const MAX_PRIMARY_CAPTION_CHARS = 90;
+const MAX_SECONDARY_CAPTION_CHARS = 140;
+
+function clampCaptionTail(
+  text: string,
+  maxChars: number,
+): string {
+  if (text.length <= maxChars) {
+    return text;
+  }
+
+  return "…" + text.slice(text.length - maxChars);
+}
+
+
 const HOST_ID = "xjsub-host";
 const FINAL_VISIBLE_MS = 5_000;
 const FINAL_FADE_MS = 350;
@@ -220,12 +235,12 @@ export class CaptionOverlay {
 
       if (ja !== "") {
         this.finalPrimaryLine.textContent =
-          ja;
+          clampCaptionTail(ja, MAX_PRIMARY_CAPTION_CHARS);
         this.finalOriginalLine.textContent =
-          text;
+          clampCaptionTail(text, MAX_SECONDARY_CAPTION_CHARS);
       } else {
         this.finalPrimaryLine.textContent =
-          text;
+          clampCaptionTail(text, MAX_SECONDARY_CAPTION_CHARS);
         this.finalOriginalLine.textContent =
           "";
       }
@@ -247,7 +262,8 @@ export class CaptionOverlay {
       }
 
       this.interimId = line.id;
-      this.interimLine.textContent = text;
+      this.interimLine.textContent =
+        clampCaptionTail(text, MAX_SECONDARY_CAPTION_CHARS);
 
       if (this.hasFinalCaption()) {
         this.scheduleFinalFade();
