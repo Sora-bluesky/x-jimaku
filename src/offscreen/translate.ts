@@ -51,6 +51,8 @@ const TRANSLATION_SYSTEM_PROMPT =
 const MAX_PENDING_TRANSLATIONS = 2;
 const INTERIM_TRANSLATION_THROTTLE_MS =
   2_000;
+const TRANSLATOR_CREATE_TIMEOUT_MS =
+  8_000;
 
 export class TranslationEngine {
   private readonly options:
@@ -85,6 +87,9 @@ export class TranslationEngine {
   private lastInterimStartedAt =
     Number.NEGATIVE_INFINITY;
   private destroyed = false;
+  private initializationPromise:
+    | Promise<void>
+    | null = null;
 
   constructor(
     options: TranslationEngineOptions,
@@ -92,12 +97,28 @@ export class TranslationEngine {
     this.options = options;
   }
 
-  async initialize(): Promise<void> {
+  initialize(): Promise<void> {
     if (this.destroyed) {
-      return;
+      return Promise.resolve();
     }
 
-    await this.selectBestPath();
+    if (this.initializationPromise !== null) {
+      return this.initializationPromise;
+    }
+
+    const operation =
+      this.selectBestPath()
+        .finally(() => {
+          if (
+            this.initializationPromise ===
+              operation
+          ) {
+            this.initializationPromise = null;
+          }
+        });
+
+    this.initializationPromise = operation;
+    return operation;
   }
 
   enqueue(line: RecognitionPayload): void {
@@ -494,10 +515,39 @@ export class TranslationEngine {
       }
 
       this.translatorCreateAttempted = true;
-      this.translator =
-        await factory.create(
+
+      const createPromise =
+        factory.create(
           TRANSLATOR_OPTIONS,
         );
+
+      let timedOut = false;
+
+      try {
+        this.translator =
+          await waitWithTimeout(
+            createPromise,
+            TRANSLATOR_CREATE_TIMEOUT_MS,
+            "Offscreen Translator creation timed out",
+          );
+      } catch (error) {
+        timedOut =
+          error instanceof Error &&
+          error.name === "TimeoutError";
+
+        if (timedOut) {
+          void createPromise.then(
+            (instance) => {
+              destroyTranslatorInstance(
+                instance,
+              );
+            },
+            () => undefined,
+          );
+        }
+
+        throw error;
+      }
 
       if (this.destroyed) {
         this.destroyTranslator();
@@ -665,17 +715,9 @@ export class TranslationEngine {
     const instance = this.translator;
     this.translator = null;
 
-    if (instance === null) {
-      return;
-    }
-
-    try {
-      instance.destroy();
-    } catch (error) {
-      console.warn(
-        "[translate]",
-        "Translator cleanup failed",
-        error,
+    if (instance !== null) {
+      destroyTranslatorInstance(
+        instance,
       );
     }
   }
@@ -698,6 +740,67 @@ export class TranslationEngine {
       );
     }
   }
+}
+
+function destroyTranslatorInstance(
+  instance: TranslatorInstance,
+): void {
+  try {
+    instance.destroy();
+  } catch (error) {
+    console.warn(
+      "[translate]",
+      "Translator cleanup failed",
+      error,
+    );
+  }
+}
+
+function waitWithTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  message: string,
+): Promise<T> {
+  return new Promise<T>(
+    (resolve, reject) => {
+      let settled = false;
+
+      const timerId = self.setTimeout(
+        () => {
+          if (settled) {
+            return;
+          }
+
+          settled = true;
+          const error = new Error(message);
+          error.name = "TimeoutError";
+          reject(error);
+        },
+        timeoutMs,
+      );
+
+      void promise.then(
+        (value) => {
+          if (settled) {
+            return;
+          }
+
+          settled = true;
+          globalThis.clearTimeout(timerId);
+          resolve(value);
+        },
+        (error: unknown) => {
+          if (settled) {
+            return;
+          }
+
+          settled = true;
+          globalThis.clearTimeout(timerId);
+          reject(error);
+        },
+      );
+    },
+  );
 }
 
 export function isMostlyJapanese(

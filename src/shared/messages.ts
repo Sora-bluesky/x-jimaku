@@ -13,6 +13,10 @@ import {
   type WhisperModel,
 } from "./settings";
 
+export {
+  isSettings,
+};
+
 export const LAST_PROBE_STORAGE_KEY =
   "m0.lastProbe" as const;
 
@@ -136,7 +140,9 @@ export interface LastProbeResultMessage {
 export interface ProbeStoredMessage {
   t: "PROBE_STORED";
   requestId: string;
-  context: "content-script" | "options-page";
+  context:
+    | "content-script"
+    | "options-page";
   storedAt: string;
 }
 
@@ -175,6 +181,14 @@ export interface DiagnosticsResultMessage {
   snapshot: ProbeSnapshot;
 }
 
+export interface CsPingMessage {
+  t: "CS_PING";
+}
+
+export interface CsPongMessage {
+  t: "CS_PONG";
+}
+
 export interface OffStartMessage {
   t: "OFF_START";
   requestId: string;
@@ -184,6 +198,18 @@ export interface OffStartMessage {
 export interface OffStopMessage {
   t: "OFF_STOP";
   requestId: string;
+}
+
+export interface OffQueryMessage {
+  t: "OFF_QUERY";
+  queryId: string;
+}
+
+export interface OffStatusMessage {
+  t: "OFF_STATUS";
+  queryId: string;
+  state: CaptureState;
+  sessionActive: boolean;
 }
 
 export interface OffStateMessage {
@@ -211,7 +237,10 @@ export interface CsStopTapMessage {
 export interface CsTapStateMessage {
   t: "CS_TAP_STATE";
   requestId: string;
-  state: "tapping" | "stopped" | "error";
+  state:
+    | "tapping"
+    | "stopped"
+    | "error";
   detail?: string;
 }
 
@@ -358,6 +387,8 @@ export type ContentPortMessage =
 export type CapturePortMessage =
   | OffStartMessage
   | OffStopMessage
+  | OffQueryMessage
+  | OffStatusMessage
   | OffStateMessage
   | OffLevelMessage
   | OffRecognitionMessage
@@ -377,6 +408,8 @@ export type M1Message =
   | M0Message
   | RunDiagnosticsMessage
   | DiagnosticsResultMessage
+  | CsPingMessage
+  | CsPongMessage
   | CapturePortMessage
   | ContentPortMessage
   | SwRecognitionMessage
@@ -408,7 +441,9 @@ export function getProbeEnvironment(): ProbeEnvironment {
 
   return {
     userAgent,
-    chromeVersion: parseChromeVersion(userAgent),
+    chromeVersion: parseChromeVersion(
+      userAgent,
+    ),
   };
 }
 
@@ -471,7 +506,10 @@ export function isProbeSnapshot(
 export function isM0Message(
   value: unknown,
 ): value is M0Message {
-  if (!isRecord(value) || typeof value.t !== "string") {
+  if (
+    !isRecord(value) ||
+    typeof value.t !== "string"
+  ) {
     return false;
   }
 
@@ -512,9 +550,7 @@ export function isM0Message(
       return (
         typeof value.requestId === "string" &&
         typeof value.source === "string" &&
-        isRecord(value.error) &&
-        typeof value.error.name === "string" &&
-        typeof value.error.message === "string" &&
+        isProbeError(value.error) &&
         typeof value.at === "string"
       );
 
@@ -530,7 +566,10 @@ export function isM1Message(
     return true;
   }
 
-  if (!isRecord(value) || typeof value.t !== "string") {
+  if (
+    !isRecord(value) ||
+    typeof value.t !== "string"
+  ) {
     return false;
   }
 
@@ -544,6 +583,10 @@ export function isM1Message(
         isProbeSnapshot(value.snapshot)
       );
 
+    case "CS_PING":
+    case "CS_PONG":
+      return true;
+
     case "OFF_START":
       return (
         typeof value.requestId === "string" &&
@@ -553,6 +596,17 @@ export function isM1Message(
     case "OFF_STOP":
     case "CS_STOP_TAP":
       return typeof value.requestId === "string";
+
+    case "OFF_QUERY":
+      return typeof value.queryId === "string";
+
+    case "OFF_STATUS":
+      return (
+        typeof value.queryId === "string" &&
+        isCaptureState(value.state) &&
+        typeof value.sessionActive ===
+          "boolean"
+      );
 
     case "OFF_STATE":
       return isCaptureState(value.state);
@@ -612,11 +666,7 @@ export function isM1Message(
         typeof value.available === "boolean" &&
         (
           value.error === undefined ||
-          (
-            isRecord(value.error) &&
-            typeof value.error.name === "string" &&
-            typeof value.error.message === "string"
-          )
+          isProbeError(value.error)
         )
       );
 
@@ -655,6 +705,8 @@ export function isCapturePortMessage(
   return (
     isMessageOfType(value, "OFF_START") ||
     isMessageOfType(value, "OFF_STOP") ||
+    isMessageOfType(value, "OFF_QUERY") ||
+    isMessageOfType(value, "OFF_STATUS") ||
     isMessageOfType(value, "OFF_STATE") ||
     isMessageOfType(value, "OFF_LEVEL") ||
     isMessageOfType(value, "OFF_RECOG") ||
@@ -700,7 +752,10 @@ export function isContentPortMessage(
 export function isWhisperWorkerInputMessage(
   value: unknown,
 ): value is WhisperWorkerInputMessage {
-  if (!isRecord(value) || typeof value.t !== "string") {
+  if (
+    !isRecord(value) ||
+    typeof value.t !== "string"
+  ) {
     return false;
   }
 
@@ -730,7 +785,10 @@ export function isWhisperWorkerInputMessage(
 export function isWhisperWorkerOutputMessage(
   value: unknown,
 ): value is WhisperWorkerOutputMessage {
-  if (!isRecord(value) || typeof value.t !== "string") {
+  if (
+    !isRecord(value) ||
+    typeof value.t !== "string"
+  ) {
     return false;
   }
 
@@ -802,6 +860,20 @@ function isRecognitionPayload(
   );
 }
 
+function isProbeError(
+  value: unknown,
+): value is ProbeError {
+  return (
+    isRecord(value) &&
+    typeof value.name === "string" &&
+    typeof value.message === "string" &&
+    (
+      value.stack === undefined ||
+      typeof value.stack === "string"
+    )
+  );
+}
+
 function isFiniteNonNegative(
   value: unknown,
 ): value is number {
@@ -815,5 +887,8 @@ function isFiniteNonNegative(
 function isRecord(
   value: unknown,
 ): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
+  return (
+    typeof value === "object" &&
+    value !== null
+  );
 }
