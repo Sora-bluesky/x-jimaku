@@ -11,6 +11,7 @@ const SAMPLE_RATE = 16_000;
 const TICK_INTERVAL_MS = 300;
 const MIN_SEGMENT_SAMPLES = SAMPLE_RATE;
 const MAX_SEGMENT_SAMPLES = SAMPLE_RATE * 8;
+const SILENCE_TAIL_SAMPLES = SAMPLE_RATE;
 const TRAILING_SILENCE_SAMPLES =
   Math.round(SAMPLE_RATE * 0.5);
 const ENERGY_HOP_SAMPLES =
@@ -172,14 +173,24 @@ export class WhisperSegmenter {
       startOffset,
       endOffset,
     );
-    const maxRms =
-      trackedMaxRms ??
+    const sampledMaxRms =
       computeMaxWindowRms(
         audio,
         ENERGY_HOP_SAMPLES,
       );
+    const maxRms =
+      trackedMaxRms === null
+        ? sampledMaxRms
+        : Math.max(
+            trackedMaxRms,
+            sampledMaxRms,
+          );
 
     if (maxRms < SILENCE_RMS_THRESHOLD) {
+      this.committedOffset = Math.max(
+        this.committedOffset,
+        endOffset - SILENCE_TAIL_SAMPLES,
+      );
       return;
     }
 
@@ -253,6 +264,9 @@ export class WhisperSegmenter {
     this.inFlight = null;
 
     const normalizedText = text.trim();
+    const shouldForceCommit =
+      segment.sampleLength >=
+      MAX_SEGMENT_SAMPLES;
 
     if (normalizedText.length > 0) {
       const lineId =
@@ -276,9 +290,6 @@ export class WhisperSegmenter {
           SILENCE_RMS_THRESHOLD,
           ENERGY_HOP_SAMPLES,
         );
-      const shouldForceCommit =
-        segment.sampleLength >
-        MAX_SEGMENT_SAMPLES;
 
       if (
         shouldCommitForSilence ||
@@ -291,22 +302,37 @@ export class WhisperSegmenter {
           at: this.now(),
         });
 
-        this.committedOffset =
-          segment.endOffset;
-        this.currentLineId = null;
-
-        console.log("[seg]", "segment committed", {
-          requestId,
-          endOffset: segment.endOffset,
-          reason: shouldForceCommit
+        this.commitSegment(
+          segment,
+          shouldForceCommit
             ? "maximum-length"
             : "trailing-silence",
-        });
+        );
       }
+    } else if (shouldForceCommit) {
+      this.commitSegment(
+        segment,
+        "maximum-length-empty",
+      );
     }
 
     queueMicrotask(() => {
       this.tick();
+    });
+  }
+
+  private commitSegment(
+    segment: InFlightSegment,
+    reason: string,
+  ): void {
+    this.committedOffset =
+      segment.endOffset;
+    this.currentLineId = null;
+
+    console.log("[seg]", "segment committed", {
+      requestId: segment.requestId,
+      endOffset: segment.endOffset,
+      reason,
     });
   }
 

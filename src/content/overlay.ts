@@ -30,6 +30,28 @@ const FINAL_VISIBLE_MS = 5_000;
 const FINAL_FADE_MS = 350;
 const MUTATION_DEBOUNCE_MS = 500;
 const MAX_OTHER_VIDEOS = 6;
+const STABLE_FRAMES_BEFORE_IDLE = 10;
+const RECT_COMPARISON_EPSILON_PX = 0.1;
+
+interface RectSnapshot {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+  width: number;
+  height: number;
+}
+
+interface OtherVideoLayout {
+  video: HTMLVideoElement;
+  rect: RectSnapshot | null;
+}
+
+interface LayoutSnapshot {
+  target: HTMLVideoElement | null;
+  targetRect: RectSnapshot | null;
+  otherVideos: readonly OtherVideoLayout[];
+}
 
 export interface CaptionLine {
   id: number;
@@ -103,6 +125,10 @@ export class CaptionOverlay {
     | number
     | null = null;
   private frameId: number | null = null;
+  private stableFrameCount = 0;
+  private lastLayoutSnapshot:
+    | LayoutSnapshot
+    | null = null;
   private mutationTimerId: number | null =
     null;
   private finalFadeTimerId: number | null =
@@ -119,8 +145,17 @@ export class CaptionOverlay {
 
     this.host = document.createElement("div");
     this.host.id = HOST_ID;
+    this.host.setAttribute("popover", "manual");
     this.host.style.position = "fixed";
-    this.host.style.inset = "0";
+    this.host.style.display = "block";
+    this.host.style.margin = "0";
+    this.host.style.inset = "auto";
+    this.host.style.border = "0";
+    this.host.style.padding = "0";
+    this.host.style.background = "transparent";
+    this.host.style.overflow = "visible";
+    this.host.style.width = "auto";
+    this.host.style.height = "auto";
     this.host.style.pointerEvents = "none";
     this.host.style.zIndex = "2147483647";
 
@@ -227,6 +262,7 @@ export class CaptionOverlay {
 
     this.mutationObserver =
       new MutationObserver(() => {
+        this.startFrameLoop();
         this.scheduleMutationPass();
       });
 
@@ -369,6 +405,8 @@ export class CaptionOverlay {
     this.resizeObserver.disconnect();
     this.otherBadges.clear();
     this.targetVideo = null;
+    this.lastLayoutSnapshot = null;
+    this.hideHostPopover();
     this.host.remove();
 
     console.log("[overlay]", "overlay destroyed");
@@ -809,6 +847,8 @@ export class CaptionOverlay {
         cancelAnimationFrame(this.frameId);
         this.frameId = null;
       }
+
+      this.stableFrameCount = 0;
     };
 
   private readonly runFrame =
@@ -823,7 +863,30 @@ export class CaptionOverlay {
       }
 
       this.refreshTarget();
-      this.updateLayout();
+
+      const snapshot =
+        this.captureLayoutSnapshot();
+      const isStable =
+        this.lastLayoutSnapshot !== null &&
+        layoutSnapshotsEqual(
+          this.lastLayoutSnapshot,
+          snapshot,
+        );
+
+      if (isStable) {
+        this.stableFrameCount += 1;
+      } else {
+        this.stableFrameCount = 0;
+        this.updateLayout(snapshot);
+      }
+
+      if (
+        this.stableFrameCount >=
+        STABLE_FRAMES_BEFORE_IDLE
+      ) {
+        return;
+      }
+
       this.frameId =
         requestAnimationFrame(this.runFrame);
     };
@@ -831,9 +894,14 @@ export class CaptionOverlay {
   private startFrameLoop(): void {
     if (
       this.destroyed ||
-      this.frameId !== null ||
       document.visibilityState !== "visible"
     ) {
+      return;
+    }
+
+    this.stableFrameCount = 0;
+
+    if (this.frameId !== null) {
       return;
     }
 
@@ -846,13 +914,77 @@ export class CaptionOverlay {
       return;
     }
 
-    const parent =
-      document.fullscreenElement ??
+    const fallbackParent =
       document.body ??
       document.documentElement;
+    const fullscreenElement =
+      document.fullscreenElement;
+    const useTopLayer =
+      fullscreenElement !== null &&
+      isNonHostingFullscreenElement(
+        fullscreenElement,
+      );
+
+    if (useTopLayer) {
+      if (
+        this.host.parentNode !==
+        fallbackParent
+      ) {
+        this.hideHostPopover();
+        fallbackParent.append(this.host);
+        this.lastLayoutSnapshot = null;
+        this.stableFrameCount = 0;
+      }
+
+      this.showHostPopover();
+      return;
+    }
+
+    this.hideHostPopover();
+
+    const parent =
+      fullscreenElement ?? fallbackParent;
 
     if (this.host.parentNode !== parent) {
       parent.append(this.host);
+      this.lastLayoutSnapshot = null;
+      this.stableFrameCount = 0;
+    }
+  }
+
+  private showHostPopover(): void {
+    if (this.isHostPopoverOpen()) {
+      return;
+    }
+
+    try {
+      this.host.showPopover();
+    } catch {
+      // A later lifecycle pass retries after the
+      // document or fullscreen state settles.
+    }
+  }
+
+  private hideHostPopover(): void {
+    if (!this.isHostPopoverOpen()) {
+      return;
+    }
+
+    try {
+      this.host.hidePopover();
+    } catch {
+      // The browser may already have closed it
+      // during a top-layer state transition.
+    }
+  }
+
+  private isHostPopoverOpen(): boolean {
+    try {
+      return this.host.matches(
+        ":popover-open",
+      );
+    } catch {
+      return false;
     }
   }
 
@@ -927,6 +1059,7 @@ export class CaptionOverlay {
     }
 
     this.targetVideo = nextTarget;
+    this.lastLayoutSnapshot = null;
 
     if (nextTarget !== null) {
       this.resizeObserver.observe(nextTarget);
@@ -976,6 +1109,8 @@ export class CaptionOverlay {
       }
     }
 
+    let changed = false;
+
     for (const [video, badge] of this.otherBadges) {
       if (desired.has(video)) {
         continue;
@@ -984,6 +1119,7 @@ export class CaptionOverlay {
       this.resizeObserver.unobserve(video);
       badge.remove();
       this.otherBadges.delete(video);
+      changed = true;
     }
 
     for (const video of desired) {
@@ -998,6 +1134,11 @@ export class CaptionOverlay {
       this.otherLayer.append(badge);
       this.otherBadges.set(video, badge);
       this.resizeObserver.observe(video);
+      changed = true;
+    }
+
+    if (changed) {
+      this.lastLayoutSnapshot = null;
     }
   }
 
@@ -1045,14 +1186,51 @@ export class CaptionOverlay {
     );
   }
 
-  private updateLayout(): void {
+  private captureLayoutSnapshot(): LayoutSnapshot {
+    const target = this.targetVideo;
+    const targetRect =
+      target === null
+        ? null
+        : snapshotRect(
+            target.getBoundingClientRect(),
+          );
+    const otherVideos =
+      Array.from(
+        this.otherBadges.keys(),
+        (video): OtherVideoLayout => ({
+          video,
+          rect:
+            video === target ||
+            video.muted ||
+            !video.isConnected
+              ? null
+              : snapshotRect(
+                  video.getBoundingClientRect(),
+                ),
+        }),
+      );
+
+    return {
+      target,
+      targetRect,
+      otherVideos,
+    };
+  }
+
+  private updateLayout(
+    snapshot: LayoutSnapshot =
+      this.captureLayoutSnapshot(),
+  ): void {
     if (this.destroyed) {
       return;
     }
 
-    const target = this.targetVideo;
+    this.lastLayoutSnapshot = snapshot;
 
-    if (target === null) {
+    if (
+      snapshot.target === null ||
+      snapshot.targetRect === null
+    ) {
       this.captionStack.style.display =
         "none";
       this.targetChip.style.display =
@@ -1061,8 +1239,7 @@ export class CaptionOverlay {
       return;
     }
 
-    const rect =
-      target.getBoundingClientRect();
+    const rect = snapshot.targetRect;
     const targetVisible =
       isRectVisible(rect);
 
@@ -1076,11 +1253,13 @@ export class CaptionOverlay {
       this.positionTargetChip(rect);
     }
 
-    this.positionOtherBadges();
+    this.positionOtherBadges(
+      snapshot.otherVideos,
+    );
   }
 
   private positionCaptionStack(
-    rect: DOMRect,
+    rect: RectSnapshot,
   ): void {
     const captureIsOn =
       this.status === "loadingModel" ||
@@ -1211,7 +1390,7 @@ export class CaptionOverlay {
   }
 
   private positionTargetChip(
-    rect: DOMRect,
+    rect: RectSnapshot,
   ): void {
     const inset = Math.max(
       6,
@@ -1226,7 +1405,9 @@ export class CaptionOverlay {
       `${rect.top + inset}px`;
   }
 
-  private positionOtherBadges(): void {
+  private positionOtherBadges(
+    layouts: readonly OtherVideoLayout[],
+  ): void {
     const captureIsOn =
       this.status === "loadingModel" ||
       this.status === "running";
@@ -1236,20 +1417,20 @@ export class CaptionOverlay {
       return;
     }
 
-    for (const [video, badge] of this.otherBadges) {
-      if (
-        video === this.targetVideo ||
-        video.muted ||
-        !video.isConnected
-      ) {
-        badge.style.display = "none";
+    for (const layout of layouts) {
+      const badge =
+        this.otherBadges.get(layout.video);
+
+      if (badge === undefined) {
         continue;
       }
 
-      const rect =
-        video.getBoundingClientRect();
+      const rect = layout.rect;
 
-      if (!isRectVisible(rect)) {
+      if (
+        rect === null ||
+        !isRectVisible(rect)
+      ) {
         badge.style.display = "none";
         continue;
       }
@@ -1384,6 +1565,109 @@ export class CaptionOverlay {
   }
 }
 
+function snapshotRect(
+  rect: DOMRect,
+): RectSnapshot {
+  return {
+    left: rect.left,
+    top: rect.top,
+    right: rect.right,
+    bottom: rect.bottom,
+    width: rect.width,
+    height: rect.height,
+  };
+}
+
+function layoutSnapshotsEqual(
+  left: LayoutSnapshot,
+  right: LayoutSnapshot,
+): boolean {
+  if (
+    left.target !== right.target ||
+    !rectSnapshotsEqual(
+      left.targetRect,
+      right.targetRect,
+    ) ||
+    left.otherVideos.length !==
+      right.otherVideos.length
+  ) {
+    return false;
+  }
+
+  for (
+    let index = 0;
+    index < left.otherVideos.length;
+    index += 1
+  ) {
+    const leftLayout =
+      left.otherVideos[index];
+    const rightLayout =
+      right.otherVideos[index];
+
+    if (
+      leftLayout === undefined ||
+      rightLayout === undefined ||
+      leftLayout.video !== rightLayout.video ||
+      !rectSnapshotsEqual(
+        leftLayout.rect,
+        rightLayout.rect,
+      )
+    ) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function rectSnapshotsEqual(
+  left: RectSnapshot | null,
+  right: RectSnapshot | null,
+): boolean {
+  if (left === null || right === null) {
+    return left === right;
+  }
+
+  return (
+    approximatelyEqual(left.left, right.left) &&
+    approximatelyEqual(left.top, right.top) &&
+    approximatelyEqual(left.right, right.right) &&
+    approximatelyEqual(left.bottom, right.bottom) &&
+    approximatelyEqual(left.width, right.width) &&
+    approximatelyEqual(left.height, right.height)
+  );
+}
+
+function approximatelyEqual(
+  left: number,
+  right: number,
+): boolean {
+  return (
+    Math.abs(left - right) <=
+    RECT_COMPARISON_EPSILON_PX
+  );
+}
+
+function isNonHostingFullscreenElement(
+  element: Element,
+): boolean {
+  if (!(element instanceof HTMLElement)) {
+    return true;
+  }
+
+  return (
+    element instanceof HTMLMediaElement ||
+    element instanceof HTMLImageElement ||
+    element instanceof HTMLCanvasElement ||
+    element instanceof HTMLIFrameElement ||
+    element instanceof HTMLEmbedElement ||
+    element instanceof HTMLObjectElement ||
+    element instanceof HTMLInputElement ||
+    element instanceof HTMLTextAreaElement ||
+    element instanceof HTMLSelectElement
+  );
+}
+
 function isVideoVisible(
   video: HTMLVideoElement,
 ): boolean {
@@ -1407,7 +1691,7 @@ function isVideoVisible(
 }
 
 function isRectVisible(
-  rect: DOMRect,
+  rect: RectSnapshot | DOMRect,
 ): boolean {
   return (
     rect.width > 0 &&

@@ -16,6 +16,8 @@ import type {
 env.allowLocalModels = false;
 env.useBrowserCache = true;
 
+const INITIALIZATION_PROGRESS_CEILING = 99;
+
 const MODELS = {
   tiny: {
     id: "onnx-community/whisper-tiny",
@@ -92,9 +94,24 @@ interface GpuLike {
 
 interface RawProgress {
   file?: unknown;
+  status?: unknown;
   progress?: unknown;
   loaded?: unknown;
   total?: unknown;
+}
+
+interface FileProgressState {
+  loaded: number;
+  total: number;
+  fraction: number;
+  complete: boolean;
+}
+
+interface AggregatedProgress {
+  file: string;
+  progress: number;
+  loaded: number;
+  total: number;
 }
 
 const workerScope =
@@ -261,6 +278,9 @@ async function createPipeline(
   configuration: (typeof MODELS)[WhisperModel],
   device: WhisperDevice,
 ): Promise<WhisperAsr> {
+  const progressAggregator =
+    new ModelDownloadProgressAggregator();
+
   const created = await pipeline(
     "automatic-speech-recognition",
     configuration.id,
@@ -268,7 +288,9 @@ async function createPipeline(
       device,
       dtype: configuration.dtype,
       progress_callback(progress: unknown) {
-        postProgress(progress);
+        postProgress(
+          progressAggregator.update(progress),
+        );
       },
     },
   );
@@ -320,36 +342,205 @@ async function transcribe(
   }
 }
 
-function postProgress(value: unknown): void {
-  const raw = isRecord(value)
-    ? value as RawProgress
-    : {};
+class ModelDownloadProgressAggregator {
+  private readonly files =
+    new Map<string, FileProgressState>();
 
-  const loaded = finiteNonNegative(raw.loaded);
-  const total = finiteNonNegative(raw.total);
-  const reportedProgress =
-    finiteNonNegative(raw.progress);
+  update(value: unknown): AggregatedProgress {
+    const raw = isRecord(value)
+      ? value as RawProgress
+      : {};
 
-  const derivedProgress =
-    total > 0
-      ? loaded / total * 100
-      : 0;
-
-  const progress = clampPercentage(
-    reportedProgress > 0
-      ? reportedProgress
-      : derivedProgress,
-  );
-
-  const message: WhisperProgressMessage = {
-    t: "WHISPER_PROGRESS",
-    file:
+    const file =
       typeof raw.file === "string"
         ? raw.file
-        : "",
-    progress,
-    loaded,
-    total,
+        : "";
+    const loaded =
+      finiteNonNegativeOrUndefined(
+        raw.loaded,
+      );
+    const total =
+      finiteNonNegativeOrUndefined(
+        raw.total,
+      );
+    const reportedProgress =
+      finiteNonNegativeOrUndefined(
+        raw.progress,
+      );
+    const status =
+      typeof raw.status === "string"
+        ? raw.status
+        : "";
+
+    if (file !== "") {
+      this.updateFile(
+        file,
+        loaded,
+        total,
+        reportedProgress,
+        isCompletionStatus(status),
+      );
+    }
+
+    if (this.files.size === 0) {
+      const standaloneLoaded = loaded ?? 0;
+      const standaloneTotal = total ?? 0;
+      const standaloneProgress =
+        standaloneTotal > 0
+          ? standaloneLoaded /
+            standaloneTotal *
+            100
+          : reportedProgress ?? 0;
+
+      return {
+        file,
+        progress: Math.min(
+          INITIALIZATION_PROGRESS_CEILING,
+          clampPercentage(
+            standaloneProgress,
+          ),
+        ),
+        loaded: standaloneLoaded,
+        total: standaloneTotal,
+      };
+    }
+
+    const states =
+      Array.from(this.files.values());
+    const knownByteStates =
+      states.filter(
+        (state) => state.total > 0,
+      );
+    const aggregateLoaded =
+      knownByteStates.reduce(
+        (sum, state) =>
+          sum +
+          Math.min(
+            state.loaded,
+            state.total,
+          ),
+        0,
+      );
+    const aggregateTotal =
+      knownByteStates.reduce(
+        (sum, state) =>
+          sum + state.total,
+        0,
+      );
+    const allTotalsKnown =
+      knownByteStates.length ===
+      states.length;
+
+    const aggregateFraction =
+      allTotalsKnown &&
+      aggregateTotal > 0
+        ? aggregateLoaded / aggregateTotal
+        : states.reduce(
+            (sum, state) =>
+              sum + state.fraction,
+            0,
+          ) /
+          states.length;
+
+    return {
+      file,
+      progress: Math.min(
+        INITIALIZATION_PROGRESS_CEILING,
+        clampPercentage(
+          aggregateFraction * 100,
+        ),
+      ),
+      loaded: aggregateLoaded,
+      total: aggregateTotal,
+    };
+  }
+
+  private updateFile(
+    file: string,
+    loaded: number | undefined,
+    total: number | undefined,
+    reportedProgress: number | undefined,
+    completed: boolean,
+  ): void {
+    const previous =
+      this.files.get(file) ?? {
+        loaded: 0,
+        total: 0,
+        fraction: 0,
+        complete: false,
+      };
+
+    const nextTotal =
+      total !== undefined && total > 0
+        ? Math.max(
+            previous.total,
+            total,
+          )
+        : previous.total;
+    let nextLoaded =
+      loaded === undefined
+        ? previous.loaded
+        : Math.max(
+            previous.loaded,
+            loaded,
+          );
+    const nextComplete =
+      previous.complete ||
+      completed ||
+      (
+        nextTotal > 0 &&
+        nextLoaded >= nextTotal
+      );
+
+    let nextFraction =
+      previous.fraction;
+
+    if (nextTotal > 0) {
+      nextFraction = Math.max(
+        nextFraction,
+        nextLoaded / nextTotal,
+      );
+    } else if (
+      reportedProgress !== undefined
+    ) {
+      nextFraction = Math.max(
+        nextFraction,
+        reportedProgress / 100,
+      );
+    }
+
+    if (nextComplete) {
+      nextFraction = 1;
+
+      if (nextTotal > 0) {
+        nextLoaded = Math.max(
+          nextLoaded,
+          nextTotal,
+        );
+      }
+    }
+
+    this.files.set(file, {
+      loaded: nextLoaded,
+      total: nextTotal,
+      fraction: Math.max(
+        0,
+        Math.min(1, nextFraction),
+      ),
+      complete: nextComplete,
+    });
+  }
+}
+
+function postProgress(
+  value: AggregatedProgress,
+): void {
+  const message: WhisperProgressMessage = {
+    t: "WHISPER_PROGRESS",
+    file: value.file,
+    progress: value.progress,
+    loaded: value.loaded,
+    total: value.total,
   };
 
   workerScope.postMessage(message);
@@ -395,21 +586,30 @@ function extractText(
   return output.text.trim();
 }
 
-function finiteNonNegative(
+function finiteNonNegativeOrUndefined(
   value: unknown,
-): number {
+): number | undefined {
   return (
     typeof value === "number" &&
     Number.isFinite(value)
   )
     ? Math.max(0, value)
-    : 0;
+    : undefined;
 }
 
 function clampPercentage(
   value: number,
 ): number {
   return Math.max(0, Math.min(100, value));
+}
+
+function isCompletionStatus(
+  status: string,
+): boolean {
+  return (
+    status === "done" ||
+    status === "ready"
+  );
 }
 
 function isRecord(
