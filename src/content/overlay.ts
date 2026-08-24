@@ -5,13 +5,9 @@ import type {
 const MAX_PRIMARY_CAPTION_CHARS = 120;
 const MAX_SECONDARY_CAPTION_CHARS = 140;
 
-const FINAL_PRIMARY_LINE_HEIGHT = 1.16;
-const FINAL_ORIGINAL_FONT_SCALE = 0.68;
-const FINAL_ORIGINAL_LINE_HEIGHT = 1.18;
-const INTERIM_PRIMARY_FONT_SCALE = 0.86;
-const INTERIM_PRIMARY_LINE_HEIGHT = 1.16;
-const INTERIM_ORIGINAL_FONT_SCALE = 0.64;
-const INTERIM_ORIGINAL_LINE_HEIGHT = 1.16;
+const PRIMARY_LINE_HEIGHT = 1.16;
+const ORIGINAL_FONT_SCALE = 0.68;
+const ORIGINAL_LINE_HEIGHT = 1.18;
 const MAX_STALE_INTERIM_ADVANCES = 2;
 
 function clampCaptionTail(
@@ -26,12 +22,16 @@ function clampCaptionTail(
 }
 
 const HOST_ID = "xjsub-host";
-const FINAL_VISIBLE_MS = 5_000;
-const FINAL_FADE_MS = 350;
+const CAPTION_VISIBLE_MS = 5_000;
+const CAPTION_FADE_MS = 350;
 const MUTATION_DEBOUNCE_MS = 500;
 const MAX_OTHER_VIDEOS = 6;
 const STABLE_FRAMES_BEFORE_IDLE = 10;
 const RECT_COMPARISON_EPSILON_PX = 0.1;
+
+type CaptionSource =
+  | "interim"
+  | "final";
 
 interface RectSnapshot {
   left: number;
@@ -79,16 +79,9 @@ export class CaptionOverlay {
   private readonly captionStack: HTMLDivElement;
   private readonly translationBadge:
     HTMLDivElement;
-  private readonly finalLine: HTMLDivElement;
-  private readonly finalPrimaryLine:
-    HTMLDivElement;
-  private readonly finalOriginalLine:
-    HTMLDivElement;
-  private readonly interimLine: HTMLDivElement;
-  private readonly interimPrimaryLine:
-    HTMLDivElement;
-  private readonly interimOriginalLine:
-    HTMLDivElement;
+  private readonly captionLine: HTMLDivElement;
+  private readonly primaryLine: HTMLDivElement;
+  private readonly originalLine: HTMLDivElement;
   private readonly targetChip: HTMLDivElement;
   private readonly targetDot: HTMLSpanElement;
   private readonly targetText: HTMLSpanElement;
@@ -108,13 +101,20 @@ export class CaptionOverlay {
     | TranslationPath
     | null = null;
   private progress: number | undefined;
+
   private highestFinalId: number | null = null;
-  private highestShownFinalId:
+  private highestShownDisplayId:
     | number
     | null = null;
+  private activeShownDisplayId:
+    | number
+    | null = null;
+
   private finalId: number | null = null;
+  private finalAt: string | null = null;
   private finalEnglishText = "";
   private finalJapaneseText = "";
+
   private interimId: number | null = null;
   private interimEnglishText = "";
   private interimJapaneseText = "";
@@ -124,6 +124,25 @@ export class CaptionOverlay {
   private interimJapaneseVersion:
     | number
     | null = null;
+
+  private liveEnglishId: number | null = null;
+  private liveEnglishSource:
+    | CaptionSource
+    | null = null;
+  private liveEnglishText = "";
+
+  private japaneseDisplayId:
+    | number
+    | null = null;
+  private japaneseDisplaySource:
+    | CaptionSource
+    | null = null;
+  private japaneseDisplayText = "";
+
+  private captionActive = false;
+  private suppressedAfterFade = false;
+  private captionRevision = 0;
+
   private frameId: number | null = null;
   private stableFrameCount = 0;
   private lastLayoutSnapshot:
@@ -131,10 +150,12 @@ export class CaptionOverlay {
     | null = null;
   private mutationTimerId: number | null =
     null;
-  private finalFadeTimerId: number | null =
-    null;
-  private finalRemovalTimerId: number | null =
-    null;
+  private captionFadeTimerId:
+    | number
+    | null = null;
+  private captionRemovalTimerId:
+    | number
+    | null = null;
   private captionBarEnabled = true;
   private destroyed = false;
 
@@ -177,50 +198,29 @@ export class CaptionOverlay {
     this.translationBadge.textContent =
       "翻訳未使用";
 
-    this.finalLine =
+    this.captionLine =
       document.createElement("div");
-    this.finalLine.className =
-      "caption-line caption-final is-empty";
+    this.captionLine.className =
+      "caption-line is-empty";
 
-    this.finalPrimaryLine =
+    this.primaryLine =
       document.createElement("div");
-    this.finalPrimaryLine.className =
+    this.primaryLine.className =
       "caption-primary";
 
-    this.finalOriginalLine =
+    this.originalLine =
       document.createElement("div");
-    this.finalOriginalLine.className =
+    this.originalLine.className =
       "caption-original";
 
-    this.finalLine.append(
-      this.finalPrimaryLine,
-      this.finalOriginalLine,
-    );
-
-    this.interimLine =
-      document.createElement("div");
-    this.interimLine.className =
-      "caption-line caption-interim is-empty";
-
-    this.interimPrimaryLine =
-      document.createElement("div");
-    this.interimPrimaryLine.className =
-      "caption-primary caption-interim-primary";
-
-    this.interimOriginalLine =
-      document.createElement("div");
-    this.interimOriginalLine.className =
-      "caption-original caption-interim-original";
-
-    this.interimLine.append(
-      this.interimPrimaryLine,
-      this.interimOriginalLine,
+    this.captionLine.append(
+      this.primaryLine,
+      this.originalLine,
     );
 
     this.captionStack.append(
       this.translationBadge,
-      this.finalLine,
-      this.interimLine,
+      this.captionLine,
     );
 
     this.targetChip =
@@ -312,20 +312,26 @@ export class CaptionOverlay {
       return;
     }
 
-    this.cancelFinalFade();
+    this.captionRevision += 1;
+    this.cancelCaptionFade();
     this.captionBarEnabled = false;
+    this.captionActive = false;
+    this.suppressedAfterFade = true;
+    this.activeShownDisplayId = null;
+
     this.finalId = null;
+    this.finalAt = null;
     this.finalEnglishText = "";
     this.finalJapaneseText = "";
-    this.finalPrimaryLine.textContent = "";
-    this.finalOriginalLine.textContent = "";
-    this.clearInterimCaption();
-    this.finalLine.classList.remove(
-      "is-fading",
-    );
-    this.finalLine.classList.add(
-      "is-empty",
-    );
+
+    this.clearInterimCaptionState();
+
+    this.liveEnglishId = null;
+    this.liveEnglishSource = null;
+    this.liveEnglishText = "";
+    this.japaneseDisplayText = "";
+
+    this.clearRenderedCaption();
     this.captionStack.style.display = "none";
 
     console.log("[overlay]", "captions cleared");
@@ -340,9 +346,19 @@ export class CaptionOverlay {
 
     this.translationPath = path;
     this.updateTranslationBadge();
-    this.renderFinalCaption();
-    this.syncFinalFadeAfterRender();
-    this.renderInterimCaption();
+
+    if (
+      !this.captionActive &&
+      !this.suppressedAfterFade &&
+      path === "none" &&
+      this.liveEnglishText !== ""
+    ) {
+      this.captionActive = true;
+    }
+
+    this.cancelCaptionFade();
+    this.renderCaption();
+    this.syncCaptionFadeAfterRender();
     this.updateLayout();
   }
 
@@ -386,7 +402,7 @@ export class CaptionOverlay {
     }
 
     this.destroyed = true;
-    this.cancelFinalFade();
+    this.cancelCaptionFade();
 
     if (this.frameId !== null) {
       cancelAnimationFrame(this.frameId);
@@ -417,48 +433,44 @@ export class CaptionOverlay {
     text: string,
     ja: string,
   ): void {
-    const highestShownFinalId =
-      this.highestShownFinalId;
+    const highestShownDisplayId =
+      this.highestShownDisplayId;
 
     if (
-      highestShownFinalId !== null &&
-      line.id < highestShownFinalId
-    ) {
-      this.refreshFinalFadeIfVisible();
-      return;
-    }
-
-    if (
-      highestShownFinalId === line.id &&
-      this.finalId !== line.id
+      highestShownDisplayId !== null &&
+      line.id <= highestShownDisplayId &&
+      this.activeShownDisplayId !== line.id
     ) {
       return;
     }
 
     if (text === "") {
-      this.refreshFinalFadeIfVisible();
       return;
     }
 
-    const incomingIsRenderable =
-      this.showOriginal ||
-      this.translationPath === "none" ||
-      ja !== "";
-
     if (
       this.finalId !== null &&
-      line.id < this.finalId &&
-      !incomingIsRenderable
+      line.id < this.finalId
     ) {
-      this.refreshFinalFadeIfVisible();
       return;
     }
 
     const isNewFinal =
       this.finalId !== line.id;
 
-    this.captionBarEnabled = true;
-    this.cancelFinalFade();
+    if (
+      !isNewFinal &&
+      this.finalAt !== null &&
+      line.at < this.finalAt
+    ) {
+      return;
+    }
+
+    const previousFinalAt = this.finalAt;
+    const previousEnglish =
+      this.finalEnglishText;
+    const previousJapanese =
+      this.finalJapaneseText;
 
     this.highestFinalId =
       this.highestFinalId === null
@@ -470,9 +482,11 @@ export class CaptionOverlay {
 
     if (isNewFinal) {
       this.finalId = line.id;
+      this.finalAt = line.at;
       this.finalEnglishText = text;
       this.finalJapaneseText = "";
     } else {
+      this.finalAt = line.at;
       this.finalEnglishText = text;
     }
 
@@ -484,14 +498,54 @@ export class CaptionOverlay {
       this.interimId === line.id ||
       (
         this.interimId !== null &&
-        this.interimId <= line.id
+        this.interimId < line.id
       )
     ) {
-      this.clearInterimCaption();
+      this.clearInterimCaptionState();
     }
 
-    this.renderFinalCaption();
-    this.syncFinalFadeAfterRender();
+    const liveEnglishUpdated =
+      this.updateLiveEnglish(
+        line.id,
+        "final",
+        text,
+      );
+    const japaneseUpdated =
+      ja !== "" &&
+      this.updateJapaneseDisplay(
+        line.id,
+        "final",
+        ja,
+      );
+    const finalStateChanged =
+      isNewFinal ||
+      previousFinalAt !== line.at ||
+      previousEnglish !==
+        this.finalEnglishText ||
+      previousJapanese !==
+        this.finalJapaneseText;
+
+    const hasNewActivity =
+      liveEnglishUpdated ||
+      japaneseUpdated ||
+      finalStateChanged;
+    const canActivate =
+      japaneseUpdated ||
+      (
+        (
+          this.translationPath === "none" ||
+          this.showOriginal
+        ) &&
+        (
+          liveEnglishUpdated ||
+          finalStateChanged
+        )
+      );
+
+    this.applyCaptionUpdate(
+      canActivate,
+      hasNewActivity,
+    );
   }
 
   private showInterimCaption(
@@ -499,6 +553,17 @@ export class CaptionOverlay {
     text: string,
     ja: string,
   ): void {
+    const highestShownDisplayId =
+      this.highestShownDisplayId;
+
+    if (
+      highestShownDisplayId !== null &&
+      line.id <= highestShownDisplayId &&
+      this.activeShownDisplayId !== line.id
+    ) {
+      return;
+    }
+
     if (
       (
         this.highestFinalId !== null &&
@@ -509,12 +574,10 @@ export class CaptionOverlay {
         line.id < this.interimId
       )
     ) {
-      this.refreshFinalFadeIfVisible();
       return;
     }
 
     if (text === "") {
-      this.refreshFinalFadeIfVisible();
       return;
     }
 
@@ -525,6 +588,8 @@ export class CaptionOverlay {
       this.beginInterimCaption(line.id);
     }
 
+    let interimStateChanged = false;
+
     if (ja === "") {
       if (
         !this.shouldAdvanceInterimSnapshot(
@@ -532,7 +597,6 @@ export class CaptionOverlay {
           text,
         )
       ) {
-        this.refreshFinalFadeIfVisible();
         return;
       }
 
@@ -540,25 +604,72 @@ export class CaptionOverlay {
         line.at,
         text,
       );
+      interimStateChanged = true;
     } else {
+      const previousEnglishAt =
+        this.interimEnglishAt;
+      const previousEnglish =
+        this.interimEnglishText;
+      const previousJapanese =
+        this.interimJapaneseText;
+      const previousJapaneseVersion =
+        this.interimJapaneseVersion;
+
       if (
         !this.matchOrAdvanceTranslatedInterim(
           line.at,
           text,
         )
       ) {
-        this.refreshFinalFadeIfVisible();
         return;
       }
 
       this.interimJapaneseText = ja;
       this.interimJapaneseVersion =
         this.interimSnapshotVersion;
+
+      interimStateChanged =
+        previousEnglishAt !==
+          this.interimEnglishAt ||
+        previousEnglish !==
+          this.interimEnglishText ||
+        previousJapanese !==
+          this.interimJapaneseText ||
+        previousJapaneseVersion !==
+          this.interimJapaneseVersion;
     }
 
-    this.captionBarEnabled = true;
-    this.renderInterimCaption();
-    this.refreshFinalFadeIfVisible();
+    const liveEnglishUpdated =
+      this.updateLiveEnglish(
+        line.id,
+        "interim",
+        this.interimEnglishText,
+      );
+    const japaneseUpdated =
+      ja !== "" &&
+      this.updateJapaneseDisplay(
+        line.id,
+        "interim",
+        ja,
+      );
+    const hasNewActivity =
+      interimStateChanged ||
+      liveEnglishUpdated ||
+      japaneseUpdated;
+    const canActivate =
+      japaneseUpdated ||
+      (
+        (
+          this.translationPath === "none" ||
+          this.showOriginal
+        ) &&
+        hasNewActivity
+      );
+
+    this.applyCaptionUpdate(
+      canActivate,
+      hasNewActivity,
+    );
   }
 
   private beginInterimCaption(
@@ -635,139 +746,232 @@ export class CaptionOverlay {
     return text === this.interimEnglishText;
   }
 
-  private renderFinalCaption(): void {
-    if (this.finalId === null) {
-      this.finalPrimaryLine.textContent = "";
-      this.finalOriginalLine.textContent = "";
-      this.finalLine.classList.add(
-        "is-empty",
-      );
-      return;
-    }
-
-    const useEnglishFallback =
-      this.translationPath === "none";
-
-    if (useEnglishFallback) {
-      this.finalPrimaryLine.textContent =
-        clampCaptionTail(
-          this.finalEnglishText,
-          MAX_SECONDARY_CAPTION_CHARS,
-        );
-      this.finalOriginalLine.textContent =
-        "";
-    } else if (
-      this.finalJapaneseText !== ""
-    ) {
-      this.finalPrimaryLine.textContent =
-        clampCaptionTail(
-          this.finalJapaneseText,
-          MAX_PRIMARY_CAPTION_CHARS,
-        );
-      this.finalOriginalLine.textContent =
-        this.showOriginal
-          ? clampCaptionTail(
-              this.finalEnglishText,
-              MAX_SECONDARY_CAPTION_CHARS,
-            )
-          : "";
-    } else if (this.showOriginal) {
-      this.finalPrimaryLine.textContent =
-        clampCaptionTail(
-          this.finalEnglishText,
-          MAX_SECONDARY_CAPTION_CHARS,
-        );
-      this.finalOriginalLine.textContent =
-        "";
-    } else {
-      this.finalPrimaryLine.textContent = "";
-      this.finalOriginalLine.textContent = "";
-    }
-
-    this.finalLine.classList.toggle(
-      "is-empty",
-      this.finalPrimaryLine.textContent === "",
-    );
-  }
-
-  private renderInterimCaption(): void {
-    if (this.interimId === null) {
-      this.interimPrimaryLine.textContent = "";
-      this.interimOriginalLine.textContent = "";
-      this.interimLine.classList.remove(
-        "has-translation",
-      );
-      this.interimLine.classList.add(
-        "is-empty",
-      );
-      return;
-    }
-
-    const useEnglishFallback =
-      this.translationPath === "none";
-    const showTranslated =
-      !useEnglishFallback &&
-      this.interimJapaneseText !== "";
-
-    if (useEnglishFallback) {
-      this.interimPrimaryLine.textContent =
-        clampCaptionTail(
-          this.interimEnglishText,
-          MAX_SECONDARY_CAPTION_CHARS,
-        );
-      this.interimOriginalLine.textContent =
-        "";
-    } else if (showTranslated) {
-      this.interimPrimaryLine.textContent =
-        clampCaptionTail(
-          this.interimJapaneseText,
-          MAX_PRIMARY_CAPTION_CHARS,
-        );
-      this.interimOriginalLine.textContent =
-        this.showOriginal
-          ? clampCaptionTail(
-              this.interimEnglishText,
-              MAX_SECONDARY_CAPTION_CHARS,
-            )
-          : "";
-    } else if (this.showOriginal) {
-      this.interimPrimaryLine.textContent =
-        clampCaptionTail(
-          this.interimEnglishText,
-          MAX_SECONDARY_CAPTION_CHARS,
-        );
-      this.interimOriginalLine.textContent =
-        "";
-    } else {
-      this.interimPrimaryLine.textContent = "";
-      this.interimOriginalLine.textContent = "";
-    }
-
-    this.interimLine.classList.toggle(
-      "has-translation",
-      showTranslated,
-    );
-    this.interimLine.classList.toggle(
-      "is-empty",
-      this.interimPrimaryLine.textContent === "",
-    );
-  }
-
-  private clearInterimCaption(): void {
+  private clearInterimCaptionState(): void {
     this.interimId = null;
     this.interimEnglishText = "";
     this.interimJapaneseText = "";
     this.interimEnglishAt = null;
     this.interimSnapshotVersion = 0;
     this.interimJapaneseVersion = null;
-    this.interimPrimaryLine.textContent = "";
-    this.interimOriginalLine.textContent = "";
-    this.interimLine.classList.remove(
-      "has-translation",
+  }
+
+  private updateLiveEnglish(
+    id: number,
+    source: CaptionSource,
+    text: string,
+  ): boolean {
+    if (
+      this.liveEnglishId !== null &&
+      this.liveEnglishSource !== null &&
+      compareCaptionOrder(
+        id,
+        source,
+        this.liveEnglishId,
+        this.liveEnglishSource,
+      ) < 0
+    ) {
+      return false;
+    }
+
+    const changed =
+      this.liveEnglishId !== id ||
+      this.liveEnglishSource !== source ||
+      this.liveEnglishText !== text;
+
+    this.liveEnglishId = id;
+    this.liveEnglishSource = source;
+    this.liveEnglishText = text;
+
+    if (
+      this.activeShownDisplayId !== null &&
+      id > this.activeShownDisplayId
+    ) {
+      this.activeShownDisplayId = null;
+    }
+
+    return changed;
+  }
+
+  private updateJapaneseDisplay(
+    id: number,
+    source: CaptionSource,
+    text: string,
+  ): boolean {
+    if (
+      this.japaneseDisplayId !== null &&
+      this.japaneseDisplaySource !== null &&
+      compareCaptionOrder(
+        id,
+        source,
+        this.japaneseDisplayId,
+        this.japaneseDisplaySource,
+      ) < 0
+    ) {
+      return false;
+    }
+
+    const changed =
+      this.japaneseDisplayId !== id ||
+      this.japaneseDisplaySource !== source ||
+      this.japaneseDisplayText !== text;
+
+    this.japaneseDisplayId = id;
+    this.japaneseDisplaySource = source;
+    this.japaneseDisplayText = text;
+
+    if (
+      this.activeShownDisplayId !== null &&
+      (
+        id > this.activeShownDisplayId ||
+        (
+          id === this.activeShownDisplayId &&
+          source === "interim"
+        )
+      )
+    ) {
+      this.activeShownDisplayId = null;
+    }
+
+    return changed;
+  }
+
+  private applyCaptionUpdate(
+    canActivate: boolean,
+    hasNewActivity: boolean,
+  ): void {
+    if (!hasNewActivity) {
+      return;
+    }
+
+    this.captionRevision += 1;
+    this.captionBarEnabled = true;
+    this.suppressedAfterFade = false;
+
+    if (canActivate) {
+      this.captionActive = true;
+    }
+
+    this.cancelCaptionFade();
+    this.renderCaption();
+    this.syncCaptionFadeAfterRender();
+  }
+
+  private renderCaption(): void {
+    if (!this.captionActive) {
+      this.clearRenderedCaption();
+      return;
+    }
+
+    const useEnglishFallback =
+      this.translationPath === "none";
+
+    if (useEnglishFallback) {
+      this.primaryLine.textContent =
+        clampCaptionTail(
+          this.liveEnglishText,
+          MAX_SECONDARY_CAPTION_CHARS,
+        );
+      this.originalLine.textContent = "";
+    } else {
+      this.primaryLine.textContent =
+        this.japaneseDisplayText === ""
+          ? ""
+          : clampCaptionTail(
+              this.japaneseDisplayText,
+              MAX_PRIMARY_CAPTION_CHARS,
+            );
+      this.originalLine.textContent =
+        this.showOriginal &&
+        this.liveEnglishText !== ""
+          ? clampCaptionTail(
+              this.liveEnglishText,
+              MAX_SECONDARY_CAPTION_CHARS,
+            )
+          : "";
+    }
+
+    const hasVisibleText =
+      this.hasVisibleCaption();
+
+    this.captionLine.classList.toggle(
+      "is-empty",
+      !hasVisibleText,
     );
-    this.interimLine.classList.add(
+
+    if (!hasVisibleText) {
+      this.activeShownDisplayId = null;
+      return;
+    }
+
+    this.recordVisibleDisplay();
+  }
+
+  private clearRenderedCaption(): void {
+    this.primaryLine.textContent = "";
+    this.originalLine.textContent = "";
+    this.activeShownDisplayId = null;
+    this.captionLine.classList.remove(
+      "is-fading",
+    );
+    this.captionLine.classList.add(
       "is-empty",
     );
+  }
+
+  private recordVisibleDisplay(): void {
+    let visibleDisplayId: number | null = null;
+
+    if (
+      this.translationPath === "none" &&
+      this.liveEnglishId !== null &&
+      this.primaryLine.textContent !== ""
+    ) {
+      visibleDisplayId = this.liveEnglishId;
+    }
+
+    if (
+      this.translationPath !== "none" &&
+      this.japaneseDisplayId !== null &&
+      this.primaryLine.textContent !== ""
+    ) {
+      visibleDisplayId =
+        visibleDisplayId === null
+          ? this.japaneseDisplayId
+          : Math.max(
+              visibleDisplayId,
+              this.japaneseDisplayId,
+            );
+    }
+
+    if (
+      this.translationPath !== "none" &&
+      this.showOriginal &&
+      this.liveEnglishId !== null &&
+      this.originalLine.textContent !== ""
+    ) {
+      visibleDisplayId =
+        visibleDisplayId === null
+          ? this.liveEnglishId
+          : Math.max(
+              visibleDisplayId,
+              this.liveEnglishId,
+            );
+    }
+
+    this.activeShownDisplayId =
+      visibleDisplayId;
+
+    if (visibleDisplayId === null) {
+      return;
+    }
+
+    this.highestShownDisplayId =
+      this.highestShownDisplayId === null
+        ? visibleDisplayId
+        : Math.max(
+            this.highestShownDisplayId,
+            visibleDisplayId,
+          );
   }
 
   private installEventListeners(): void {
@@ -1275,9 +1479,28 @@ export class CaptionOverlay {
     }
 
     const width = Math.max(0, rect.width);
-    const barHeight = Math.max(
-      64,
-      Math.min(150, rect.height * 0.26),
+    const barHeight =
+      this.showOriginal
+        ? Math.max(
+            58,
+            Math.min(
+              94,
+              rect.height * 0.21,
+            ),
+          )
+        : Math.max(
+            40,
+            Math.min(
+              76,
+              rect.height * 0.14,
+            ),
+          );
+    const bottomOffset = Math.max(
+      44,
+      Math.min(
+        64,
+        rect.height * 0.12,
+      ),
     );
 
     if (width <= 0 || barHeight <= 0) {
@@ -1292,27 +1515,20 @@ export class CaptionOverlay {
     );
     const verticalPadding = Math.max(
       5,
-      Math.min(10, barHeight * 0.07),
+      Math.min(10, barHeight * 0.1),
     );
     const availableRowHeight = Math.max(
       1,
       barHeight - verticalPadding * 2,
     );
-
-    const originalRowsInFontUnits =
-      this.showOriginal
-        ? FINAL_ORIGINAL_FONT_SCALE *
-            FINAL_ORIGINAL_LINE_HEIGHT +
-          INTERIM_ORIGINAL_FONT_SCALE *
-            INTERIM_ORIGINAL_LINE_HEIGHT
-        : 0;
-
     const rowHeightInFontUnits =
-      FINAL_PRIMARY_LINE_HEIGHT * 2 +
-      INTERIM_PRIMARY_FONT_SCALE *
-        INTERIM_PRIMARY_LINE_HEIGHT +
-      originalRowsInFontUnits;
-
+      PRIMARY_LINE_HEIGHT +
+      (
+        this.showOriginal
+          ? ORIGINAL_FONT_SCALE *
+            ORIGINAL_LINE_HEIGHT
+          : 0
+      );
     const widthScaledFontSize = Math.max(
       14,
       Math.min(24, rect.width / 32),
@@ -1327,26 +1543,13 @@ export class CaptionOverlay {
         heightLimitedFontSize,
       ),
     );
-
-    const finalPrimarySlot =
-      fontSize *
-      FINAL_PRIMARY_LINE_HEIGHT *
-      2;
-    const finalOriginalSlot =
+    const primarySlot =
+      fontSize * PRIMARY_LINE_HEIGHT;
+    const originalSlot =
       this.showOriginal
         ? fontSize *
-          FINAL_ORIGINAL_FONT_SCALE *
-          FINAL_ORIGINAL_LINE_HEIGHT
-        : 0;
-    const interimPrimarySlot =
-      fontSize *
-      INTERIM_PRIMARY_FONT_SCALE *
-      INTERIM_PRIMARY_LINE_HEIGHT;
-    const interimOriginalSlot =
-      this.showOriginal
-        ? fontSize *
-          INTERIM_ORIGINAL_FONT_SCALE *
-          INTERIM_ORIGINAL_LINE_HEIGHT
+          ORIGINAL_FONT_SCALE *
+          ORIGINAL_LINE_HEIGHT
         : 0;
 
     this.captionStack.style.display =
@@ -1354,7 +1557,11 @@ export class CaptionOverlay {
     this.captionStack.style.left =
       `${rect.left}px`;
     this.captionStack.style.bottom =
-      `${window.innerHeight - rect.bottom}px`;
+      `${
+        window.innerHeight -
+        rect.bottom +
+        bottomOffset
+      }px`;
     this.captionStack.style.width =
       `${width}px`;
     this.captionStack.style.maxWidth =
@@ -1372,20 +1579,12 @@ export class CaptionOverlay {
       `${verticalPadding}px`,
     );
     this.captionStack.style.setProperty(
-      "--final-primary-slot",
-      `${finalPrimarySlot}px`,
+      "--primary-slot",
+      `${primarySlot}px`,
     );
     this.captionStack.style.setProperty(
-      "--final-original-slot",
-      `${finalOriginalSlot}px`,
-    );
-    this.captionStack.style.setProperty(
-      "--interim-primary-slot",
-      `${interimPrimarySlot}px`,
-    );
-    this.captionStack.style.setProperty(
-      "--interim-original-slot",
-      `${interimOriginalSlot}px`,
+      "--original-slot",
+      `${originalSlot}px`,
     );
   }
 
@@ -1454,115 +1653,120 @@ export class CaptionOverlay {
     }
   }
 
-  private hasFinalCaption(): boolean {
+  private hasVisibleCaption(): boolean {
     return (
-      this.finalPrimaryLine.textContent !== ""
+      this.primaryLine.textContent !== "" ||
+      this.originalLine.textContent !== ""
     );
   }
 
-  private syncFinalFadeAfterRender(): void {
+  private syncCaptionFadeAfterRender(): void {
     if (
-      this.finalId === null ||
-      !this.hasFinalCaption()
+      !this.captionActive ||
+      !this.hasVisibleCaption()
     ) {
-      this.cancelFinalFade();
+      this.cancelCaptionFade();
       return;
     }
 
-    this.highestShownFinalId =
-      this.highestShownFinalId === null
-        ? this.finalId
-        : Math.max(
-            this.highestShownFinalId,
-            this.finalId,
-          );
-
-    this.scheduleFinalFade();
+    this.scheduleCaptionFade();
   }
 
-  private refreshFinalFadeIfVisible(): void {
-    if (
-      this.finalId === null ||
-      !this.hasFinalCaption()
-    ) {
-      return;
-    }
-
-    this.cancelFinalFade();
-    this.scheduleFinalFade();
-  }
-
-  private scheduleFinalFade(): void {
+  private scheduleCaptionFade(): void {
     if (
       this.destroyed ||
-      this.finalId === null ||
-      !this.hasFinalCaption() ||
-      this.finalFadeTimerId !== null ||
-      this.finalRemovalTimerId !== null
+      !this.captionActive ||
+      !this.hasVisibleCaption() ||
+      this.captionFadeTimerId !== null ||
+      this.captionRemovalTimerId !== null
     ) {
       return;
     }
 
-    const expiringId = this.finalId;
+    const expiringRevision =
+      this.captionRevision;
 
-    this.finalFadeTimerId =
+    this.captionFadeTimerId =
       window.setTimeout(() => {
-        this.finalFadeTimerId = null;
+        this.captionFadeTimerId = null;
 
-        if (this.finalId !== expiringId) {
+        if (
+          this.captionRevision !==
+            expiringRevision ||
+          !this.captionActive
+        ) {
           return;
         }
 
-        this.finalLine.classList.add(
+        this.captionLine.classList.add(
           "is-fading",
         );
 
-        this.finalRemovalTimerId =
+        this.captionRemovalTimerId =
           window.setTimeout(() => {
-            this.finalRemovalTimerId = null;
+            this.captionRemovalTimerId = null;
 
-            if (this.finalId !== expiringId) {
+            if (
+              this.captionRevision !==
+                expiringRevision ||
+              !this.captionActive
+            ) {
               return;
             }
 
-            this.finalId = null;
-            this.finalEnglishText = "";
-            this.finalJapaneseText = "";
-            this.finalPrimaryLine.textContent =
-              "";
-            this.finalOriginalLine.textContent =
-              "";
-            this.finalLine.classList.remove(
-              "is-fading",
-            );
-            this.finalLine.classList.add(
-              "is-empty",
-            );
+            this.captionActive = false;
+            this.suppressedAfterFade = true;
+            this.activeShownDisplayId = null;
+            this.japaneseDisplayText = "";
+            this.clearRenderedCaption();
             this.updateLayout();
             this.options.onCaptionFadeOut?.();
-          }, FINAL_FADE_MS);
-      }, FINAL_VISIBLE_MS);
+          }, CAPTION_FADE_MS);
+      }, CAPTION_VISIBLE_MS);
   }
 
-  private cancelFinalFade(): void {
-    if (this.finalFadeTimerId !== null) {
+  private cancelCaptionFade(): void {
+    if (this.captionFadeTimerId !== null) {
       globalThis.clearTimeout(
-        this.finalFadeTimerId,
+        this.captionFadeTimerId,
       );
-      this.finalFadeTimerId = null;
+      this.captionFadeTimerId = null;
     }
 
-    if (this.finalRemovalTimerId !== null) {
+    if (
+      this.captionRemovalTimerId !== null
+    ) {
       globalThis.clearTimeout(
-        this.finalRemovalTimerId,
+        this.captionRemovalTimerId,
       );
-      this.finalRemovalTimerId = null;
+      this.captionRemovalTimerId = null;
     }
 
-    this.finalLine.classList.remove(
+    this.captionLine.classList.remove(
       "is-fading",
     );
   }
+}
+
+function compareCaptionOrder(
+  leftId: number,
+  leftSource: CaptionSource,
+  rightId: number,
+  rightSource: CaptionSource,
+): number {
+  if (leftId < rightId) {
+    return -1;
+  }
+
+  if (leftId > rightId) {
+    return 1;
+  }
+
+  if (leftSource === rightSource) {
+    return 0;
+  }
+
+  return leftSource === "final" ? 1 : -1;
 }
 
 function snapshotRect(
@@ -1740,22 +1944,20 @@ function getOverlayStyles(): string {
     .caption-stack {
       --bar-padding-x: 12px;
       --bar-padding-y: 6px;
-      --final-primary-slot: 40px;
-      --final-original-slot: 0px;
-      --interim-primary-slot: 14px;
-      --interim-original-slot: 0px;
+      --primary-slot: 24px;
+      --original-slot: 0px;
 
       position: fixed;
       display: none;
       flex-direction: column;
       align-items: stretch;
-      justify-content: flex-end;
+      justify-content: center;
       margin: 0;
       padding:
         var(--bar-padding-y)
         var(--bar-padding-x);
       overflow: hidden;
-      border-radius: 8px 8px 0 0;
+      border-radius: 8px;
       color: #ffffff;
       background: rgba(0, 0, 0, 0.92);
       font-family:
@@ -1774,130 +1976,67 @@ function getOverlayStyles(): string {
       flex-direction: column;
       width: 100%;
       min-width: 0;
+      height: calc(
+        var(--primary-slot) +
+        var(--original-slot)
+      );
       margin: 0;
       padding: 0;
       overflow: hidden;
-      pointer-events: none;
-      opacity: 1;
-      transition:
-        opacity ${FINAL_FADE_MS}ms ease;
-    }
-
-    .caption-line.is-empty {
-      opacity: 0;
-    }
-
-    .caption-final {
-      height: calc(
-        var(--final-primary-slot) +
-        var(--final-original-slot)
-      );
       color: #ffffff;
       font-style: normal;
       font-weight: 650;
+      pointer-events: none;
+      opacity: 1;
       text-shadow:
         0 1px 2px rgba(0, 0, 0, 0.95),
         0 0 3px rgba(0, 0, 0, 0.8);
+      transition:
+        opacity ${CAPTION_FADE_MS}ms ease;
     }
 
-    .caption-final.is-fading {
+    .caption-line.is-empty,
+    .caption-line.is-fading {
       opacity: 0;
     }
 
-    .caption-final > .caption-primary {
-      display: -webkit-box;
-      flex: 0 0 var(--final-primary-slot);
+    .caption-primary {
+      display: block;
+      flex: 0 0 var(--primary-slot);
       width: 100%;
       min-width: 0;
-      height: var(--final-primary-slot);
-      min-height: var(--final-primary-slot);
-      max-height: var(--final-primary-slot);
+      height: var(--primary-slot);
+      min-height: var(--primary-slot);
+      max-height: var(--primary-slot);
       margin: 0;
       padding: 0;
       overflow: hidden;
-      overflow-wrap: anywhere;
+      overflow-wrap: normal;
       font-size: 1em;
       font-weight: 650;
-      line-height: ${FINAL_PRIMARY_LINE_HEIGHT};
-      white-space: normal;
-      -webkit-box-orient: vertical;
-      -webkit-line-clamp: 2;
+      line-height: ${PRIMARY_LINE_HEIGHT};
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
 
-    .caption-final > .caption-original {
+    .caption-original {
       display: block;
-      flex: 0 0 var(--final-original-slot);
+      flex: 0 0 var(--original-slot);
       width: 100%;
       min-width: 0;
-      height: var(--final-original-slot);
-      min-height: var(--final-original-slot);
-      max-height: var(--final-original-slot);
+      height: var(--original-slot);
+      min-height: var(--original-slot);
+      max-height: var(--original-slot);
       margin: 0;
       padding: 0;
       overflow: hidden;
       color: rgba(229, 231, 235, 0.78);
-      font-size: ${FINAL_ORIGINAL_FONT_SCALE}em;
+      font-size: ${ORIGINAL_FONT_SCALE}em;
       font-weight: 500;
-      line-height: ${FINAL_ORIGINAL_LINE_HEIGHT};
+      line-height: ${ORIGINAL_LINE_HEIGHT};
       text-overflow: ellipsis;
       text-shadow:
         0 1px 2px rgba(0, 0, 0, 0.9);
-      white-space: nowrap;
-    }
-
-    .caption-interim {
-      height: calc(
-        var(--interim-primary-slot) +
-        var(--interim-original-slot)
-      );
-      color: rgba(229, 231, 235, 0.88);
-      font-style: italic;
-      font-weight: 500;
-      text-shadow:
-        0 1px 2px rgba(0, 0, 0, 0.9);
-    }
-
-    .caption-interim > .caption-interim-primary {
-      display: block;
-      flex: 0 0 var(--interim-primary-slot);
-      width: 100%;
-      min-width: 0;
-      height: var(--interim-primary-slot);
-      min-height: var(--interim-primary-slot);
-      max-height: var(--interim-primary-slot);
-      margin: 0;
-      padding: 0;
-      overflow: hidden;
-      color: rgba(229, 231, 235, 0.88);
-      font-size: ${INTERIM_PRIMARY_FONT_SCALE}em;
-      font-weight: 500;
-      line-height: ${INTERIM_PRIMARY_LINE_HEIGHT};
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-
-    .caption-interim.has-translation
-      > .caption-interim-primary {
-      color: rgba(243, 244, 246, 0.94);
-      font-weight: 550;
-    }
-
-    .caption-interim > .caption-interim-original {
-      display: block;
-      flex: 0 0 var(--interim-original-slot);
-      width: 100%;
-      min-width: 0;
-      height: var(--interim-original-slot);
-      min-height: var(--interim-original-slot);
-      max-height: var(--interim-original-slot);
-      margin: 0;
-      padding: 0;
-      overflow: hidden;
-      color: rgba(209, 213, 219, 0.66);
-      font-size: ${INTERIM_ORIGINAL_FONT_SCALE}em;
-      font-weight: 450;
-      line-height: ${INTERIM_ORIGINAL_LINE_HEIGHT};
-      text-overflow: ellipsis;
       white-space: nowrap;
     }
 
