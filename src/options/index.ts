@@ -9,10 +9,13 @@ import {
   type OptionsPageProbeResultMessage,
   type ProbeSnapshot,
   type SwRecognitionMessage,
+  type TranslationPath,
   type TranslatorProbeResult,
   type WebGpuProbeResult,
 } from "../shared/messages";
 import {
+  isSettings,
+  isSourceLanguage,
   isWhisperModel,
   readSettings,
   SETTINGS_STORAGE_KEY,
@@ -60,6 +63,10 @@ const fetchLastButton =
   requireElement<HTMLButtonElement>(
     "fetch-last",
   );
+const prepareTranslationButton =
+  requireElement<HTMLButtonElement>(
+    "prepare-translation",
+  );
 const statusElement =
   requireElement<HTMLElement>(
     "probe-status",
@@ -104,6 +111,10 @@ const activeDevice =
   requireElement<HTMLElement>(
     "active-device",
   );
+const activeTranslationPath =
+  requireElement<HTMLElement>(
+    "active-translation-path",
+  );
 const recognitionLog =
   requireElement<HTMLOListElement>(
     "recognition-log",
@@ -112,9 +123,33 @@ const modelSelect =
   requireElement<HTMLSelectElement>(
     "model-select",
   );
+const sourceLanguageSelect =
+  requireElement<HTMLSelectElement>(
+    "source-language-select",
+  );
 const settingsStatus =
   requireElement<HTMLElement>(
     "settings-status",
+  );
+const translationAvailability =
+  requireElement<HTMLElement>(
+    "translation-availability",
+  );
+const translationProgressContainer =
+  requireElement<HTMLElement>(
+    "translation-progress-container",
+  );
+const translationProgress =
+  requireElement<HTMLProgressElement>(
+    "translation-progress",
+  );
+const translationProgressValue =
+  requireElement<HTMLOutputElement>(
+    "translation-progress-value",
+  );
+const translationStatus =
+  requireElement<HTMLElement>(
+    "translation-status",
   );
 const environmentResults =
   requireElement<HTMLTableSectionElement>(
@@ -147,6 +182,9 @@ let meterTarget = 0;
 let meterCurrent = 0;
 let meterAnimationPending = false;
 let renderedCaptureRequestId:
+  | string
+  | null = null;
+let currentCaptureRequestId:
   | string
   | null = null;
 
@@ -183,6 +221,7 @@ renderCaptureState({
 
 connectOptionsPort();
 void initializeSettings();
+void refreshTranslationAvailability();
 
 void optionsWebGpuPromise.then((result) => {
   console.log(
@@ -214,10 +253,24 @@ fetchLastButton.addEventListener(
   },
 );
 
+prepareTranslationButton.addEventListener(
+  "click",
+  () => {
+    prepareTranslationModel();
+  },
+);
+
 modelSelect.addEventListener(
   "change",
   () => {
-    void saveSelectedModel();
+    void saveSelectedSettings();
+  },
+);
+
+sourceLanguageSelect.addEventListener(
+  "change",
+  () => {
+    void saveSelectedSettings();
   },
 );
 
@@ -235,14 +288,14 @@ chrome.storage.onChanged.addListener(
       changes[SETTINGS_STORAGE_KEY]
         .newValue as unknown;
 
-    if (
-      typeof next === "object" &&
-      next !== null &&
-      "model" in next &&
-      isWhisperModel(next.model)
-    ) {
+    if (isSettings(next)) {
       modelSelect.value = next.model;
+      sourceLanguageSelect.value =
+        next.sourceLang;
+      return;
     }
+
+    void initializeSettings();
   },
 );
 
@@ -286,6 +339,27 @@ function connectOptionsPort(): void {
           )
         ) {
           updateMeter(message.rms);
+          return;
+        }
+
+        if (
+          isMessageOfType(
+            message,
+            "SW_TRANSLATION_STATE",
+          )
+        ) {
+          if (
+            currentCaptureRequestId !== null &&
+            message.requestId !==
+              currentCaptureRequestId
+          ) {
+            return;
+          }
+
+          activeTranslationPath.textContent =
+            translationPathDescription(
+              message.path,
+            );
           return;
         }
 
@@ -353,6 +427,8 @@ async function initializeSettings(): Promise<void> {
   try {
     const settings = await readSettings();
     modelSelect.value = settings.model;
+    sourceLanguageSelect.value =
+      settings.sourceLang;
   } catch (error) {
     console.error(
       "[options]",
@@ -364,26 +440,41 @@ async function initializeSettings(): Promise<void> {
   }
 }
 
-async function saveSelectedModel(): Promise<void> {
-  const selected = modelSelect.value;
+async function saveSelectedSettings(): Promise<void> {
+  const selectedModel = modelSelect.value;
+  const selectedSourceLanguage =
+    sourceLanguageSelect.value;
 
-  if (!isWhisperModel(selected)) {
+  if (!isWhisperModel(selectedModel)) {
     settingsStatus.textContent =
       "選択されたモデルが不正です。";
     return;
   }
 
+  if (
+    !isSourceLanguage(
+      selectedSourceLanguage,
+    )
+  ) {
+    settingsStatus.textContent =
+      "選択された音声言語が不正です。";
+    return;
+  }
+
   modelSelect.disabled = true;
+  sourceLanguageSelect.disabled = true;
   settingsStatus.textContent =
     "設定を保存しています…";
 
   try {
     await writeSettings({
-      model: selected,
+      model: selectedModel,
+      sourceLang:
+        selectedSourceLanguage,
     });
 
     settingsStatus.textContent =
-      `${selected}を保存しました。次回のキャプチャ開始時に適用します。`;
+      "設定を保存しました。次回のキャプチャ開始時に適用します。";
   } catch (error) {
     console.error(
       "[options]",
@@ -394,6 +485,204 @@ async function saveSelectedModel(): Promise<void> {
       `設定の保存に失敗しました: ${toProbeError(error).message}`;
   } finally {
     modelSelect.disabled = false;
+    sourceLanguageSelect.disabled = false;
+  }
+}
+
+async function refreshTranslationAvailability(): Promise<void> {
+  const result = await probeTranslator();
+
+  renderTranslationAvailability(
+    result.availability,
+    result.exposed,
+  );
+
+  if (result.error !== undefined) {
+    translationStatus.textContent =
+      `Translatorの確認に失敗しました: ${result.error.message}`;
+  }
+}
+
+function prepareTranslationModel(): void {
+  const scope =
+    globalThis as TranslatorScope;
+  const factory = scope.Translator;
+
+  if (
+    factory === undefined ||
+    typeof factory.create !== "function"
+  ) {
+    translationStatus.textContent =
+      "このChromeではTranslator APIを利用できません。";
+    return;
+  }
+
+  setBusy(
+    prepareTranslationButton,
+    true,
+  );
+  translationProgressContainer.hidden =
+    false;
+  updateTranslationProgress(0);
+  translationStatus.textContent =
+    "翻訳モデルを準備しています…";
+
+  let creation:
+    Promise<TranslatorInstance>;
+
+  try {
+    creation = factory.create({
+      sourceLanguage: "en",
+      targetLanguage: "ja",
+      monitor(monitor) {
+        monitor.addEventListener(
+          "downloadprogress",
+          (event) => {
+            const progress =
+              normalizeDownloadProgress(event);
+            updateTranslationProgress(
+              progress,
+            );
+          },
+        );
+      },
+    });
+  } catch (error) {
+    finishTranslationPreparationFailure(
+      error,
+    );
+    return;
+  }
+
+  void creation
+    .then((translator) => {
+      try {
+        translator.destroy();
+      } finally {
+        updateTranslationProgress(100);
+        translationStatus.textContent =
+          "翻訳モデルの準備が完了しました。";
+      }
+    })
+    .catch((error: unknown) => {
+      finishTranslationPreparationFailure(
+        error,
+      );
+    })
+    .finally(() => {
+      void refreshTranslationAvailability()
+        .finally(() => {
+          setBusy(
+            prepareTranslationButton,
+            false,
+          );
+        });
+    });
+}
+
+function finishTranslationPreparationFailure(
+  error: unknown,
+): void {
+  console.error(
+    "[options]",
+    "translation model preparation failed",
+    error,
+  );
+  translationStatus.textContent =
+    `翻訳モデルの準備に失敗しました: ${toProbeError(error).message}`;
+  setBusy(
+    prepareTranslationButton,
+    false,
+  );
+}
+
+function normalizeDownloadProgress(
+  event: BuiltinAiDownloadProgressEvent,
+): number {
+  if (
+    event.total !== undefined &&
+    Number.isFinite(event.total) &&
+    event.total > 0
+  ) {
+    return Math.max(
+      0,
+      Math.min(
+        100,
+        event.loaded /
+          event.total *
+          100,
+      ),
+    );
+  }
+
+  return Math.max(
+    0,
+    Math.min(100, event.loaded * 100),
+  );
+}
+
+function updateTranslationProgress(
+  progress: number,
+): void {
+  const safeProgress = Math.max(
+    0,
+    Math.min(100, progress),
+  );
+  const rounded =
+    Math.round(safeProgress);
+
+  translationProgress.value =
+    safeProgress;
+  translationProgressValue.value =
+    `${rounded}%`;
+  translationProgressValue.textContent =
+    `${rounded}%`;
+}
+
+function renderTranslationAvailability(
+  availability:
+    | BuiltinTranslatorAvailability
+    | null,
+  exposed: boolean,
+): void {
+  translationAvailability.textContent =
+    exposed
+      ? translatorAvailabilityDescription(
+          availability,
+        )
+      : "API未対応";
+
+  prepareTranslationButton.disabled =
+    !exposed ||
+    availability === null ||
+    availability === "unavailable" ||
+    availability === "available";
+
+  if (availability === "available") {
+    prepareTranslationButton.textContent =
+      "翻訳モデル準備済み";
+  } else {
+    prepareTranslationButton.textContent =
+      "翻訳モデルを準備する";
+  }
+}
+
+function translatorAvailabilityDescription(
+  availability:
+    | BuiltinTranslatorAvailability
+    | null,
+): string {
+  switch (availability) {
+    case "available":
+      return "利用可能";
+    case "downloadable":
+      return "ダウンロード可能";
+    case "downloading":
+      return "ダウンロード中";
+    case "unavailable":
+      return "利用不可";
+    case null:
+      return "確認失敗";
   }
 }
 
@@ -499,6 +788,11 @@ async function runOptionsTranslatorProbe(): Promise<void> {
       };
 
     renderTranslator(translator);
+    renderTranslationAvailability(
+      translator.availability,
+      translator.exposed,
+    );
+
     console.log(
       "[options]",
       "Translator probe complete",
@@ -747,7 +1041,12 @@ function renderCaptureState(
     clearRecognitionLog();
     renderedCaptureRequestId =
       state.requestId;
+    activeTranslationPath.textContent =
+      "選択中…";
   }
+
+  currentCaptureRequestId =
+    state.requestId ?? null;
 
   captureStateName.textContent =
     captureStatusDescription(state.status);
@@ -790,6 +1089,16 @@ function renderCaptureState(
   ) {
     captureStateName.textContent =
       `エラー: ${state.error.message}`;
+    activeTranslationPath.textContent =
+      "—";
+  }
+
+  if (
+    state.status === "idle" ||
+    state.status === "stopping"
+  ) {
+    activeTranslationPath.textContent =
+      "—";
   }
 
   if (
@@ -798,6 +1107,7 @@ function renderCaptureState(
   ) {
     activeModel.textContent = "—";
     activeDevice.textContent = "—";
+    currentCaptureRequestId = null;
   }
 }
 
@@ -817,6 +1127,21 @@ function captureStatusDescription(
       return "停止処理中";
     case "error":
       return "エラー";
+  }
+}
+
+function translationPathDescription(
+  path: TranslationPath,
+): string {
+  switch (path) {
+    case "offscreen-translator":
+      return "Offscreen Translator";
+    case "content-translator":
+      return "Content Script Translator";
+    case "language-model":
+      return "LanguageModel";
+    case "none":
+      return "翻訳未使用";
   }
 }
 
@@ -843,13 +1168,37 @@ function renderRecognitionLine(
   time.textContent =
     formatRecognitionTime(message.at);
 
-  const text =
+  const body =
     document.createElement("span");
-  text.textContent = message.text;
+  body.className = "recognition-body";
+
+  if (
+    message.ja !== undefined &&
+    message.ja.trim() !== ""
+  ) {
+    const japanese =
+      document.createElement("span");
+    japanese.className =
+      "recognition-ja";
+    japanese.textContent = message.ja;
+
+    const original =
+      document.createElement("span");
+    original.className =
+      "recognition-original";
+    original.textContent = message.text;
+
+    body.append(japanese, original);
+  } else {
+    const source =
+      document.createElement("span");
+    source.textContent = message.text;
+    body.append(source);
+  }
 
   item.dataset.final =
     String(message.final);
-  item.replaceChildren(time, text);
+  item.replaceChildren(time, body);
 
   trimRecognitionLog();
   recognitionLog.scrollTop =

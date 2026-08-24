@@ -7,11 +7,14 @@ import {
   toProbeError,
   type AdapterInfo,
   type CsPcmMessage,
+  type CsTranslateMessage,
+  type CsTranslateResultMessage,
   type M1Message,
   type OffscreenProbeResult,
   type OffscreenProbeResultMessage,
   type ProbeFailureMessage,
   type TranslatorProbeResult,
+  type TranslationPath,
   type WebGpuProbeResult,
   type WhisperInitMessage,
   type WhisperWorkerOutputMessage,
@@ -23,6 +26,7 @@ import {
 } from "../shared/state";
 import type {
   Settings,
+  SourceLanguage,
   WhisperDevice,
   WhisperModel,
 } from "../shared/settings";
@@ -34,6 +38,11 @@ import {
   WhisperSegmenter,
   type RecognitionLine,
 } from "./segmenter";
+import {
+  isMostlyJapanese,
+  TranslationEngine,
+  type ContentTranslationResponse,
+} from "./translate";
 
 interface GpuLike {
   requestAdapter(): Promise<GpuAdapterLike | null>;
@@ -55,6 +64,14 @@ interface WhisperSessionCallbacks {
     total: number;
   }): void;
   onFatal(error: Error): void;
+}
+
+interface PendingContentTranslation {
+  requestId: string;
+  resolve(
+    response: ContentTranslationResponse,
+  ): void;
+  reject(error: Error): void;
 }
 
 const OFFSCREEN_PORT_NAME = "offscreen";
@@ -79,6 +96,15 @@ let activeWhisperSession:
 let activeSegmenter:
   | WhisperSegmenter
   | null = null;
+let activeTranslationEngine:
+  | TranslationEngine
+  | null = null;
+let activeTranslationRequestId:
+  | string
+  | null = null;
+let activeTranslationPath:
+  | TranslationPath
+  | null = null;
 let activeRecognitionRequestId:
   | string
   | null = null;
@@ -89,8 +115,14 @@ let expectedPcmSequence = 0;
 let lastPcmGapLogAt =
   Number.NEGATIVE_INFINITY;
 let lastModelProgress = 0;
+let contentTranslationSequence = 0;
 
 const requestedStopIds = new Set<string>();
+const pendingContentTranslations =
+  new Map<
+    string,
+    PendingContentTranslation
+  >();
 
 console.log("[offscreen]", "document ready");
 
@@ -190,6 +222,18 @@ function connectBackgroundPort(): void {
         }
 
         if (
+          isMessageOfType(
+            message,
+            "CS_TRANSLATE_RESULT",
+          )
+        ) {
+          handleContentTranslationResult(
+            message,
+          );
+          return;
+        }
+
+        if (
           isMessageOfType(message, "OFF_START")
         ) {
           requestedStopIds.delete(
@@ -238,6 +282,13 @@ function connectBackgroundPort(): void {
         disconnectError ?? "",
       );
 
+      rejectPendingContentTranslations(
+        undefined,
+        new Error(
+          disconnectError ??
+          "Background port disconnected",
+        ),
+      );
       scheduleReconnect();
     });
 
@@ -248,6 +299,7 @@ function connectBackgroundPort(): void {
 
     postState();
     postLevel();
+    postTranslationState();
   } catch (error) {
     console.warn(
       "[offscreen]",
@@ -335,6 +387,41 @@ function handlePcm(
   }
 }
 
+function handleContentTranslationResult(
+  message: CsTranslateResultMessage,
+): void {
+  const pending =
+    pendingContentTranslations.get(
+      message.id,
+    );
+
+  if (
+    pending === undefined ||
+    pending.requestId !==
+      message.requestId
+  ) {
+    return;
+  }
+
+  pendingContentTranslations.delete(
+    message.id,
+  );
+
+  if (message.error !== undefined) {
+    const error = new Error(
+      message.error.message,
+    );
+    error.name = message.error.name;
+    pending.reject(error);
+    return;
+  }
+
+  pending.resolve({
+    available: message.available,
+    ja: message.ja,
+  });
+}
+
 function detectPcmSequenceGap(
   receivedSequence: number,
 ): void {
@@ -380,6 +467,7 @@ async function handleCaptureStart(
       )
     ) {
       postState();
+      postTranslationState();
       return;
     }
 
@@ -436,6 +524,67 @@ async function handleCaptureStart(
         progress: 0,
       }),
     );
+
+    const translationEngine =
+      new TranslationEngine({
+        requestContentTranslation(text) {
+          return requestContentTranslation(
+            requestId,
+            text,
+          );
+        },
+
+        onTranslated(line, ja) {
+          if (
+            activeTranslationEngine !==
+              translationEngine ||
+            activeTranslationRequestId !==
+              requestId ||
+            requestedStopIds.has(requestId)
+          ) {
+            return;
+          }
+
+          postToBackground({
+            t: "OFF_RECOG",
+            id: line.id,
+            text: line.text,
+            final: true,
+            at: line.at,
+            ja,
+          });
+        },
+
+        onPathChanged(path) {
+          if (
+            activeTranslationEngine !==
+              translationEngine ||
+            activeTranslationRequestId !==
+              requestId
+          ) {
+            return;
+          }
+
+          activeTranslationPath = path;
+          postTranslationState();
+        },
+      });
+
+    activeTranslationEngine =
+      translationEngine;
+    activeTranslationRequestId =
+      requestId;
+    activeTranslationPath = null;
+
+    await translationEngine.initialize();
+
+    if (
+      requestedStopIds.has(requestId) ||
+      activeTranslationEngine !==
+        translationEngine
+    ) {
+      return;
+    }
 
     const ortBaseUrl =
       chrome.runtime.getURL("ort/");
@@ -513,6 +662,7 @@ async function handleCaptureStart(
       device = await session.initialize(
         model,
         ortBaseUrl,
+        settings.sourceLang,
       );
     } catch (webGpuError) {
       if (
@@ -560,6 +710,7 @@ async function handleCaptureStart(
         device = await session.initialize(
           model,
           ortBaseUrl,
+          settings.sourceLang,
           "wasm",
         );
       } catch (wasmError) {
@@ -622,6 +773,10 @@ async function handleCaptureStart(
         requestId,
         model,
         device,
+        sourceLang:
+          settings.sourceLang,
+        translationPath:
+          activeTranslationPath,
       },
     );
   } catch (error) {
@@ -802,6 +957,23 @@ function terminateRecognition(
   activeWhisperSession?.terminate();
   activeWhisperSession = null;
   activeRecognitionRequestId = null;
+
+  activeTranslationEngine?.destroy();
+  activeTranslationEngine = null;
+
+  const translationRequestId =
+    activeTranslationRequestId;
+  activeTranslationRequestId = null;
+  activeTranslationPath = null;
+
+  rejectPendingContentTranslations(
+    translationRequestId ?? requestId,
+    new DOMException(
+      "Translation session was stopped",
+      "AbortError",
+    ),
+  );
+
   lastModelProgress = 0;
 }
 
@@ -855,6 +1027,95 @@ function postRecognition(
     final: line.final,
     at: line.at,
   });
+
+  if (
+    !line.final ||
+    line.text.trim() === ""
+  ) {
+    return;
+  }
+
+  if (isMostlyJapanese(line.text)) {
+    console.info(
+      "[translate]",
+      "skipped translation for Japanese recognition line",
+      { id: line.id },
+    );
+    return;
+  }
+
+  activeTranslationEngine?.enqueue({
+    id: line.id,
+    text: line.text,
+    final: true,
+    at: line.at,
+  });
+}
+
+function requestContentTranslation(
+  requestId: string,
+  text: string,
+): Promise<ContentTranslationResponse> {
+  const port = backgroundPort;
+
+  if (port === null) {
+    return Promise.reject(
+      new Error(
+        "Background port is unavailable",
+      ),
+    );
+  }
+
+  contentTranslationSequence += 1;
+
+  const id =
+    `${requestId}:translation:${contentTranslationSequence}`;
+
+  return new Promise<
+    ContentTranslationResponse
+  >((resolve, reject) => {
+    pendingContentTranslations.set(id, {
+      requestId,
+      resolve,
+      reject,
+    });
+
+    const message: CsTranslateMessage = {
+      t: "CS_TRANSLATE",
+      requestId,
+      id,
+      text,
+    };
+
+    try {
+      port.postMessage(message);
+    } catch (error) {
+      pendingContentTranslations.delete(
+        id,
+      );
+      reject(errorToError(error));
+    }
+  });
+}
+
+function rejectPendingContentTranslations(
+  requestId: string | undefined,
+  error: Error,
+): void {
+  for (
+    const [id, pending]
+    of pendingContentTranslations
+  ) {
+    if (
+      requestId !== undefined &&
+      pending.requestId !== requestId
+    ) {
+      continue;
+    }
+
+    pendingContentTranslations.delete(id);
+    pending.reject(error);
+  }
 }
 
 function publishState(
@@ -876,6 +1137,22 @@ function postLevel(): void {
     t: "OFF_LEVEL",
     rms: latestRms,
     at: nowIso(),
+  });
+}
+
+function postTranslationState(): void {
+  if (
+    activeTranslationRequestId === null ||
+    activeTranslationPath === null
+  ) {
+    return;
+  }
+
+  postToBackground({
+    t: "OFF_TRANSLATION_STATE",
+    requestId:
+      activeTranslationRequestId,
+    path: activeTranslationPath,
   });
 }
 
@@ -932,6 +1209,7 @@ class WhisperSession {
   initialize(
     model: WhisperModel,
     ortBaseUrl: string,
+    sourceLang: SourceLanguage,
     forceDevice?: WhisperDevice,
   ): Promise<WhisperDevice> {
     if (this.terminated) {
@@ -967,6 +1245,7 @@ class WhisperSession {
       t: "WHISPER_INIT",
       model,
       ortBaseUrl,
+      sourceLang,
       ...(forceDevice === undefined
         ? {}
         : { forceDevice }),

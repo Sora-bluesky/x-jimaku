@@ -7,13 +7,43 @@ declare global {
     | "downloading"
     | "available";
 
+  type BuiltinLanguageModelAvailability =
+    | "unavailable"
+    | "downloadable"
+    | "downloading"
+    | "available";
+
+  interface BuiltinAiDownloadProgressEvent
+    extends Event {
+    readonly loaded: number;
+    readonly total?: number;
+  }
+
+  interface BuiltinAiMonitor {
+    addEventListener(
+      type: "downloadprogress",
+      listener: (
+        event:
+          BuiltinAiDownloadProgressEvent,
+      ) => void,
+    ): void;
+  }
+
   interface TranslatorOptions {
     sourceLanguage: string;
     targetLanguage: string;
   }
 
+  interface TranslatorCreateOptions
+    extends TranslatorOptions {
+    monitor?(
+      monitor: BuiltinAiMonitor,
+    ): void;
+  }
+
   interface TranslatorInstance {
     translate(input: string): Promise<string>;
+    destroy(): void;
   }
 
   interface TranslatorFactory {
@@ -22,9 +52,32 @@ declare global {
     ): Promise<BuiltinTranslatorAvailability>;
 
     create(
-      options: TranslatorOptions,
+      options: TranslatorCreateOptions,
     ): Promise<TranslatorInstance>;
   }
 
+  interface LanguageModelPrompt {
+    role: "system" | "user" | "assistant";
+    content: string;
+  }
+
+  interface LanguageModelCreateOptions {
+    initialPrompts?: readonly LanguageModelPrompt[];
+  }
+
+  interface LanguageModelSession {
+    prompt(input: string): Promise<string>;
+    destroy(): void;
+  }
+
+  interface LanguageModelFactory {
+    availability(): Promise<BuiltinLanguageModelAvailability>;
+
+    create(
+      options?: LanguageModelCreateOptions,
+    ): Promise<LanguageModelSession>;
+  }
+
   var Translator: TranslatorFactory;
+  var LanguageModel: LanguageModelFactory;
 }

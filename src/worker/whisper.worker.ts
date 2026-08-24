@@ -70,7 +70,7 @@ interface WhisperAsr {
   (
     audio: Float32Array,
     options: {
-      language: "en";
+      language?: "en";
       task: "transcribe";
       max_new_tokens: 96;
       return_timestamps: false;
@@ -102,6 +102,7 @@ const workerScope =
 
 let asr: WhisperAsr | null = null;
 let initializedDevice: WhisperDevice | null = null;
+let forcedEnglish = true;
 let initializationPromise: Promise<void> | null = null;
 
 console.log("[whisper]", "worker ready");
@@ -118,6 +119,9 @@ workerScope.addEventListener(
     }
 
     if (event.data.t === "WHISPER_INIT") {
+      forcedEnglish =
+        event.data.sourceLang !== "auto";
+
       if (initializationPromise !== null) {
         postError(
           "Whisper initialization is already in progress",
@@ -287,7 +291,9 @@ async function transcribe(
 
   try {
     const output = await asr(audio, {
-      language: "en",
+      ...(forcedEnglish
+        ? { language: "en" as const }
+        : {}),
       task: "transcribe",
       max_new_tokens: 96,
       return_timestamps: false,

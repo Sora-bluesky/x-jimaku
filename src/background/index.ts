@@ -12,6 +12,8 @@ import {
   type CsStartTapMessage,
   type CsStopTapMessage,
   type CsTapStateMessage,
+  type CsTranslateMessage,
+  type CsTranslateResultMessage,
   type DiagnosticsResultMessage,
   type M1Message,
   type OffRecognitionMessage,
@@ -19,6 +21,7 @@ import {
   type OffscreenProbeResultMessage,
   type OffStateMessage,
   type OffStopMessage,
+  type OffTranslationStateMessage,
   type OptionsPageProbeResultMessage,
   type ProbeFailureMessage,
   type ProbeRequest,
@@ -26,6 +29,7 @@ import {
   type SwCaptionClearMessage,
   type SwCaptionMessage,
   type SwRecognitionMessage,
+  type SwTranslationStateMessage,
 } from "../shared/messages";
 import {
   readSettings,
@@ -95,6 +99,9 @@ let badgeWriteTail: Promise<void> =
 let storageWriteTail: Promise<void> =
   Promise.resolve();
 let latestRms = 0;
+let activeTranslationState:
+  | SwTranslationStateMessage
+  | null = null;
 let localStartRequestId:
   | string
   | null = null;
@@ -404,6 +411,7 @@ function beginCaptureStart(
   }
 
   recognitionLines.clear();
+  activeTranslationState = null;
   localStartRequestId = requestId;
   offscreenStartRequestId = null;
   contentStartRequestId = null;
@@ -449,23 +457,6 @@ async function finishCaptureStart(
       return;
     }
 
-    const offStart: OffStartMessage = {
-      t: "OFF_START",
-      requestId,
-      settings,
-    };
-
-    offscreen.postMessage(offStart);
-    offscreenStartRequestId = requestId;
-
-    if (!isCurrentActiveRequest(requestId)) {
-      postStopToOffscreen(
-        offscreen,
-        requestId,
-      );
-      return;
-    }
-
     const contentStart: CsStartTapMessage = {
       t: "CS_START_TAP",
       requestId,
@@ -474,6 +465,23 @@ async function finishCaptureStart(
 
     content.postMessage(contentStart);
     contentStartRequestId = requestId;
+
+    if (!isCurrentActiveRequest(requestId)) {
+      postStopToContent(
+        content,
+        requestId,
+      );
+      return;
+    }
+
+    const offStart: OffStartMessage = {
+      t: "OFF_START",
+      requestId,
+      settings,
+    };
+
+    offscreen.postMessage(offStart);
+    offscreenStartRequestId = requestId;
     localStartRequestId = null;
 
     console.log(
@@ -547,6 +555,7 @@ function requestCaptureStop(
   if (startWasNotDelivered) {
     clearSessionTracking();
     latestRms = 0;
+    activeTranslationState = null;
     broadcastLevel();
     moveCaptureState("idle");
     return;
@@ -565,6 +574,7 @@ function requestCaptureStop(
       ) {
         clearSessionTracking();
         latestRms = 0;
+        activeTranslationState = null;
         broadcastLevel();
         moveCaptureState("idle");
       }
@@ -670,6 +680,19 @@ function handleContentPortConnected(
       if (
         isMessageOfType(
           message,
+          "CS_TRANSLATE_RESULT",
+        )
+      ) {
+        relayContentTranslationResult(
+          tabId,
+          message,
+        );
+        return;
+      }
+
+      if (
+        isMessageOfType(
+          message,
           "CS_TAP_STATE",
         )
       ) {
@@ -746,6 +769,17 @@ function handleContentPortConnected(
     postCaptureState(port);
 
     if (
+      activeTranslationState !== null &&
+      activeTranslationState.requestId ===
+        captureState.requestId
+    ) {
+      postTranslationState(
+        port,
+        activeTranslationState,
+      );
+    }
+
+    if (
       shouldClearCaptionForStatus(
         captureState.status,
       )
@@ -790,6 +824,36 @@ function relayContentPcm(
     console.warn(
       "[bg]",
       "could not relay PCM to offscreen",
+      error,
+    );
+  }
+}
+
+function relayContentTranslationResult(
+  tabId: number,
+  message: CsTranslateResultMessage,
+): void {
+  if (
+    captureState.tabId !== tabId ||
+    captureState.requestId !==
+      message.requestId ||
+    !isCaptureActive(captureState.status)
+  ) {
+    return;
+  }
+
+  const port = offscreenPort;
+
+  if (port === null) {
+    return;
+  }
+
+  try {
+    port.postMessage(message);
+  } catch (error) {
+    console.warn(
+      "[bg]",
+      "could not relay content translation result to offscreen",
       error,
     );
   }
@@ -850,6 +914,7 @@ function handleContentTapState(
     );
     clearSessionTracking();
     latestRms = 0;
+    activeTranslationState = null;
     broadcastLevel();
 
     moveCaptureState("error", {
@@ -940,6 +1005,30 @@ function handleOffscreenPortConnected(
         return;
       }
 
+      if (
+        isMessageOfType(
+          message,
+          "OFF_TRANSLATION_STATE",
+        )
+      ) {
+        handleOffscreenTranslationState(
+          message,
+        );
+        return;
+      }
+
+      if (
+        isMessageOfType(
+          message,
+          "CS_TRANSLATE",
+        )
+      ) {
+        relayOffscreenTranslationRequest(
+          message,
+        );
+        return;
+      }
+
       console.warn(
         "[bg]",
         "ignored malformed offscreen port message",
@@ -986,6 +1075,129 @@ function handleOffscreenPortConnected(
       );
     }
   });
+}
+
+function relayOffscreenTranslationRequest(
+  message: CsTranslateMessage,
+): void {
+  if (
+    captureState.requestId !==
+      message.requestId ||
+    !isCaptureActive(captureState.status)
+  ) {
+    postTranslationFailureToOffscreen(
+      message,
+      new Error(
+        "Translation request does not belong to the active capture",
+      ),
+    );
+    return;
+  }
+
+  const tabId = captureState.tabId;
+  const content =
+    tabId === undefined
+      ? undefined
+      : contentPorts.get(tabId);
+
+  if (content === undefined) {
+    postTranslationFailureToOffscreen(
+      message,
+      new Error(
+        "Capture-tab content script is unavailable",
+      ),
+    );
+    return;
+  }
+
+  try {
+    content.postMessage(message);
+  } catch (error) {
+    postTranslationFailureToOffscreen(
+      message,
+      error,
+    );
+  }
+}
+
+function postTranslationFailureToOffscreen(
+  request: CsTranslateMessage,
+  error: unknown,
+): void {
+  const port = offscreenPort;
+
+  if (port === null) {
+    return;
+  }
+
+  const message: CsTranslateResultMessage = {
+    t: "CS_TRANSLATE_RESULT",
+    requestId: request.requestId,
+    id: request.id,
+    ja: "",
+    available: false,
+    error: toProbeError(error),
+  };
+
+  try {
+    port.postMessage(message);
+  } catch (postError) {
+    console.warn(
+      "[bg]",
+      "could not return translation relay failure",
+      postError,
+    );
+  }
+}
+
+function handleOffscreenTranslationState(
+  message: OffTranslationStateMessage,
+): void {
+  if (
+    captureState.requestId !==
+      message.requestId ||
+    !isCaptureActive(captureState.status)
+  ) {
+    console.warn(
+      "[bg]",
+      "ignored stale translation state",
+      {
+        incomingRequestId:
+          message.requestId,
+        currentRequestId:
+          captureState.requestId,
+      },
+    );
+    return;
+  }
+
+  const relayed:
+    SwTranslationStateMessage = {
+      t: "SW_TRANSLATION_STATE",
+      requestId: message.requestId,
+      path: message.path,
+    };
+
+  activeTranslationState = relayed;
+
+  for (const port of optionsPorts) {
+    postTranslationState(port, relayed);
+  }
+
+  const tabId = captureState.tabId;
+
+  if (tabId === undefined) {
+    return;
+  }
+
+  const content = contentPorts.get(tabId);
+
+  if (content !== undefined) {
+    postTranslationState(
+      content,
+      relayed,
+    );
+  }
 }
 
 function handleOffscreenState(
@@ -1145,6 +1357,7 @@ function handleOffscreenState(
       if (current.status === "running") {
         stopContentForState(current);
         latestRms = 0;
+        activeTranslationState = null;
         clearSessionTracking();
         broadcastLevel();
 
@@ -1166,6 +1379,7 @@ function handleOffscreenState(
       if (current.status === "stopping") {
         stopContentForState(current);
         latestRms = 0;
+        activeTranslationState = null;
         clearSessionTracking();
         broadcastLevel();
         moveCaptureState("idle");
@@ -1183,6 +1397,7 @@ function handleOffscreenState(
       ) {
         stopContentForState(current);
         latestRms = 0;
+        activeTranslationState = null;
         clearSessionTracking();
         broadcastLevel();
 
@@ -1223,6 +1438,7 @@ function handleOffscreenState(
       stopContentForState(current);
       clearSessionTracking();
       latestRms = 0;
+      activeTranslationState = null;
       broadcastLevel();
 
       if (current.status === "error") {
@@ -1369,6 +1585,9 @@ function handleOffscreenRecognition(
     text: message.text,
     final: message.final,
     at: message.at,
+    ...(message.ja === undefined
+      ? {}
+      : { ja: message.ja }),
   };
 
   recognitionLines.set(
@@ -1399,6 +1618,9 @@ function handleOffscreenRecognition(
     text: message.text,
     final: message.final,
     at: message.at,
+    ...(message.ja === undefined
+      ? {}
+      : { ja: message.ja }),
   };
 
   postCaption(content, caption);
@@ -1439,6 +1661,13 @@ function handleOptionsPortConnected(
   void stateInitialization.then(() => {
     postCaptureState(port);
     postLevel(port);
+
+    if (activeTranslationState !== null) {
+      postTranslationState(
+        port,
+        activeTranslationState,
+      );
+    }
 
     for (
       const message of
@@ -1787,6 +2016,21 @@ function postCaptureState(
     console.warn(
       "[bg]",
       "could not relay capture state",
+      error,
+    );
+  }
+}
+
+function postTranslationState(
+  port: chrome.runtime.Port,
+  message: SwTranslationStateMessage,
+): void {
+  try {
+    port.postMessage(message);
+  } catch (error) {
+    console.warn(
+      "[bg]",
+      "could not relay translation state",
       error,
     );
   }

@@ -8,8 +8,16 @@ export const WHISPER_MODELS = [
   "turbo",
 ] as const;
 
+export const SOURCE_LANGUAGES = [
+  "auto",
+  "en",
+] as const;
+
 export type WhisperModel =
   (typeof WHISPER_MODELS)[number];
+
+export type SourceLanguage =
+  (typeof SOURCE_LANGUAGES)[number];
 
 export type WhisperDevice =
   | "webgpu"
@@ -17,10 +25,12 @@ export type WhisperDevice =
 
 export interface Settings {
   model: WhisperModel;
+  sourceLang: SourceLanguage;
 }
 
 export const DEFAULT_SETTINGS: Readonly<Settings> = {
   model: "base",
+  sourceLang: "en",
 };
 
 export async function readSettings(): Promise<Settings> {
@@ -29,9 +39,20 @@ export async function readSettings(): Promise<Settings> {
   );
   const stored = values[SETTINGS_STORAGE_KEY];
 
-  return isSettings(stored)
-    ? { model: stored.model }
-    : { ...DEFAULT_SETTINGS };
+  if (!isRecord(stored)) {
+    return { ...DEFAULT_SETTINGS };
+  }
+
+  return {
+    model: isWhisperModel(stored.model)
+      ? stored.model
+      : DEFAULT_SETTINGS.model,
+    sourceLang: isSourceLanguage(
+      stored.sourceLang,
+    )
+      ? stored.sourceLang
+      : DEFAULT_SETTINGS.sourceLang,
+  };
 }
 
 export async function writeSettings(
@@ -53,7 +74,8 @@ export function isSettings(
 ): value is Settings {
   return (
     isRecord(value) &&
-    isWhisperModel(value.model)
+    isWhisperModel(value.model) &&
+    isSourceLanguage(value.sourceLang)
   );
 }
 
@@ -66,6 +88,12 @@ export function isWhisperModel(
     value === "small" ||
     value === "turbo"
   );
+}
+
+export function isSourceLanguage(
+  value: unknown,
+): value is SourceLanguage {
+  return value === "auto" || value === "en";
 }
 
 export function isWhisperDevice(
