@@ -582,27 +582,6 @@ async function handleCaptureStart(
           });
         },
 
-        onInterimTranslated(line, ja) {
-          if (
-            activeTranslationEngine !==
-              translationEngine ||
-            activeTranslationRequestId !==
-              requestId ||
-            requestedStopIds.has(requestId)
-          ) {
-            return;
-          }
-
-          postToBackground({
-            t: "OFF_RECOG",
-            id: line.id,
-            text: line.text,
-            final: false,
-            at: line.at,
-            ja,
-          });
-        },
-
         onPathChanged(path) {
           if (
             activeTranslationEngine !==
@@ -796,7 +775,14 @@ async function handleCaptureStart(
           ),
         getEnergyHistory: () =>
           audioCapture.getEnergyHistory(),
-        onLine: postRecognition,
+        showTentative:
+          settings.showTentative,
+        onLine(line) {
+          postRecognition(
+            line,
+            settings.showTentative,
+          );
+        },
         onError(message) {
           console.warn(
             "[offscreen]",
@@ -1038,36 +1024,45 @@ function decodeFloat32Base64(
 
 function postRecognition(
   line: RecognitionLine,
+  showTentative: boolean,
 ): void {
-  postToBackground({
-    t: "OFF_RECOG",
-    id: line.id,
-    text: line.text,
-    final: line.final,
-    at: line.at,
-  });
+  const text = line.text.trim();
 
   if (
-    line.text.trim() === "" ||
-    isMostlyJapanese(line.text)
+    text === "" ||
+    (!line.final && !showTentative)
   ) {
     return;
   }
 
-  if (line.final) {
-    activeTranslationEngine?.enqueue({
+  if (isMostlyJapanese(text)) {
+    postToBackground({
+      t: "OFF_RECOG",
       id: line.id,
-      text: line.text,
-      final: true,
+      text,
+      final: line.final,
       at: line.at,
+      ja: text,
     });
     return;
   }
 
-  activeTranslationEngine?.submitInterim({
+  postToBackground({
+    t: "OFF_RECOG",
     id: line.id,
-    text: line.text,
-    final: false,
+    text,
+    final: line.final,
+    at: line.at,
+  });
+
+  if (!line.final) {
+    return;
+  }
+
+  activeTranslationEngine?.enqueue({
+    id: line.id,
+    text,
+    final: true,
     at: line.at,
   });
 }

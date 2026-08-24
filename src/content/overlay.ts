@@ -2,36 +2,24 @@ import type {
   TranslationPath,
 } from "../shared/messages";
 
-const MAX_PRIMARY_CAPTION_CHARS = 120;
-const MAX_SECONDARY_CAPTION_CHARS = 140;
-
-const PRIMARY_LINE_HEIGHT = 1.16;
-const ORIGINAL_FONT_SCALE = 0.68;
-const ORIGINAL_LINE_HEIGHT = 1.18;
-const MAX_STALE_INTERIM_ADVANCES = 2;
-
-function clampCaptionTail(
-  text: string,
-  maxChars: number,
-): string {
-  if (text.length <= maxChars) {
-    return text;
-  }
-
-  return "…" + text.slice(text.length - maxChars);
-}
-
 const HOST_ID = "xjsub-host";
 const CAPTION_VISIBLE_MS = 5_000;
 const CAPTION_FADE_MS = 350;
+const CUE_MINIMUM_DISPLAY_MS = 1_500;
+const CUE_ACCELERATED_DISPLAY_MS = 1_000;
+const MAX_WAITING_CUES = 2;
+const MAX_CUE_UNITS = 28;
+const MAX_LINE_UNITS = 14;
+const MAX_ORIGINAL_CHARS = 140;
+const PRIMARY_LINE_HEIGHT = 1.16;
+const ORIGINAL_FONT_SCALE = 0.68;
+const ORIGINAL_LINE_HEIGHT = 1.18;
+const TENTATIVE_FONT_SCALE = 0.62;
+const TENTATIVE_LINE_HEIGHT = 1.18;
 const MUTATION_DEBOUNCE_MS = 500;
 const MAX_OTHER_VIDEOS = 6;
 const STABLE_FRAMES_BEFORE_IDLE = 10;
 const RECT_COMPARISON_EPSILON_PX = 0.1;
-
-type CaptionSource =
-  | "interim"
-  | "final";
 
 interface RectSnapshot {
   left: number;
@@ -51,6 +39,20 @@ interface LayoutSnapshot {
   target: HTMLVideoElement | null;
   targetRect: RectSnapshot | null;
   otherVideos: readonly OtherVideoLayout[];
+}
+
+interface CueData {
+  cueId: string;
+  sourceIds: readonly number[];
+  primaryText: string;
+  originalText: string;
+  formattedPrimary: string;
+}
+
+interface ActiveCue {
+  data: CueData;
+  shownAt: number;
+  element: HTMLDivElement;
 }
 
 export interface CaptionLine {
@@ -73,27 +75,48 @@ export interface CaptionOverlayOptions {
 }
 
 export class CaptionOverlay {
-  private readonly options: CaptionOverlayOptions;
+  private readonly options:
+    CaptionOverlayOptions;
   private readonly showOriginal: boolean;
   private readonly host: HTMLDivElement;
-  private readonly captionStack: HTMLDivElement;
+  private readonly captionStack:
+    HTMLDivElement;
   private readonly translationBadge:
     HTMLDivElement;
-  private readonly captionLine: HTMLDivElement;
-  private readonly primaryLine: HTMLDivElement;
-  private readonly originalLine: HTMLDivElement;
-  private readonly targetChip: HTMLDivElement;
-  private readonly targetDot: HTMLSpanElement;
-  private readonly targetText: HTMLSpanElement;
-  private readonly otherLayer: HTMLDivElement;
-  private readonly resizeObserver: ResizeObserver;
-  private readonly mutationObserver: MutationObserver;
+  private readonly captionLine:
+    HTMLDivElement;
+  private readonly cueContainer:
+    HTMLDivElement;
+  private readonly tentativeLine:
+    HTMLDivElement;
+  private readonly targetChip:
+    HTMLDivElement;
+  private readonly targetDot:
+    HTMLSpanElement;
+  private readonly targetText:
+    HTMLSpanElement;
+  private readonly otherLayer:
+    HTMLDivElement;
+  private readonly resizeObserver:
+    ResizeObserver;
+  private readonly mutationObserver:
+    MutationObserver;
+  private readonly cueMutationObserver:
+    MutationObserver;
 
   private readonly otherBadges =
     new Map<HTMLVideoElement, HTMLDivElement>();
+  private readonly pendingFinals =
+    new Map<number, CaptionLine>();
+  private readonly acceptedFinalIds =
+    new Set<number>();
+  private readonly waitingCues: CueData[] = [];
+  private readonly cueTextSnapshots =
+    new WeakMap<Element, string>();
 
-  private targetVideo: HTMLVideoElement | null =
-    null;
+  private targetVideo:
+    | HTMLVideoElement
+    | null = null;
   private mutationRoot: Node | null = null;
   private status: CaptionOverlayStatus =
     "loadingModel";
@@ -101,47 +124,20 @@ export class CaptionOverlay {
     | TranslationPath
     | null = null;
   private progress: number | undefined;
-
-  private highestFinalId: number | null = null;
-  private highestShownDisplayId:
+  private activeCue: ActiveCue | null = null;
+  private highestSeenFinalId:
     | number
     | null = null;
-  private activeShownDisplayId:
+  private clearWatermarkId:
     | number
     | null = null;
-
-  private finalId: number | null = null;
-  private finalAt: string | null = null;
-  private finalEnglishText = "";
-  private finalJapaneseText = "";
-
-  private interimId: number | null = null;
-  private interimEnglishText = "";
-  private interimJapaneseText = "";
-  private interimEnglishAt: string | null =
-    null;
-  private interimSnapshotVersion = 0;
-  private interimJapaneseVersion:
-    | number
-    | null = null;
-
-  private liveEnglishId: number | null = null;
-  private liveEnglishSource:
-    | CaptionSource
-    | null = null;
-  private liveEnglishText = "";
-
-  private japaneseDisplayId:
-    | number
-    | null = null;
-  private japaneseDisplaySource:
-    | CaptionSource
-    | null = null;
-  private japaneseDisplayText = "";
-
-  private captionActive = false;
-  private suppressedAfterFade = false;
+  private tentativeId: number | null = null;
+  private tentativeAt: string | null = null;
+  private cueMutationCount = 0;
+  private droppedCueCount = 0;
+  private acceleratedUntilDrained = false;
   private captionRevision = 0;
+  private captionBarEnabled = true;
 
   private frameId: number | null = null;
   private stableFrameCount = 0;
@@ -150,13 +146,15 @@ export class CaptionOverlay {
     | null = null;
   private mutationTimerId: number | null =
     null;
+  private cueAdvanceTimerId:
+    | number
+    | null = null;
   private captionFadeTimerId:
     | number
     | null = null;
   private captionRemovalTimerId:
     | number
     | null = null;
-  private captionBarEnabled = true;
   private destroyed = false;
 
   constructor(options: CaptionOverlayOptions) {
@@ -167,6 +165,8 @@ export class CaptionOverlay {
     this.host = document.createElement("div");
     this.host.id = HOST_ID;
     this.host.setAttribute("popover", "manual");
+    this.host.dataset.cueMutations = "0";
+    this.host.dataset.cueDrops = "0";
     this.host.style.position = "fixed";
     this.host.style.display = "block";
     this.host.style.margin = "0";
@@ -203,19 +203,23 @@ export class CaptionOverlay {
     this.captionLine.className =
       "caption-line is-empty";
 
-    this.primaryLine =
+    this.cueContainer =
       document.createElement("div");
-    this.primaryLine.className =
-      "caption-primary";
+    this.cueContainer.className =
+      "cue-container";
 
-    this.originalLine =
+    this.tentativeLine =
       document.createElement("div");
-    this.originalLine.className =
-      "caption-original";
+    this.tentativeLine.className =
+      "caption-tentative";
+    this.tentativeLine.setAttribute(
+      "aria-live",
+      "off",
+    );
 
     this.captionLine.append(
-      this.primaryLine,
-      this.originalLine,
+      this.cueContainer,
+      this.tentativeLine,
     );
 
     this.captionStack.append(
@@ -266,6 +270,22 @@ export class CaptionOverlay {
         this.scheduleMutationPass();
       });
 
+    this.cueMutationObserver =
+      new MutationObserver(
+        (mutations) => {
+          this.inspectCueMutations(mutations);
+        },
+      );
+
+    this.cueMutationObserver.observe(
+      this.cueContainer,
+      {
+        childList: true,
+        characterData: true,
+        subtree: true,
+      },
+    );
+
     this.updateTranslationBadge();
     this.updateTargetChip();
     this.appendHost();
@@ -285,21 +305,10 @@ export class CaptionOverlay {
       return;
     }
 
-    const text = line.text.trim();
-    const ja = line.ja?.trim() ?? "";
-
     if (line.final) {
-      this.showFinalCaption(
-        line,
-        text,
-        ja,
-      );
+      this.receiveCommittedClause(line);
     } else {
-      this.showInterimCaption(
-        line,
-        text,
-        ja,
-      );
+      this.receiveTentative(line);
     }
 
     this.refreshTarget();
@@ -312,26 +321,34 @@ export class CaptionOverlay {
       return;
     }
 
+    this.clearWatermarkId =
+      maximumNullable(
+        this.clearWatermarkId,
+        this.highestSeenFinalId,
+      );
+
     this.captionRevision += 1;
+    this.cancelCueAdvance();
     this.cancelCaptionFade();
+    this.pendingFinals.clear();
+    this.waitingCues.splice(
+      0,
+      this.waitingCues.length,
+    );
+    this.activeCue = null;
+    this.tentativeId = null;
+    this.tentativeAt = null;
+    this.acceleratedUntilDrained = false;
     this.captionBarEnabled = false;
-    this.captionActive = false;
-    this.suppressedAfterFade = true;
-    this.activeShownDisplayId = null;
 
-    this.finalId = null;
-    this.finalAt = null;
-    this.finalEnglishText = "";
-    this.finalJapaneseText = "";
-
-    this.clearInterimCaptionState();
-
-    this.liveEnglishId = null;
-    this.liveEnglishSource = null;
-    this.liveEnglishText = "";
-    this.japaneseDisplayText = "";
-
-    this.clearRenderedCaption();
+    this.cueContainer.replaceChildren();
+    this.tentativeLine.textContent = "";
+    this.captionLine.classList.remove(
+      "is-fading",
+    );
+    this.captionLine.classList.add(
+      "is-empty",
+    );
     this.captionStack.style.display = "none";
 
     console.log("[overlay]", "captions cleared");
@@ -347,18 +364,22 @@ export class CaptionOverlay {
     this.translationPath = path;
     this.updateTranslationBadge();
 
-    if (
-      !this.captionActive &&
-      !this.suppressedAfterFade &&
-      path === "none" &&
-      this.liveEnglishText !== ""
-    ) {
-      this.captionActive = true;
+    if (path === "none") {
+      const pending = Array.from(
+        this.pendingFinals.values(),
+      ).sort(
+        (left, right) =>
+          left.id - right.id,
+      );
+
+      this.pendingFinals.clear();
+
+      for (const line of pending) {
+        this.acceptCommittedClause(line);
+      }
     }
 
-    this.cancelCaptionFade();
-    this.renderCaption();
-    this.syncCaptionFadeAfterRender();
+    this.updateCaptionVisibility();
     this.updateLayout();
   }
 
@@ -375,7 +396,10 @@ export class CaptionOverlay {
       progress === undefined ||
       !Number.isFinite(progress)
         ? undefined
-        : Math.min(100, Math.max(0, progress));
+        : Math.min(
+            100,
+            Math.max(0, progress),
+          );
 
     if (
       state === "loadingModel" ||
@@ -402,6 +426,7 @@ export class CaptionOverlay {
     }
 
     this.destroyed = true;
+    this.cancelCueAdvance();
     this.cancelCaptionFade();
 
     if (this.frameId !== null) {
@@ -418,8 +443,14 @@ export class CaptionOverlay {
 
     this.removeEventListeners();
     this.mutationObserver.disconnect();
+    this.cueMutationObserver.disconnect();
     this.resizeObserver.disconnect();
     this.otherBadges.clear();
+    this.pendingFinals.clear();
+    this.waitingCues.splice(
+      0,
+      this.waitingCues.length,
+    );
     this.targetVideo = null;
     this.lastLayoutSnapshot = null;
     this.hideHostPopover();
@@ -428,550 +459,533 @@ export class CaptionOverlay {
     console.log("[overlay]", "overlay destroyed");
   }
 
-  private showFinalCaption(
+  private receiveCommittedClause(
     line: CaptionLine,
-    text: string,
-    ja: string,
   ): void {
-    const highestShownDisplayId =
-      this.highestShownDisplayId;
+    const text = line.text.trim();
+    const ja = line.ja?.trim() ?? "";
 
     if (
-      highestShownDisplayId !== null &&
-      line.id <= highestShownDisplayId &&
-      this.activeShownDisplayId !== line.id
+      text === "" ||
+      this.isBehindClearWatermark(line.id) ||
+      this.acceptedFinalIds.has(line.id)
     ) {
       return;
     }
 
-    if (text === "") {
-      return;
-    }
-
-    if (
-      this.finalId !== null &&
-      line.id < this.finalId
-    ) {
-      return;
-    }
-
-    const isNewFinal =
-      this.finalId !== line.id;
-
-    if (
-      !isNewFinal &&
-      this.finalAt !== null &&
-      line.at < this.finalAt
-    ) {
-      return;
-    }
-
-    const previousFinalAt = this.finalAt;
-    const previousEnglish =
-      this.finalEnglishText;
-    const previousJapanese =
-      this.finalJapaneseText;
-
-    this.highestFinalId =
-      this.highestFinalId === null
-        ? line.id
-        : Math.max(
-            this.highestFinalId,
-            line.id,
-          );
-
-    if (isNewFinal) {
-      this.finalId = line.id;
-      this.finalAt = line.at;
-      this.finalEnglishText = text;
-      this.finalJapaneseText = "";
-    } else {
-      this.finalAt = line.at;
-      this.finalEnglishText = text;
-    }
-
-    if (ja !== "") {
-      this.finalJapaneseText = ja;
-    }
-
-    if (
-      this.interimId === line.id ||
-      (
-        this.interimId !== null &&
-        this.interimId < line.id
-      )
-    ) {
-      this.clearInterimCaptionState();
-    }
-
-    const liveEnglishUpdated =
-      this.updateLiveEnglish(
+    this.highestSeenFinalId =
+      maximumNullable(
+        this.highestSeenFinalId,
         line.id,
-        "final",
-        text,
       );
-    const japaneseUpdated =
-      ja !== "" &&
-      this.updateJapaneseDisplay(
-        line.id,
-        "final",
-        ja,
-      );
-    const finalStateChanged =
-      isNewFinal ||
-      previousFinalAt !== line.at ||
-      previousEnglish !==
-        this.finalEnglishText ||
-      previousJapanese !==
-        this.finalJapaneseText;
-
-    const hasNewActivity =
-      liveEnglishUpdated ||
-      japaneseUpdated ||
-      finalStateChanged;
-    const canActivate =
-      japaneseUpdated ||
-      (
-        (
-          this.translationPath === "none" ||
-          this.showOriginal
-        ) &&
-        (
-          liveEnglishUpdated ||
-          finalStateChanged
-        )
-      );
-
-    this.applyCaptionUpdate(
-      canActivate,
-      hasNewActivity,
-    );
-  }
-
-  private showInterimCaption(
-    line: CaptionLine,
-    text: string,
-    ja: string,
-  ): void {
-    const highestShownDisplayId =
-      this.highestShownDisplayId;
 
     if (
-      highestShownDisplayId !== null &&
-      line.id <= highestShownDisplayId &&
-      this.activeShownDisplayId !== line.id
+      this.tentativeId !== null &&
+      this.tentativeId <= line.id
     ) {
-      return;
+      this.clearTentative();
     }
 
     if (
-      (
-        this.highestFinalId !== null &&
-        line.id <= this.highestFinalId
-      ) ||
-      (
-        this.interimId !== null &&
-        line.id < this.interimId
-      )
+      ja === "" &&
+      this.translationPath !== "none"
     ) {
-      return;
-    }
-
-    if (text === "") {
-      return;
-    }
-
-    if (
-      this.interimId === null ||
-      line.id > this.interimId
-    ) {
-      this.beginInterimCaption(line.id);
-    }
-
-    let interimStateChanged = false;
-
-    if (ja === "") {
-      if (
-        !this.shouldAdvanceInterimSnapshot(
-          line.at,
-          text,
-        )
-      ) {
-        return;
-      }
-
-      this.advanceInterimSnapshot(
-        line.at,
-        text,
-      );
-      interimStateChanged = true;
-    } else {
-      const previousEnglishAt =
-        this.interimEnglishAt;
-      const previousEnglish =
-        this.interimEnglishText;
-      const previousJapanese =
-        this.interimJapaneseText;
-      const previousJapaneseVersion =
-        this.interimJapaneseVersion;
+      const previous =
+        this.pendingFinals.get(line.id);
 
       if (
-        !this.matchOrAdvanceTranslatedInterim(
-          line.at,
-          text,
-        )
+        previous === undefined ||
+        line.at >= previous.at
       ) {
-        return;
-      }
-
-      this.interimJapaneseText = ja;
-      this.interimJapaneseVersion =
-        this.interimSnapshotVersion;
-
-      interimStateChanged =
-        previousEnglishAt !==
-          this.interimEnglishAt ||
-        previousEnglish !==
-          this.interimEnglishText ||
-        previousJapanese !==
-          this.interimJapaneseText ||
-        previousJapaneseVersion !==
-          this.interimJapaneseVersion;
-    }
-
-    const liveEnglishUpdated =
-      this.updateLiveEnglish(
-        line.id,
-        "interim",
-        this.interimEnglishText,
-      );
-    const japaneseUpdated =
-      ja !== "" &&
-      this.updateJapaneseDisplay(
-        line.id,
-        "interim",
-        ja,
-      );
-    const hasNewActivity =
-      interimStateChanged ||
-      liveEnglishUpdated ||
-      japaneseUpdated;
-    const canActivate =
-      japaneseUpdated ||
-      (
-        (
-          this.translationPath === "none" ||
-          this.showOriginal
-        ) &&
-        hasNewActivity
-      );
-
-    this.applyCaptionUpdate(
-      canActivate,
-      hasNewActivity,
-    );
-  }
-
-  private beginInterimCaption(
-    id: number,
-  ): void {
-    this.interimId = id;
-    this.interimEnglishText = "";
-    this.interimJapaneseText = "";
-    this.interimEnglishAt = null;
-    this.interimSnapshotVersion = 0;
-    this.interimJapaneseVersion = null;
-  }
-
-  private shouldAdvanceInterimSnapshot(
-    at: string,
-    text: string,
-  ): boolean {
-    if (this.interimEnglishAt === null) {
-      return true;
-    }
-
-    return (
-      at > this.interimEnglishAt ||
-      (
-        at === this.interimEnglishAt &&
-        text !== this.interimEnglishText
-      )
-    );
-  }
-
-  private advanceInterimSnapshot(
-    at: string,
-    text: string,
-  ): void {
-    this.interimSnapshotVersion += 1;
-    this.interimEnglishAt = at;
-    this.interimEnglishText = text;
-
-    if (
-      this.interimJapaneseVersion !== null &&
-      this.interimSnapshotVersion -
-        this.interimJapaneseVersion >=
-        MAX_STALE_INTERIM_ADVANCES
-    ) {
-      this.interimJapaneseText = "";
-      this.interimJapaneseVersion = null;
-    }
-  }
-
-  private matchOrAdvanceTranslatedInterim(
-    at: string,
-    text: string,
-  ): boolean {
-    if (this.interimEnglishAt === null) {
-      this.advanceInterimSnapshot(
-        at,
-        text,
-      );
-      return true;
-    }
-
-    if (at < this.interimEnglishAt) {
-      return false;
-    }
-
-    if (at > this.interimEnglishAt) {
-      this.advanceInterimSnapshot(
-        at,
-        text,
-      );
-      return true;
-    }
-
-    return text === this.interimEnglishText;
-  }
-
-  private clearInterimCaptionState(): void {
-    this.interimId = null;
-    this.interimEnglishText = "";
-    this.interimJapaneseText = "";
-    this.interimEnglishAt = null;
-    this.interimSnapshotVersion = 0;
-    this.interimJapaneseVersion = null;
-  }
-
-  private updateLiveEnglish(
-    id: number,
-    source: CaptionSource,
-    text: string,
-  ): boolean {
-    if (
-      this.liveEnglishId !== null &&
-      this.liveEnglishSource !== null &&
-      compareCaptionOrder(
-        id,
-        source,
-        this.liveEnglishId,
-        this.liveEnglishSource,
-      ) < 0
-    ) {
-      return false;
-    }
-
-    const changed =
-      this.liveEnglishId !== id ||
-      this.liveEnglishSource !== source ||
-      this.liveEnglishText !== text;
-
-    this.liveEnglishId = id;
-    this.liveEnglishSource = source;
-    this.liveEnglishText = text;
-
-    if (
-      this.activeShownDisplayId !== null &&
-      id > this.activeShownDisplayId
-    ) {
-      this.activeShownDisplayId = null;
-    }
-
-    return changed;
-  }
-
-  private updateJapaneseDisplay(
-    id: number,
-    source: CaptionSource,
-    text: string,
-  ): boolean {
-    if (
-      this.japaneseDisplayId !== null &&
-      this.japaneseDisplaySource !== null &&
-      compareCaptionOrder(
-        id,
-        source,
-        this.japaneseDisplayId,
-        this.japaneseDisplaySource,
-      ) < 0
-    ) {
-      return false;
-    }
-
-    const changed =
-      this.japaneseDisplayId !== id ||
-      this.japaneseDisplaySource !== source ||
-      this.japaneseDisplayText !== text;
-
-    this.japaneseDisplayId = id;
-    this.japaneseDisplaySource = source;
-    this.japaneseDisplayText = text;
-
-    if (
-      this.activeShownDisplayId !== null &&
-      (
-        id > this.activeShownDisplayId ||
-        (
-          id === this.activeShownDisplayId &&
-          source === "interim"
-        )
-      )
-    ) {
-      this.activeShownDisplayId = null;
-    }
-
-    return changed;
-  }
-
-  private applyCaptionUpdate(
-    canActivate: boolean,
-    hasNewActivity: boolean,
-  ): void {
-    if (!hasNewActivity) {
-      return;
-    }
-
-    this.captionRevision += 1;
-    this.captionBarEnabled = true;
-    this.suppressedAfterFade = false;
-
-    if (canActivate) {
-      this.captionActive = true;
-    }
-
-    this.cancelCaptionFade();
-    this.renderCaption();
-    this.syncCaptionFadeAfterRender();
-  }
-
-  private renderCaption(): void {
-    if (!this.captionActive) {
-      this.clearRenderedCaption();
-      return;
-    }
-
-    const useEnglishFallback =
-      this.translationPath === "none";
-
-    if (useEnglishFallback) {
-      this.primaryLine.textContent =
-        clampCaptionTail(
-          this.liveEnglishText,
-          MAX_SECONDARY_CAPTION_CHARS,
+        this.pendingFinals.set(
+          line.id,
+          {
+            ...line,
+            text,
+            final: true,
+          },
         );
-      this.originalLine.textContent = "";
-    } else {
-      this.primaryLine.textContent =
-        this.japaneseDisplayText === ""
-          ? ""
-          : clampCaptionTail(
-              this.japaneseDisplayText,
-              MAX_PRIMARY_CAPTION_CHARS,
-            );
-      this.originalLine.textContent =
-        this.showOriginal &&
-        this.liveEnglishText !== ""
-          ? clampCaptionTail(
-              this.liveEnglishText,
-              MAX_SECONDARY_CAPTION_CHARS,
-            )
-          : "";
+      }
+
+      return;
     }
 
-    const hasVisibleText =
-      this.hasVisibleCaption();
+    this.pendingFinals.delete(line.id);
+    this.acceptCommittedClause({
+      ...line,
+      text,
+      final: true,
+      ...(ja === "" ? {} : { ja }),
+    });
+  }
+
+  private acceptCommittedClause(
+    line: CaptionLine,
+  ): void {
+    if (
+      this.acceptedFinalIds.has(line.id) ||
+      this.isBehindClearWatermark(line.id)
+    ) {
+      return;
+    }
+
+    const highestAccepted =
+      maximumSetValue(
+        this.acceptedFinalIds,
+      );
+
+    if (
+      highestAccepted !== null &&
+      line.id < highestAccepted
+    ) {
+      return;
+    }
+
+    const cues =
+      this.createCueSegments(line);
+
+    if (cues.length === 0) {
+      return;
+    }
+
+    this.acceptedFinalIds.add(line.id);
+    this.captionBarEnabled = true;
+    this.captionRevision += 1;
+    this.cancelCaptionFade();
+
+    for (const cue of cues) {
+      this.waitingCues.push(cue);
+      this.enforceQueueDiscipline();
+      this.tryAdvanceCue();
+    }
+
+    this.updateCaptionVisibility();
+  }
+
+  private createCueSegments(
+    line: CaptionLine,
+  ): CueData[] {
+    const source = line.text.trim();
+    const translated =
+      line.ja?.trim() ?? "";
+    const useEnglish =
+      translated === "" &&
+      this.translationPath === "none";
+    const primary =
+      useEnglish ? source : translated;
+
+    if (primary === "") {
+      return [];
+    }
+
+    const parts = splitCueText(
+      primary,
+      MAX_CUE_UNITS,
+    );
+    const original =
+      this.showOriginal &&
+      !useEnglish &&
+      translated !== source
+        ? clampTail(
+            source,
+            MAX_ORIGINAL_CHARS,
+          )
+        : "";
+
+    return parts.map(
+      (part, index): CueData => ({
+        cueId: `${line.id}:${index}`,
+        sourceIds: [line.id],
+        primaryText: part,
+        originalText: original,
+        formattedPrimary:
+          wrapCueText(
+            part,
+            MAX_LINE_UNITS,
+          ),
+      }),
+    );
+  }
+
+  private receiveTentative(
+    line: CaptionLine,
+  ): void {
+    const text =
+      (line.ja?.trim() || line.text.trim());
+
+    if (
+      text === "" ||
+      this.isBehindClearWatermark(line.id) ||
+      this.acceptedFinalIds.has(line.id)
+    ) {
+      return;
+    }
+
+    if (
+      this.tentativeId !== null &&
+      (
+        line.id < this.tentativeId ||
+        (
+          line.id === this.tentativeId &&
+          this.tentativeAt !== null &&
+          line.at < this.tentativeAt
+        )
+      )
+    ) {
+      return;
+    }
+
+    this.tentativeId = line.id;
+    this.tentativeAt = line.at;
+    this.tentativeLine.textContent =
+      clampTail(text, 120);
+    this.captionBarEnabled = true;
+    this.captionRevision += 1;
+    this.cancelCaptionFade();
+    this.updateCaptionVisibility();
+    this.scheduleCaptionFade();
+  }
+
+  private clearTentative(): void {
+    this.tentativeId = null;
+    this.tentativeAt = null;
+    this.tentativeLine.textContent = "";
+  }
+
+  private enforceQueueDiscipline(): void {
+    while (
+      this.waitingCues.length >
+      MAX_WAITING_CUES
+    ) {
+      let merged = false;
+
+      for (
+        let index = 0;
+        index <
+        this.waitingCues.length - 1;
+        index += 1
+      ) {
+        const left =
+          this.waitingCues[index];
+        const right =
+          this.waitingCues[index + 1];
+
+        if (
+          left === undefined ||
+          right === undefined
+        ) {
+          continue;
+        }
+
+        const combinedPrimary =
+          `${left.primaryText} ${right.primaryText}`
+            .replace(/\s+/gu, " ")
+            .trim();
+
+        if (
+          displayUnits(combinedPrimary) >
+          MAX_CUE_UNITS
+        ) {
+          continue;
+        }
+
+        const combinedOriginal =
+          [left.originalText, right.originalText]
+            .filter(
+              (value) => value !== "",
+            )
+            .join(" ")
+            .trim();
+
+        this.waitingCues.splice(
+          index,
+          2,
+          {
+            cueId:
+              `${left.cueId}+${right.cueId}`,
+            sourceIds: [
+              ...left.sourceIds,
+              ...right.sourceIds,
+            ],
+            primaryText: combinedPrimary,
+            originalText: clampTail(
+              combinedOriginal,
+              MAX_ORIGINAL_CHARS,
+            ),
+            formattedPrimary:
+              wrapCueText(
+                combinedPrimary,
+                MAX_LINE_UNITS,
+              ),
+          },
+        );
+        merged = true;
+        break;
+      }
+
+      if (!merged) {
+        break;
+      }
+    }
+
+    if (
+      this.waitingCues.length <=
+      MAX_WAITING_CUES
+    ) {
+      return;
+    }
+
+    this.acceleratedUntilDrained = true;
+    this.rescheduleCueAdvance();
+
+    while (
+      this.waitingCues.length >
+      MAX_WAITING_CUES
+    ) {
+      const dropped =
+        this.waitingCues.shift();
+
+      if (dropped === undefined) {
+        break;
+      }
+
+      this.droppedCueCount += 1;
+      this.host.dataset.cueDrops =
+        String(this.droppedCueCount);
+
+      console.warn(
+        "[overlay]",
+        "dropped oldest waiting cue",
+        {
+          cueId: dropped.cueId,
+          droppedCueCount:
+            this.droppedCueCount,
+        },
+      );
+    }
+  }
+
+  private tryAdvanceCue(): void {
+    if (this.destroyed) {
+      return;
+    }
+
+    if (this.activeCue === null) {
+      const next = this.waitingCues.shift();
+
+      if (next !== undefined) {
+        this.displayCue(next);
+      }
+
+      return;
+    }
+
+    if (this.waitingCues.length === 0) {
+      this.acceleratedUntilDrained = false;
+      this.cancelCueAdvance();
+      this.scheduleCaptionFade();
+      return;
+    }
+
+    const minimumDisplayMs =
+      this.acceleratedUntilDrained
+        ? CUE_ACCELERATED_DISPLAY_MS
+        : CUE_MINIMUM_DISPLAY_MS;
+    const elapsed =
+      performance.now() -
+      this.activeCue.shownAt;
+    const remaining =
+      minimumDisplayMs - elapsed;
+
+    if (remaining > 0) {
+      if (this.cueAdvanceTimerId === null) {
+        this.cueAdvanceTimerId =
+          window.setTimeout(() => {
+            this.cueAdvanceTimerId = null;
+            this.tryAdvanceCue();
+          }, Math.ceil(remaining));
+      }
+      return;
+    }
+
+    const next = this.waitingCues.shift();
+
+    if (next !== undefined) {
+      this.displayCue(next);
+    }
+  }
+
+  private displayCue(
+    cue: CueData,
+  ): void {
+    this.cancelCueAdvance();
+    this.cancelCaptionFade();
+
+    const element =
+      this.createCueElement(cue);
+
+    this.cueContainer.replaceChildren(
+      element,
+    );
+    this.activeCue = {
+      data: cue,
+      shownAt: performance.now(),
+      element,
+    };
+
+    this.captionLine.classList.remove(
+      "is-empty",
+      "is-fading",
+    );
+
+    this.updateCaptionVisibility();
+
+    if (this.waitingCues.length > 0) {
+      this.tryAdvanceCue();
+    } else {
+      this.acceleratedUntilDrained = false;
+      this.scheduleCaptionFade();
+    }
+  }
+
+  private createCueElement(
+    cue: CueData,
+  ): HTMLDivElement {
+    const element =
+      document.createElement("div");
+    element.className = "caption-cue";
+    element.dataset.cueId = cue.cueId;
+
+    const primary =
+      document.createElement("div");
+    primary.className =
+      "caption-primary";
+    primary.textContent =
+      cue.formattedPrimary;
+
+    const original =
+      document.createElement("div");
+    original.className =
+      "caption-original";
+    original.textContent =
+      cue.originalText;
+
+    element.append(primary, original);
+    this.cueTextSnapshots.set(
+      element,
+      element.textContent ?? "",
+    );
+
+    return element;
+  }
+
+  private inspectCueMutations(
+    mutations: readonly MutationRecord[],
+  ): void {
+    const changed =
+      new Set<Element>();
+
+    for (const mutation of mutations) {
+      let element: Element | null = null;
+
+      if (
+        mutation.target instanceof Element
+      ) {
+        element =
+          mutation.target.closest(
+            ".caption-cue",
+          );
+      } else {
+        element =
+          mutation.target.parentElement
+            ?.closest(".caption-cue") ??
+          null;
+      }
+
+      if (
+        element !== null &&
+        this.cueTextSnapshots.has(element)
+      ) {
+        changed.add(element);
+      }
+    }
+
+    for (const element of changed) {
+      const previous =
+        this.cueTextSnapshots.get(element);
+      const current =
+        element.textContent ?? "";
+
+      if (
+        previous === undefined ||
+        previous === current
+      ) {
+        continue;
+      }
+
+      this.cueTextSnapshots.set(
+        element,
+        current,
+      );
+      this.cueMutationCount += 1;
+      this.host.dataset.cueMutations =
+        String(this.cueMutationCount);
+
+      console.error(
+        "[overlay]",
+        "existing cue text mutated in place",
+        {
+          cueId:
+            (
+              element as HTMLElement
+            ).dataset.cueId,
+          cueMutationCount:
+            this.cueMutationCount,
+        },
+      );
+    }
+  }
+
+  private isBehindClearWatermark(
+    id: number,
+  ): boolean {
+    return (
+      this.clearWatermarkId !== null &&
+      id <= this.clearWatermarkId
+    );
+  }
+
+  private rescheduleCueAdvance(): void {
+    this.cancelCueAdvance();
+    this.tryAdvanceCue();
+  }
+
+  private cancelCueAdvance(): void {
+    if (this.cueAdvanceTimerId !== null) {
+      globalThis.clearTimeout(
+        this.cueAdvanceTimerId,
+      );
+      this.cueAdvanceTimerId = null;
+    }
+  }
+
+  private updateCaptionVisibility(): void {
+    const visible =
+      this.activeCue !== null ||
+      this.tentativeLine.textContent !== "";
 
     this.captionLine.classList.toggle(
       "is-empty",
-      !hasVisibleText,
+      !visible,
     );
 
-    if (!hasVisibleText) {
-      this.activeShownDisplayId = null;
-      return;
+    if (!visible) {
+      this.captionLine.classList.remove(
+        "is-fading",
+      );
     }
 
-    this.recordVisibleDisplay();
-  }
-
-  private clearRenderedCaption(): void {
-    this.primaryLine.textContent = "";
-    this.originalLine.textContent = "";
-    this.activeShownDisplayId = null;
-    this.captionLine.classList.remove(
-      "is-fading",
-    );
-    this.captionLine.classList.add(
-      "is-empty",
-    );
-  }
-
-  private recordVisibleDisplay(): void {
-    let visibleDisplayId: number | null = null;
-
-    if (
-      this.translationPath === "none" &&
-      this.liveEnglishId !== null &&
-      this.primaryLine.textContent !== ""
-    ) {
-      visibleDisplayId = this.liveEnglishId;
-    }
-
-    if (
-      this.translationPath !== "none" &&
-      this.japaneseDisplayId !== null &&
-      this.primaryLine.textContent !== ""
-    ) {
-      visibleDisplayId =
-        visibleDisplayId === null
-          ? this.japaneseDisplayId
-          : Math.max(
-              visibleDisplayId,
-              this.japaneseDisplayId,
-            );
-    }
-
-    if (
-      this.translationPath !== "none" &&
-      this.showOriginal &&
-      this.liveEnglishId !== null &&
-      this.originalLine.textContent !== ""
-    ) {
-      visibleDisplayId =
-        visibleDisplayId === null
-          ? this.liveEnglishId
-          : Math.max(
-              visibleDisplayId,
-              this.liveEnglishId,
-            );
-    }
-
-    this.activeShownDisplayId =
-      visibleDisplayId;
-
-    if (visibleDisplayId === null) {
-      return;
-    }
-
-    this.highestShownDisplayId =
-      this.highestShownDisplayId === null
-        ? visibleDisplayId
-        : Math.max(
-            this.highestShownDisplayId,
-            visibleDisplayId,
-          );
+    this.startFrameLoop();
   }
 
   private installEventListeners(): void {
@@ -1039,7 +1053,10 @@ export class CaptionOverlay {
 
   private readonly handleVisibilityChange =
     (): void => {
-      if (document.visibilityState === "visible") {
+      if (
+        document.visibilityState ===
+        "visible"
+      ) {
         this.appendHost();
         this.refreshTarget();
         this.refreshOtherVideos();
@@ -1164,8 +1181,7 @@ export class CaptionOverlay {
     try {
       this.host.showPopover();
     } catch {
-      // A later lifecycle pass retries after the
-      // document or fullscreen state settles.
+      // Retry after document/fullscreen state settles.
     }
   }
 
@@ -1177,8 +1193,7 @@ export class CaptionOverlay {
     try {
       this.host.hidePopover();
     } catch {
-      // The browser may already have closed it
-      // during a top-layer state transition.
+      // The browser may already have closed it.
     }
   }
 
@@ -1194,7 +1209,8 @@ export class CaptionOverlay {
 
   private observeMutationRoot(): void {
     const nextRoot =
-      document.body ?? document.documentElement;
+      document.body ??
+      document.documentElement;
 
     if (this.mutationRoot === nextRoot) {
       return;
@@ -1282,7 +1298,8 @@ export class CaptionOverlay {
       this.status === "loadingModel" ||
       this.status === "running";
 
-    const desired = new Set<HTMLVideoElement>();
+    const desired =
+      new Set<HTMLVideoElement>();
 
     if (captureIsOn && target !== null) {
       const candidates = Array.from(
@@ -1315,7 +1332,10 @@ export class CaptionOverlay {
 
     let changed = false;
 
-    for (const [video, badge] of this.otherBadges) {
+    for (
+      const [video, badge]
+      of this.otherBadges
+    ) {
       if (desired.has(video)) {
         continue;
       }
@@ -1479,20 +1499,24 @@ export class CaptionOverlay {
     }
 
     const width = Math.max(0, rect.width);
+    const hasTentative =
+      this.tentativeLine.textContent !== "";
     const barHeight =
       this.showOriginal
         ? Math.max(
-            58,
+            76,
             Math.min(
-              94,
-              rect.height * 0.21,
+              hasTentative ? 124 : 108,
+              rect.height *
+                (hasTentative ? 0.29 : 0.25),
             ),
           )
         : Math.max(
-            40,
+            56,
             Math.min(
-              76,
-              rect.height * 0.14,
+              hasTentative ? 104 : 90,
+              rect.height *
+                (hasTentative ? 0.23 : 0.19),
             ),
           );
     const bottomOffset = Math.max(
@@ -1515,18 +1539,24 @@ export class CaptionOverlay {
     );
     const verticalPadding = Math.max(
       5,
-      Math.min(10, barHeight * 0.1),
+      Math.min(10, barHeight * 0.08),
     );
-    const availableRowHeight = Math.max(
+    const availableHeight = Math.max(
       1,
       barHeight - verticalPadding * 2,
     );
-    const rowHeightInFontUnits =
-      PRIMARY_LINE_HEIGHT +
+    const rowHeightUnits =
+      PRIMARY_LINE_HEIGHT * 2 +
       (
         this.showOriginal
           ? ORIGINAL_FONT_SCALE *
             ORIGINAL_LINE_HEIGHT
+          : 0
+      ) +
+      (
+        hasTentative
+          ? TENTATIVE_FONT_SCALE *
+            TENTATIVE_LINE_HEIGHT
           : 0
       );
     const widthScaledFontSize = Math.max(
@@ -1534,8 +1564,7 @@ export class CaptionOverlay {
       Math.min(24, rect.width / 32),
     );
     const heightLimitedFontSize =
-      availableRowHeight /
-      rowHeightInFontUnits;
+      availableHeight / rowHeightUnits;
     const fontSize = Math.max(
       10,
       Math.min(
@@ -1543,14 +1572,6 @@ export class CaptionOverlay {
         heightLimitedFontSize,
       ),
     );
-    const primarySlot =
-      fontSize * PRIMARY_LINE_HEIGHT;
-    const originalSlot =
-      this.showOriginal
-        ? fontSize *
-          ORIGINAL_FONT_SCALE *
-          ORIGINAL_LINE_HEIGHT
-        : 0;
 
     this.captionStack.style.display =
       "flex";
@@ -1580,11 +1601,31 @@ export class CaptionOverlay {
     );
     this.captionStack.style.setProperty(
       "--primary-slot",
-      `${primarySlot}px`,
+      `${
+        fontSize *
+        PRIMARY_LINE_HEIGHT *
+        2
+      }px`,
     );
     this.captionStack.style.setProperty(
       "--original-slot",
-      `${originalSlot}px`,
+      `${
+        this.showOriginal
+          ? fontSize *
+            ORIGINAL_FONT_SCALE *
+            ORIGINAL_LINE_HEIGHT
+          : 0
+      }px`,
+    );
+    this.captionStack.style.setProperty(
+      "--tentative-slot",
+      `${
+        hasTentative
+          ? fontSize *
+            TENTATIVE_FONT_SCALE *
+            TENTATIVE_LINE_HEIGHT
+          : 0
+      }px`,
     );
   }
 
@@ -1648,35 +1689,22 @@ export class CaptionOverlay {
   }
 
   private hideOtherBadges(): void {
-    for (const badge of this.otherBadges.values()) {
+    for (
+      const badge
+      of this.otherBadges.values()
+    ) {
       badge.style.display = "none";
     }
-  }
-
-  private hasVisibleCaption(): boolean {
-    return (
-      this.primaryLine.textContent !== "" ||
-      this.originalLine.textContent !== ""
-    );
-  }
-
-  private syncCaptionFadeAfterRender(): void {
-    if (
-      !this.captionActive ||
-      !this.hasVisibleCaption()
-    ) {
-      this.cancelCaptionFade();
-      return;
-    }
-
-    this.scheduleCaptionFade();
   }
 
   private scheduleCaptionFade(): void {
     if (
       this.destroyed ||
-      !this.captionActive ||
-      !this.hasVisibleCaption() ||
+      (
+        this.activeCue === null &&
+        this.tentativeLine.textContent === ""
+      ) ||
+      this.waitingCues.length > 0 ||
       this.captionFadeTimerId !== null ||
       this.captionRemovalTimerId !== null
     ) {
@@ -1693,7 +1721,7 @@ export class CaptionOverlay {
         if (
           this.captionRevision !==
             expiringRevision ||
-          !this.captionActive
+          this.waitingCues.length > 0
         ) {
           return;
         }
@@ -1709,16 +1737,20 @@ export class CaptionOverlay {
             if (
               this.captionRevision !==
                 expiringRevision ||
-              !this.captionActive
+              this.waitingCues.length > 0
             ) {
               return;
             }
 
-            this.captionActive = false;
-            this.suppressedAfterFade = true;
-            this.activeShownDisplayId = null;
-            this.japaneseDisplayText = "";
-            this.clearRenderedCaption();
+            this.activeCue = null;
+            this.clearTentative();
+            this.cueContainer.replaceChildren();
+            this.captionLine.classList.remove(
+              "is-fading",
+            );
+            this.captionLine.classList.add(
+              "is-empty",
+            );
             this.updateLayout();
             this.options.onCaptionFadeOut?.();
           }, CAPTION_FADE_MS);
@@ -1748,25 +1780,275 @@ export class CaptionOverlay {
   }
 }
 
-function compareCaptionOrder(
-  leftId: number,
-  leftSource: CaptionSource,
-  rightId: number,
-  rightSource: CaptionSource,
+export function splitCueText(
+  text: string,
+  maxUnits: number = MAX_CUE_UNITS,
+): string[] {
+  const normalized = text
+    .replace(/\s+/gu, " ")
+    .trim();
+
+  if (normalized === "") {
+    return [];
+  }
+
+  const characters = Array.from(normalized);
+  const protectedRanges =
+    findProtectedUrlRanges(normalized);
+  const parts: string[] = [];
+  let start = 0;
+
+  while (start < characters.length) {
+    let units = 0;
+    let end = start;
+    let preferred = -1;
+
+    while (end < characters.length) {
+      const character =
+        characters[end] ?? "";
+      const nextUnits =
+        units + characterUnits(character);
+
+      if (
+        nextUnits > maxUnits &&
+        end > start
+      ) {
+        break;
+      }
+
+      units = nextUnits;
+      end += 1;
+
+      if (
+        isPreferredTextBoundary(
+          characters,
+          end,
+        ) &&
+        !isCharacterBoundaryProtected(
+          normalized,
+          characters,
+          end,
+          protectedRanges,
+        )
+      ) {
+        preferred = end;
+      }
+    }
+
+    if (end >= characters.length) {
+      const tail =
+        characters.slice(start).join("").trim();
+
+      if (tail !== "") {
+        parts.push(tail);
+      }
+      break;
+    }
+
+    let boundary =
+      preferred > start
+        ? preferred
+        : end;
+
+    while (
+      boundary < characters.length &&
+      isCharacterBoundaryProtected(
+        normalized,
+        characters,
+        boundary,
+        protectedRanges,
+      )
+    ) {
+      boundary += 1;
+    }
+
+    if (boundary <= start) {
+      boundary = Math.min(
+        characters.length,
+        start + 1,
+      );
+    }
+
+    const part = characters
+      .slice(start, boundary)
+      .join("")
+      .trim();
+
+    if (part !== "") {
+      parts.push(part);
+    }
+
+    start = boundary;
+
+    while (
+      characters[start] !== undefined &&
+      /\s/u.test(characters[start] ?? "")
+    ) {
+      start += 1;
+    }
+  }
+
+  return parts;
+}
+
+export function wrapCueText(
+  text: string,
+  maxLineUnits: number =
+    MAX_LINE_UNITS,
+): string {
+  const lines =
+    splitCueText(text, maxLineUnits);
+
+  if (lines.length <= 2) {
+    return lines.join("\n");
+  }
+
+  return [
+    lines[0] ?? "",
+    lines.slice(1).join(" "),
+  ].join("\n");
+}
+
+function displayUnits(
+  text: string,
 ): number {
-  if (leftId < rightId) {
-    return -1;
+  let units = 0;
+
+  for (const character of text) {
+    units += characterUnits(character);
   }
 
-  if (leftId > rightId) {
-    return 1;
+  return units;
+}
+
+function characterUnits(
+  character: string,
+): number {
+  return /[\u0000-\u00ff]/u.test(
+    character,
+  )
+    ? 0.5
+    : 1;
+}
+
+function isPreferredTextBoundary(
+  characters: readonly string[],
+  boundary: number,
+): boolean {
+  const previous =
+    characters[boundary - 1] ?? "";
+  const next =
+    characters[boundary] ?? "";
+
+  if (
+    /[\s、。！？,.!?]/u.test(previous)
+  ) {
+    return true;
   }
 
-  if (leftSource === rightSource) {
-    return 0;
+  const prefix = characters
+    .slice(
+      Math.max(0, boundary - 3),
+      boundary,
+    )
+    .join("");
+
+  return (
+    /(?:から|まで|より|ので|けど|には|では|とは|は|が|を|に|で|と|へ|も|や|の)$/u.test(
+      prefix,
+    ) &&
+    next !== ""
+  );
+}
+
+function findProtectedUrlRanges(
+  text: string,
+): ReadonlyArray<
+  readonly [start: number, end: number]
+> {
+  const ranges:
+    Array<readonly [number, number]> = [];
+  const expression =
+    /(?:https?:\/\/|www\.)\S+/giu;
+
+  for (
+    let match = expression.exec(text);
+    match !== null;
+    match = expression.exec(text)
+  ) {
+    ranges.push([
+      match.index,
+      match.index + match[0].length,
+    ]);
   }
 
-  return leftSource === "final" ? 1 : -1;
+  return ranges;
+}
+
+function isCharacterBoundaryProtected(
+  text: string,
+  characters: readonly string[],
+  boundary: number,
+  ranges: ReadonlyArray<
+    readonly [start: number, end: number]
+  >,
+): boolean {
+  const prefix = characters
+    .slice(0, boundary)
+    .join("");
+  const codeUnitBoundary =
+    prefix.length;
+
+  return ranges.some(
+    ([start, end]) =>
+      codeUnitBoundary > start &&
+      codeUnitBoundary < end &&
+      end <= text.length,
+  );
+}
+
+function clampTail(
+  text: string,
+  maxChars: number,
+): string {
+  if (text.length <= maxChars) {
+    return text;
+  }
+
+  return (
+    "…" +
+    text.slice(text.length - maxChars)
+  );
+}
+
+function maximumNullable(
+  left: number | null,
+  right: number | null,
+): number | null {
+  if (left === null) {
+    return right;
+  }
+
+  if (right === null) {
+    return left;
+  }
+
+  return Math.max(left, right);
+}
+
+function maximumSetValue(
+  values: ReadonlySet<number>,
+): number | null {
+  let maximum: number | null = null;
+
+  for (const value of values) {
+    maximum =
+      maximum === null
+        ? value
+        : Math.max(maximum, value);
+  }
+
+  return maximum;
 }
 
 function snapshotRect(
@@ -1811,7 +2093,8 @@ function layoutSnapshotsEqual(
     if (
       leftLayout === undefined ||
       rightLayout === undefined ||
-      leftLayout.video !== rightLayout.video ||
+      leftLayout.video !==
+        rightLayout.video ||
       !rectSnapshotsEqual(
         leftLayout.rect,
         rightLayout.rect,
@@ -1833,12 +2116,30 @@ function rectSnapshotsEqual(
   }
 
   return (
-    approximatelyEqual(left.left, right.left) &&
-    approximatelyEqual(left.top, right.top) &&
-    approximatelyEqual(left.right, right.right) &&
-    approximatelyEqual(left.bottom, right.bottom) &&
-    approximatelyEqual(left.width, right.width) &&
-    approximatelyEqual(left.height, right.height)
+    approximatelyEqual(
+      left.left,
+      right.left,
+    ) &&
+    approximatelyEqual(
+      left.top,
+      right.top,
+    ) &&
+    approximatelyEqual(
+      left.right,
+      right.right,
+    ) &&
+    approximatelyEqual(
+      left.bottom,
+      right.bottom,
+    ) &&
+    approximatelyEqual(
+      left.width,
+      right.width,
+    ) &&
+    approximatelyEqual(
+      left.height,
+      right.height,
+    )
   );
 }
 
@@ -1944,8 +2245,9 @@ function getOverlayStyles(): string {
     .caption-stack {
       --bar-padding-x: 12px;
       --bar-padding-y: 6px;
-      --primary-slot: 24px;
+      --primary-slot: 48px;
       --original-slot: 0px;
+      --tentative-slot: 0px;
 
       position: fixed;
       display: none;
@@ -1978,19 +2280,15 @@ function getOverlayStyles(): string {
       min-width: 0;
       height: calc(
         var(--primary-slot) +
-        var(--original-slot)
+        var(--original-slot) +
+        var(--tentative-slot)
       );
       margin: 0;
       padding: 0;
       overflow: hidden;
       color: #ffffff;
-      font-style: normal;
-      font-weight: 650;
       pointer-events: none;
       opacity: 1;
-      text-shadow:
-        0 1px 2px rgba(0, 0, 0, 0.95),
-        0 0 3px rgba(0, 0, 0, 0.8);
       transition:
         opacity ${CAPTION_FADE_MS}ms ease;
     }
@@ -1998,6 +2296,33 @@ function getOverlayStyles(): string {
     .caption-line.is-empty,
     .caption-line.is-fading {
       opacity: 0;
+    }
+
+    .cue-container {
+      display: block;
+      flex: 0 0 calc(
+        var(--primary-slot) +
+        var(--original-slot)
+      );
+      width: 100%;
+      min-width: 0;
+      height: calc(
+        var(--primary-slot) +
+        var(--original-slot)
+      );
+      overflow: hidden;
+    }
+
+    .caption-cue {
+      display: flex;
+      flex-direction: column;
+      width: 100%;
+      min-width: 0;
+      height: 100%;
+      overflow: hidden;
+      text-shadow:
+        0 1px 2px rgba(0, 0, 0, 0.95),
+        0 0 3px rgba(0, 0, 0, 0.8);
     }
 
     .caption-primary {
@@ -2013,10 +2338,10 @@ function getOverlayStyles(): string {
       overflow: hidden;
       overflow-wrap: normal;
       font-size: 1em;
+      font-style: normal;
       font-weight: 650;
       line-height: ${PRIMARY_LINE_HEIGHT};
-      text-overflow: ellipsis;
-      white-space: nowrap;
+      white-space: pre-line;
     }
 
     .caption-original {
@@ -2032,8 +2357,31 @@ function getOverlayStyles(): string {
       overflow: hidden;
       color: rgba(229, 231, 235, 0.78);
       font-size: ${ORIGINAL_FONT_SCALE}em;
+      font-style: normal;
       font-weight: 500;
       line-height: ${ORIGINAL_LINE_HEIGHT};
+      text-overflow: ellipsis;
+      text-shadow:
+        0 1px 2px rgba(0, 0, 0, 0.9);
+      white-space: nowrap;
+    }
+
+    .caption-tentative {
+      display: block;
+      flex: 0 0 var(--tentative-slot);
+      width: 100%;
+      min-width: 0;
+      height: var(--tentative-slot);
+      min-height: var(--tentative-slot);
+      max-height: var(--tentative-slot);
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      color: rgba(209, 213, 219, 0.58);
+      font-size: ${TENTATIVE_FONT_SCALE}em;
+      font-style: normal;
+      font-weight: 450;
+      line-height: ${TENTATIVE_LINE_HEIGHT};
       text-overflow: ellipsis;
       text-shadow:
         0 1px 2px rgba(0, 0, 0, 0.9);

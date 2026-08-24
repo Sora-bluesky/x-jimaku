@@ -3,9 +3,7 @@ import {
   nowIso,
   type WhisperTranscribeMessage,
 } from "../shared/messages";
-import type {
-  AudioEnergyFrame,
-} from "./audio-capture";
+import type { AudioEnergyFrame } from "./audio-capture";
 
 const SAMPLE_RATE = 16_000;
 const TICK_INTERVAL_MS = 300;
@@ -16,8 +14,29 @@ const TRAILING_SILENCE_SAMPLES =
   Math.round(SAMPLE_RATE * 0.5);
 const ENERGY_HOP_SAMPLES =
   Math.round(SAMPLE_RATE * 0.02);
+const LOW_AUDIO_GROWTH_SAMPLES =
+  Math.round(SAMPLE_RATE * 0.35);
+const MAX_CLAUSE_WORDS = 10;
 
+export const AGREEMENT_TIMEOUT_MS = 6_000;
 export const SILENCE_RMS_THRESHOLD = 0.008;
+
+const COORDINATING_CONJUNCTIONS =
+  new Set([
+    "and",
+    "but",
+    "or",
+    "nor",
+    "for",
+    "so",
+    "yet",
+  ]);
+
+interface HypothesisToken {
+  surface: string;
+  key: string;
+  protected: boolean;
+}
 
 export interface RecognitionLine {
   id: number;
@@ -37,7 +56,9 @@ export interface SegmenterOptions {
   getEnergyHistory(): readonly AudioEnergyFrame[];
   onLine(line: RecognitionLine): void;
   onError(message: string): void;
+  showTentative?: boolean;
   now?: () => string;
+  nowMs?: () => number;
 }
 
 interface InFlightSegment {
@@ -61,7 +82,9 @@ export class WhisperSegmenter {
     SegmenterOptions["onLine"];
   private readonly onError:
     SegmenterOptions["onError"];
+  private readonly showTentative: boolean;
   private readonly now: () => string;
+  private readonly nowMs: () => number;
 
   private committedOffset = 0;
   private busy = false;
@@ -69,8 +92,22 @@ export class WhisperSegmenter {
   private tickTimerId: number | null = null;
   private nextRequestSequence = 1;
   private nextLineId = 1;
-  private currentLineId: number | null = null;
   private inFlight: InFlightSegment | null = null;
+
+  private previousHypothesis:
+    HypothesisToken[] | null = null;
+  private latestHypothesis:
+    HypothesisToken[] = [];
+  private promotedWordCount = 0;
+  private clauseBuffer: HypothesisToken[] = [];
+  private agreementSeriesStartedAt:
+    number | null = null;
+  private lastAgreementProgressAt:
+    number | null = null;
+  private lastHypothesisEndOffset:
+    number | null = null;
+  private lastTentativeId: number | null = null;
+  private lastTentativeText = "";
 
   constructor(options: SegmenterOptions) {
     this.worker = options.worker;
@@ -82,7 +119,11 @@ export class WhisperSegmenter {
       options.getEnergyHistory;
     this.onLine = options.onLine;
     this.onError = options.onError;
+    this.showTentative =
+      options.showTentative ?? false;
     this.now = options.now ?? nowIso;
+    this.nowMs =
+      options.nowMs ?? (() => performance.now());
   }
 
   start(): void {
@@ -93,6 +134,7 @@ export class WhisperSegmenter {
     this.started = true;
     this.committedOffset =
       this.getAvailableStartOffset();
+    this.resetAgreementSeries();
 
     this.worker.addEventListener(
       "message",
@@ -117,6 +159,7 @@ export class WhisperSegmenter {
     this.started = false;
     this.busy = false;
     this.inFlight = null;
+    this.resetAgreementSeries();
 
     if (this.tickTimerId !== null) {
       globalThis.clearInterval(this.tickTimerId);
@@ -146,6 +189,7 @@ export class WhisperSegmenter {
         availableStart - this.committedOffset;
 
       this.committedOffset = availableStart;
+      this.resetAgreementSeries();
 
       console.warn(
         "[seg]",
@@ -173,11 +217,10 @@ export class WhisperSegmenter {
       startOffset,
       endOffset,
     );
-    const sampledMaxRms =
-      computeMaxWindowRms(
-        audio,
-        ENERGY_HOP_SAMPLES,
-      );
+    const sampledMaxRms = computeMaxWindowRms(
+      audio,
+      ENERGY_HOP_SAMPLES,
+    );
     const maxRms =
       trackedMaxRms === null
         ? sampledMaxRms
@@ -191,6 +234,7 @@ export class WhisperSegmenter {
         this.committedOffset,
         endOffset - SILENCE_TAIL_SAMPLES,
       );
+      this.resetAgreementSeries();
       return;
     }
 
@@ -263,56 +307,83 @@ export class WhisperSegmenter {
     this.busy = false;
     this.inFlight = null;
 
-    const normalizedText = text.trim();
-    const shouldForceCommit =
+    const shouldForceAudioBoundary =
       segment.sampleLength >=
       MAX_SEGMENT_SAMPLES;
+    const shouldCommitForSilence =
+      hasTrailingSilence(
+        this.getEnergyHistory(),
+        segment.endOffset,
+        TRAILING_SILENCE_SAMPLES,
+        SILENCE_RMS_THRESHOLD,
+        ENERGY_HOP_SAMPLES,
+      );
 
-    if (normalizedText.length > 0) {
-      const lineId =
-        this.currentLineId ??
-        this.allocateLineId();
+    let tokens = tokenizeHypothesis(text);
 
-      this.currentLineId = lineId;
+    if (
+      this.shouldRejectRepetitionGrowth(
+        tokens,
+        segment.endOffset,
+      )
+    ) {
+      console.warn(
+        "[seg]",
+        "discarded repetition growth without corresponding audio growth",
+        {
+          requestId,
+          endOffset: segment.endOffset,
+        },
+      );
 
-      this.onLine({
-        id: lineId,
-        text: normalizedText,
-        final: false,
-        at: this.now(),
-      });
+      tokens =
+        this.previousHypothesis === null
+          ? []
+          : [...this.previousHypothesis];
+    }
 
-      const shouldCommitForSilence =
-        hasTrailingSilence(
-          this.getEnergyHistory(),
-          segment.endOffset,
-          TRAILING_SILENCE_SAMPLES,
-          SILENCE_RMS_THRESHOLD,
-          ENERGY_HOP_SAMPLES,
-        );
+    this.lastHypothesisEndOffset =
+      segment.endOffset;
+
+    if (tokens.length > 0) {
+      this.latestHypothesis = tokens;
+      this.processAgreement(tokens);
 
       if (
         shouldCommitForSilence ||
-        shouldForceCommit
+        shouldForceAudioBoundary
       ) {
-        this.onLine({
-          id: lineId,
-          text: normalizedText,
-          final: true,
-          at: this.now(),
-        });
-
+        this.forceAdoptLatest(
+          shouldForceAudioBoundary
+            ? "maximum-length"
+            : "trailing-silence",
+          true,
+        );
         this.commitSegment(
           segment,
-          shouldForceCommit
+          shouldForceAudioBoundary
             ? "maximum-length"
             : "trailing-silence",
         );
+      } else {
+        this.forceAgreementIfTimedOut();
+        this.emitTentative();
       }
-    } else if (shouldForceCommit) {
+    } else if (
+      shouldCommitForSilence ||
+      shouldForceAudioBoundary
+    ) {
+      this.forceAdoptLatest(
+        shouldForceAudioBoundary
+          ? "maximum-length-empty"
+          : "trailing-silence-empty",
+        true,
+      );
       this.commitSegment(
         segment,
-        "maximum-length-empty",
+        shouldForceAudioBoundary
+          ? "maximum-length-empty"
+          : "trailing-silence-empty",
       );
     }
 
@@ -321,19 +392,230 @@ export class WhisperSegmenter {
     });
   }
 
+  private processAgreement(
+    tokens: HypothesisToken[],
+  ): void {
+    const observedAt = this.nowMs();
+
+    if (this.agreementSeriesStartedAt === null) {
+      this.agreementSeriesStartedAt =
+        observedAt;
+      this.lastAgreementProgressAt =
+        observedAt;
+    }
+
+    const previous = this.previousHypothesis;
+    this.previousHypothesis = tokens;
+
+    if (previous === null) {
+      return;
+    }
+
+    const agreedCount =
+      longestCommonPrefixLength(
+        previous.map((token) => token.key),
+        tokens.map((token) => token.key),
+      );
+
+    if (agreedCount <= this.promotedWordCount) {
+      return;
+    }
+
+    const newlyCommitted = tokens.slice(
+      this.promotedWordCount,
+      agreedCount,
+    );
+
+    this.promotedWordCount = agreedCount;
+    this.lastAgreementProgressAt =
+      observedAt;
+    this.clauseBuffer.push(
+      ...cloneTokens(newlyCommitted),
+    );
+    this.drainClauseBuffer(false);
+  }
+
+  private forceAgreementIfTimedOut(): void {
+    if (
+      this.latestHypothesis.length === 0 ||
+      this.lastAgreementProgressAt === null ||
+      this.nowMs() -
+        this.lastAgreementProgressAt <
+        AGREEMENT_TIMEOUT_MS
+    ) {
+      return;
+    }
+
+    this.forceAdoptLatest(
+      "agreement-timeout",
+      true,
+    );
+    this.lastAgreementProgressAt =
+      this.nowMs();
+  }
+
+  private forceAdoptLatest(
+    reason: string,
+    flush: boolean,
+  ): void {
+    if (
+      this.latestHypothesis.length >
+      this.promotedWordCount
+    ) {
+      this.clauseBuffer.push(
+        ...cloneTokens(
+          this.latestHypothesis.slice(
+            this.promotedWordCount,
+          ),
+        ),
+      );
+      this.promotedWordCount =
+        this.latestHypothesis.length;
+    }
+
+    this.drainClauseBuffer(flush);
+
+    console.log(
+      "[seg]",
+      "latest hypothesis force-adopted",
+      {
+        reason,
+        promotedWords:
+          this.promotedWordCount,
+      },
+    );
+  }
+
+  private drainClauseBuffer(
+    flush: boolean,
+  ): void {
+    while (this.clauseBuffer.length > 0) {
+      const boundary =
+        findNextClauseBoundary(
+          this.clauseBuffer,
+          flush,
+        );
+
+      if (boundary === null) {
+        return;
+      }
+
+      const clauseTokens =
+        this.clauseBuffer.splice(
+          0,
+          boundary,
+        );
+      const clause =
+        joinTokenSurfaces(
+          clauseTokens,
+        ).trim();
+
+      if (clause === "") {
+        continue;
+      }
+
+      const id = this.nextLineId;
+      this.nextLineId += 1;
+
+      this.onLine({
+        id,
+        text: clause,
+        final: true,
+        at: this.now(),
+      });
+
+      this.lastTentativeId = null;
+      this.lastTentativeText = "";
+    }
+  }
+
+  private emitTentative(): void {
+    if (!this.showTentative) {
+      return;
+    }
+
+    const unstableTokens =
+      this.latestHypothesis.slice(
+        this.promotedWordCount,
+      );
+    const tentative = joinTokenSurfaces([
+      ...this.clauseBuffer,
+      ...unstableTokens,
+    ]).trim();
+
+    if (tentative === "") {
+      return;
+    }
+
+    const id = this.nextLineId;
+
+    if (
+      this.lastTentativeId === id &&
+      this.lastTentativeText === tentative
+    ) {
+      return;
+    }
+
+    this.lastTentativeId = id;
+    this.lastTentativeText = tentative;
+
+    this.onLine({
+      id,
+      text: tentative,
+      final: false,
+      at: this.now(),
+    });
+  }
+
+  private shouldRejectRepetitionGrowth(
+    current: readonly HypothesisToken[],
+    endOffset: number,
+  ): boolean {
+    const previous = this.previousHypothesis;
+    const previousEnd =
+      this.lastHypothesisEndOffset;
+
+    if (
+      previous === null ||
+      previousEnd === null ||
+      endOffset - previousEnd >
+        LOW_AUDIO_GROWTH_SAMPLES ||
+      current.length <= previous.length
+    ) {
+      return false;
+    }
+
+    return (
+      repeatedNgramExcess(current) >
+      repeatedNgramExcess(previous)
+    );
+  }
+
   private commitSegment(
     segment: InFlightSegment,
     reason: string,
   ): void {
     this.committedOffset =
       segment.endOffset;
-    this.currentLineId = null;
+    this.resetAgreementSeries();
 
     console.log("[seg]", "segment committed", {
       requestId: segment.requestId,
       endOffset: segment.endOffset,
       reason,
     });
+  }
+
+  private resetAgreementSeries(): void {
+    this.previousHypothesis = null;
+    this.latestHypothesis = [];
+    this.promotedWordCount = 0;
+    this.clauseBuffer = [];
+    this.agreementSeriesStartedAt = null;
+    this.lastAgreementProgressAt = null;
+    this.lastHypothesisEndOffset = null;
+    this.lastTentativeId = null;
+    this.lastTentativeText = "";
   }
 
   private handleTranscriptionError(
@@ -365,19 +647,319 @@ export class WhisperSegmenter {
     });
   }
 
-  private allocateLineId(): number {
-    const id = this.nextLineId;
-    this.nextLineId += 1;
-    return id;
-  }
-
   private getAvailableStartOffset(): number {
     return Math.max(
       0,
       this.getWriteOffset() -
-      this.getCapacitySamples(),
+        this.getCapacitySamples(),
     );
   }
+}
+
+export function normalizeForAgreement(
+  text: string,
+): string[] {
+  return tokenizeHypothesis(text).map(
+    (token) => token.key,
+  );
+}
+
+export function longestCommonPrefixLength(
+  left: readonly string[],
+  right: readonly string[],
+): number {
+  const maximum = Math.min(
+    left.length,
+    right.length,
+  );
+  let index = 0;
+
+  while (
+    index < maximum &&
+    left[index] === right[index]
+  ) {
+    index += 1;
+  }
+
+  return index;
+}
+
+export function splitEnglishClauses(
+  text: string,
+): string[] {
+  const buffer = tokenizeHypothesis(text);
+  const clauses: string[] = [];
+
+  while (buffer.length > 0) {
+    const boundary =
+      findNextClauseBoundary(
+        buffer,
+        true,
+      );
+
+    if (boundary === null) {
+      break;
+    }
+
+    const clause = joinTokenSurfaces(
+      buffer.splice(0, boundary),
+    ).trim();
+
+    if (clause !== "") {
+      clauses.push(clause);
+    }
+  }
+
+  return clauses;
+}
+
+function tokenizeHypothesis(
+  text: string,
+): HypothesisToken[] {
+  const rawTokens =
+    text.normalize("NFKC").match(/\S+/gu) ?? [];
+  const tokens: HypothesisToken[] = [];
+  let quoteOpen = false;
+
+  for (const raw of rawTokens) {
+    const quoteCount =
+      (raw.match(/[“”„‟「」『』"]/gu) ?? [])
+        .length;
+    const isUrl =
+      /^(?:https?:\/\/|www\.)/iu.test(raw);
+    const protectedToken =
+      isUrl || quoteOpen || quoteCount > 0;
+    const key = normalizeTokenKey(raw);
+
+    if (key === "") {
+      const previous =
+        tokens[tokens.length - 1];
+
+      if (previous !== undefined) {
+        previous.surface += raw;
+      }
+
+      if (quoteCount % 2 === 1) {
+        quoteOpen = !quoteOpen;
+      }
+      continue;
+    }
+
+    tokens.push({
+      surface: raw,
+      key,
+      protected: protectedToken,
+    });
+
+    if (quoteCount % 2 === 1) {
+      quoteOpen = !quoteOpen;
+    }
+  }
+
+  return tokens;
+}
+
+function normalizeTokenKey(
+  token: string,
+): string {
+  return token
+    .normalize("NFKC")
+    .toLocaleLowerCase("en-US")
+    .replace(/[’‘`]/gu, "'")
+    .replace(/[^\p{L}\p{N}]+/gu, "");
+}
+
+function cloneTokens(
+  tokens: readonly HypothesisToken[],
+): HypothesisToken[] {
+  return tokens.map((token) => ({
+    ...token,
+  }));
+}
+
+function findNextClauseBoundary(
+  tokens: readonly HypothesisToken[],
+  flush: boolean,
+): number | null {
+  for (
+    let index = 0;
+    index < tokens.length;
+    index += 1
+  ) {
+    const token = tokens[index];
+    const next = tokens[index + 1];
+
+    if (
+      token !== undefined &&
+      !token.protected &&
+      /[.?!][”"』」）\]]*$/u.test(
+        token.surface,
+      )
+    ) {
+      return index + 1;
+    }
+
+    if (
+      token !== undefined &&
+      next !== undefined &&
+      !token.protected &&
+      /,[”"』」）\]]*$/u.test(
+        token.surface,
+      ) &&
+      COORDINATING_CONJUNCTIONS.has(
+        next.key,
+      ) &&
+      !isProtectedBoundary(
+        tokens,
+        index + 1,
+      )
+    ) {
+      return index + 1;
+    }
+  }
+
+  if (tokens.length > MAX_CLAUSE_WORDS) {
+    const forced =
+      findForcedWordBoundary(tokens);
+
+    if (forced !== null) {
+      return forced;
+    }
+  }
+
+  return flush ? tokens.length : null;
+}
+
+function findForcedWordBoundary(
+  tokens: readonly HypothesisToken[],
+): number | null {
+  const preferredMaximum = Math.min(
+    MAX_CLAUSE_WORDS,
+    tokens.length - 1,
+  );
+
+  for (
+    let boundary = preferredMaximum;
+    boundary >= 5;
+    boundary -= 1
+  ) {
+    const previous = tokens[boundary - 1];
+    const next = tokens[boundary];
+
+    if (
+      !isProtectedBoundary(
+        tokens,
+        boundary,
+      ) &&
+      (
+        (
+          previous !== undefined &&
+          /[,;:][”"』」）\]]*$/u.test(
+            previous.surface,
+          )
+        ) ||
+        (
+          next !== undefined &&
+          COORDINATING_CONJUNCTIONS.has(
+            next.key,
+          )
+        )
+      )
+    ) {
+      return boundary;
+    }
+  }
+
+  if (
+    !isProtectedBoundary(
+      tokens,
+      preferredMaximum,
+    )
+  ) {
+    return preferredMaximum;
+  }
+
+  for (
+    let boundary =
+      preferredMaximum + 1;
+    boundary < tokens.length;
+    boundary += 1
+  ) {
+    if (
+      !isProtectedBoundary(
+        tokens,
+        boundary,
+      )
+    ) {
+      return boundary;
+    }
+  }
+
+  return null;
+}
+
+function isProtectedBoundary(
+  tokens: readonly HypothesisToken[],
+  boundary: number,
+): boolean {
+  const left = tokens[boundary - 1];
+  const right = tokens[boundary];
+
+  return (
+    left !== undefined &&
+    right !== undefined &&
+    left.protected &&
+    right.protected
+  );
+}
+
+function joinTokenSurfaces(
+  tokens: readonly HypothesisToken[],
+): string {
+  return tokens
+    .map((token) => token.surface)
+    .join(" ")
+    .replace(
+      /\s+([,.;:!?%。，、！？：；）\]」』])/gu,
+      "$1",
+    )
+    .replace(
+      /([（\[「『“"])\s+/gu,
+      "$1",
+    );
+}
+
+function repeatedNgramExcess(
+  tokens: readonly HypothesisToken[],
+): number {
+  const keys = tokens.map(
+    (token) => token.key,
+  );
+  let excess = 0;
+
+  for (const size of [2, 3]) {
+    const counts = new Map<string, number>();
+
+    for (
+      let index = 0;
+      index + size <= keys.length;
+      index += 1
+    ) {
+      const ngram = keys
+        .slice(index, index + size)
+        .join("\u0000");
+      counts.set(
+        ngram,
+        (counts.get(ngram) ?? 0) + 1,
+      );
+    }
+
+    for (const count of counts.values()) {
+      excess += Math.max(0, count - 1);
+    }
+  }
+
+  return excess;
 }
 
 export function maxRmsForRange(
@@ -486,7 +1068,8 @@ export function computeMaxWindowRms(
     maximum = Math.max(
       maximum,
       Math.sqrt(
-        sumSquares / Math.max(1, end - start),
+        sumSquares /
+          Math.max(1, end - start),
       ),
     );
   }
