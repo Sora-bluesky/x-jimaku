@@ -127,6 +127,10 @@ const sourceLanguageSelect =
   requireElement<HTMLSelectElement>(
     "source-language-select",
   );
+const showOriginalInput =
+  requireElement<HTMLInputElement>(
+    "show-original",
+  );
 const settingsStatus =
   requireElement<HTMLElement>(
     "settings-status",
@@ -274,6 +278,13 @@ sourceLanguageSelect.addEventListener(
   },
 );
 
+showOriginalInput.addEventListener(
+  "change",
+  () => {
+    void saveSelectedSettings();
+  },
+);
+
 chrome.storage.onChanged.addListener(
   (changes, areaName) => {
     if (
@@ -292,6 +303,8 @@ chrome.storage.onChanged.addListener(
       modelSelect.value = next.model;
       sourceLanguageSelect.value =
         next.sourceLang;
+      showOriginalInput.checked =
+        next.showOriginal;
       return;
     }
 
@@ -429,6 +442,8 @@ async function initializeSettings(): Promise<void> {
     modelSelect.value = settings.model;
     sourceLanguageSelect.value =
       settings.sourceLang;
+    showOriginalInput.checked =
+      settings.showOriginal;
   } catch (error) {
     console.error(
       "[options]",
@@ -461,8 +476,7 @@ async function saveSelectedSettings(): Promise<void> {
     return;
   }
 
-  modelSelect.disabled = true;
-  sourceLanguageSelect.disabled = true;
+  setSettingsControlsDisabled(true);
   settingsStatus.textContent =
     "設定を保存しています…";
 
@@ -471,6 +485,8 @@ async function saveSelectedSettings(): Promise<void> {
       model: selectedModel,
       sourceLang:
         selectedSourceLanguage,
+      showOriginal:
+        showOriginalInput.checked,
     });
 
     settingsStatus.textContent =
@@ -484,9 +500,16 @@ async function saveSelectedSettings(): Promise<void> {
     settingsStatus.textContent =
       `設定の保存に失敗しました: ${toProbeError(error).message}`;
   } finally {
-    modelSelect.disabled = false;
-    sourceLanguageSelect.disabled = false;
+    setSettingsControlsDisabled(false);
   }
+}
+
+function setSettingsControlsDisabled(
+  disabled: boolean,
+): void {
+  modelSelect.disabled = disabled;
+  sourceLanguageSelect.disabled = disabled;
+  showOriginalInput.disabled = disabled;
 }
 
 async function refreshTranslationAvailability(): Promise<void> {

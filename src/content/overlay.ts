@@ -12,6 +12,7 @@ const INTERIM_PRIMARY_FONT_SCALE = 0.86;
 const INTERIM_PRIMARY_LINE_HEIGHT = 1.16;
 const INTERIM_ORIGINAL_FONT_SCALE = 0.64;
 const INTERIM_ORIGINAL_LINE_HEIGHT = 1.16;
+const MAX_STALE_INTERIM_ADVANCES = 2;
 
 function clampCaptionTail(
   text: string,
@@ -45,11 +46,13 @@ export type CaptionOverlayStatus =
 
 export interface CaptionOverlayOptions {
   getTargetVideo(): HTMLVideoElement | null;
+  showOriginal: boolean;
   onCaptionFadeOut?(): void;
 }
 
 export class CaptionOverlay {
   private readonly options: CaptionOverlayOptions;
+  private readonly showOriginal: boolean;
   private readonly host: HTMLDivElement;
   private readonly captionStack: HTMLDivElement;
   private readonly translationBadge:
@@ -83,12 +86,22 @@ export class CaptionOverlay {
     | TranslationPath
     | null = null;
   private progress: number | undefined;
+  private highestFinalId: number | null = null;
+  private highestShownFinalId:
+    | number
+    | null = null;
   private finalId: number | null = null;
+  private finalEnglishText = "";
+  private finalJapaneseText = "";
   private interimId: number | null = null;
   private interimEnglishText = "";
   private interimJapaneseText = "";
   private interimEnglishAt: string | null =
     null;
+  private interimSnapshotVersion = 0;
+  private interimJapaneseVersion:
+    | number
+    | null = null;
   private frameId: number | null = null;
   private mutationTimerId: number | null =
     null;
@@ -101,6 +114,8 @@ export class CaptionOverlay {
 
   constructor(options: CaptionOverlayOptions) {
     this.options = options;
+    this.showOriginal =
+      options.showOriginal;
 
     this.host = document.createElement("div");
     this.host.id = HOST_ID;
@@ -224,7 +239,9 @@ export class CaptionOverlay {
     this.refreshOtherVideos();
     this.startFrameLoop();
 
-    console.log("[overlay]", "overlay created");
+    console.log("[overlay]", "overlay created", {
+      showOriginal: this.showOriginal,
+    });
   }
 
   showCaption(line: CaptionLine): void {
@@ -235,101 +252,18 @@ export class CaptionOverlay {
     const text = line.text.trim();
     const ja = line.ja?.trim() ?? "";
 
-    this.captionBarEnabled = true;
-    this.cancelFinalFade();
-
     if (line.final) {
-      if (
-        this.finalId !== null &&
-        line.id < this.finalId
-      ) {
-        this.scheduleFinalFade();
-        return;
-      }
-
-      if (
-        this.interimId === line.id ||
-        (
-          this.interimId !== null &&
-          this.interimId <= line.id
-        )
-      ) {
-        this.clearInterimCaption();
-      }
-
-      if (text === "") {
-        this.updateLayout();
-        return;
-      }
-
-      this.finalId = line.id;
-
-      if (ja !== "") {
-        this.finalPrimaryLine.textContent =
-          clampCaptionTail(
-            ja,
-            MAX_PRIMARY_CAPTION_CHARS,
-          );
-        this.finalOriginalLine.textContent =
-          clampCaptionTail(
-            text,
-            MAX_SECONDARY_CAPTION_CHARS,
-          );
-      } else {
-        this.finalPrimaryLine.textContent =
-          clampCaptionTail(
-            text,
-            MAX_SECONDARY_CAPTION_CHARS,
-          );
-        this.finalOriginalLine.textContent =
-          "";
-      }
-
-      this.finalLine.classList.remove(
-        "is-empty",
-        "is-fading",
+      this.showFinalCaption(
+        line,
+        text,
+        ja,
       );
-      this.scheduleFinalFade();
     } else {
-      if (
-        (
-          this.finalId !== null &&
-          line.id <= this.finalId
-        ) ||
-        (
-          this.interimId !== null &&
-          line.id < this.interimId
-        )
-      ) {
-        if (this.hasFinalCaption()) {
-          this.scheduleFinalFade();
-        }
-        return;
-      }
-
-      const isCurrentInterim =
-        this.interimId === line.id;
-      const shouldUpdateEnglish =
-        !isCurrentInterim ||
-        this.interimEnglishAt === null ||
-        line.at >= this.interimEnglishAt;
-
-      this.interimId = line.id;
-
-      if (shouldUpdateEnglish) {
-        this.interimEnglishText = text;
-        this.interimEnglishAt = line.at;
-      }
-
-      if (ja !== "") {
-        this.interimJapaneseText = ja;
-      }
-
-      this.renderInterimCaption();
-
-      if (this.hasFinalCaption()) {
-        this.scheduleFinalFade();
-      }
+      this.showInterimCaption(
+        line,
+        text,
+        ja,
+      );
     }
 
     this.refreshTarget();
@@ -345,6 +279,8 @@ export class CaptionOverlay {
     this.cancelFinalFade();
     this.captionBarEnabled = false;
     this.finalId = null;
+    this.finalEnglishText = "";
+    this.finalJapaneseText = "";
     this.finalPrimaryLine.textContent = "";
     this.finalOriginalLine.textContent = "";
     this.clearInterimCaption();
@@ -368,6 +304,9 @@ export class CaptionOverlay {
 
     this.translationPath = path;
     this.updateTranslationBadge();
+    this.renderFinalCaption();
+    this.syncFinalFadeAfterRender();
+    this.renderInterimCaption();
     this.updateLayout();
   }
 
@@ -435,22 +374,304 @@ export class CaptionOverlay {
     console.log("[overlay]", "overlay destroyed");
   }
 
-  private renderInterimCaption(): void {
-    if (this.interimJapaneseText !== "") {
-      this.interimPrimaryLine.textContent =
-        clampCaptionTail(
-          this.interimJapaneseText,
-          MAX_PRIMARY_CAPTION_CHARS,
-        );
-      this.interimOriginalLine.textContent =
-        clampCaptionTail(
-          this.interimEnglishText,
-          MAX_SECONDARY_CAPTION_CHARS,
-        );
-      this.interimLine.classList.add(
-        "has-translation",
+  private showFinalCaption(
+    line: CaptionLine,
+    text: string,
+    ja: string,
+  ): void {
+    const highestShownFinalId =
+      this.highestShownFinalId;
+
+    if (
+      highestShownFinalId !== null &&
+      line.id < highestShownFinalId
+    ) {
+      this.refreshFinalFadeIfVisible();
+      return;
+    }
+
+    if (
+      highestShownFinalId === line.id &&
+      this.finalId !== line.id
+    ) {
+      return;
+    }
+
+    if (text === "") {
+      this.refreshFinalFadeIfVisible();
+      return;
+    }
+
+    const incomingIsRenderable =
+      this.showOriginal ||
+      this.translationPath === "none" ||
+      ja !== "";
+
+    if (
+      this.finalId !== null &&
+      line.id < this.finalId &&
+      !incomingIsRenderable
+    ) {
+      this.refreshFinalFadeIfVisible();
+      return;
+    }
+
+    const isNewFinal =
+      this.finalId !== line.id;
+
+    this.captionBarEnabled = true;
+    this.cancelFinalFade();
+
+    this.highestFinalId =
+      this.highestFinalId === null
+        ? line.id
+        : Math.max(
+            this.highestFinalId,
+            line.id,
+          );
+
+    if (isNewFinal) {
+      this.finalId = line.id;
+      this.finalEnglishText = text;
+      this.finalJapaneseText = "";
+    } else {
+      this.finalEnglishText = text;
+    }
+
+    if (ja !== "") {
+      this.finalJapaneseText = ja;
+    }
+
+    if (
+      this.interimId === line.id ||
+      (
+        this.interimId !== null &&
+        this.interimId <= line.id
+      )
+    ) {
+      this.clearInterimCaption();
+    }
+
+    this.renderFinalCaption();
+    this.syncFinalFadeAfterRender();
+  }
+
+  private showInterimCaption(
+    line: CaptionLine,
+    text: string,
+    ja: string,
+  ): void {
+    if (
+      (
+        this.highestFinalId !== null &&
+        line.id <= this.highestFinalId
+      ) ||
+      (
+        this.interimId !== null &&
+        line.id < this.interimId
+      )
+    ) {
+      this.refreshFinalFadeIfVisible();
+      return;
+    }
+
+    if (text === "") {
+      this.refreshFinalFadeIfVisible();
+      return;
+    }
+
+    if (
+      this.interimId === null ||
+      line.id > this.interimId
+    ) {
+      this.beginInterimCaption(line.id);
+    }
+
+    if (ja === "") {
+      if (
+        !this.shouldAdvanceInterimSnapshot(
+          line.at,
+          text,
+        )
+      ) {
+        this.refreshFinalFadeIfVisible();
+        return;
+      }
+
+      this.advanceInterimSnapshot(
+        line.at,
+        text,
       );
     } else {
+      if (
+        !this.matchOrAdvanceTranslatedInterim(
+          line.at,
+          text,
+        )
+      ) {
+        this.refreshFinalFadeIfVisible();
+        return;
+      }
+
+      this.interimJapaneseText = ja;
+      this.interimJapaneseVersion =
+        this.interimSnapshotVersion;
+    }
+
+    this.captionBarEnabled = true;
+    this.renderInterimCaption();
+    this.refreshFinalFadeIfVisible();
+  }
+
+  private beginInterimCaption(
+    id: number,
+  ): void {
+    this.interimId = id;
+    this.interimEnglishText = "";
+    this.interimJapaneseText = "";
+    this.interimEnglishAt = null;
+    this.interimSnapshotVersion = 0;
+    this.interimJapaneseVersion = null;
+  }
+
+  private shouldAdvanceInterimSnapshot(
+    at: string,
+    text: string,
+  ): boolean {
+    if (this.interimEnglishAt === null) {
+      return true;
+    }
+
+    return (
+      at > this.interimEnglishAt ||
+      (
+        at === this.interimEnglishAt &&
+        text !== this.interimEnglishText
+      )
+    );
+  }
+
+  private advanceInterimSnapshot(
+    at: string,
+    text: string,
+  ): void {
+    this.interimSnapshotVersion += 1;
+    this.interimEnglishAt = at;
+    this.interimEnglishText = text;
+
+    if (
+      this.interimJapaneseVersion !== null &&
+      this.interimSnapshotVersion -
+        this.interimJapaneseVersion >=
+        MAX_STALE_INTERIM_ADVANCES
+    ) {
+      this.interimJapaneseText = "";
+      this.interimJapaneseVersion = null;
+    }
+  }
+
+  private matchOrAdvanceTranslatedInterim(
+    at: string,
+    text: string,
+  ): boolean {
+    if (this.interimEnglishAt === null) {
+      this.advanceInterimSnapshot(
+        at,
+        text,
+      );
+      return true;
+    }
+
+    if (at < this.interimEnglishAt) {
+      return false;
+    }
+
+    if (at > this.interimEnglishAt) {
+      this.advanceInterimSnapshot(
+        at,
+        text,
+      );
+      return true;
+    }
+
+    return text === this.interimEnglishText;
+  }
+
+  private renderFinalCaption(): void {
+    if (this.finalId === null) {
+      this.finalPrimaryLine.textContent = "";
+      this.finalOriginalLine.textContent = "";
+      this.finalLine.classList.add(
+        "is-empty",
+      );
+      return;
+    }
+
+    const useEnglishFallback =
+      this.translationPath === "none";
+
+    if (useEnglishFallback) {
+      this.finalPrimaryLine.textContent =
+        clampCaptionTail(
+          this.finalEnglishText,
+          MAX_SECONDARY_CAPTION_CHARS,
+        );
+      this.finalOriginalLine.textContent =
+        "";
+    } else if (
+      this.finalJapaneseText !== ""
+    ) {
+      this.finalPrimaryLine.textContent =
+        clampCaptionTail(
+          this.finalJapaneseText,
+          MAX_PRIMARY_CAPTION_CHARS,
+        );
+      this.finalOriginalLine.textContent =
+        this.showOriginal
+          ? clampCaptionTail(
+              this.finalEnglishText,
+              MAX_SECONDARY_CAPTION_CHARS,
+            )
+          : "";
+    } else if (this.showOriginal) {
+      this.finalPrimaryLine.textContent =
+        clampCaptionTail(
+          this.finalEnglishText,
+          MAX_SECONDARY_CAPTION_CHARS,
+        );
+      this.finalOriginalLine.textContent =
+        "";
+    } else {
+      this.finalPrimaryLine.textContent = "";
+      this.finalOriginalLine.textContent = "";
+    }
+
+    this.finalLine.classList.toggle(
+      "is-empty",
+      this.finalPrimaryLine.textContent === "",
+    );
+  }
+
+  private renderInterimCaption(): void {
+    if (this.interimId === null) {
+      this.interimPrimaryLine.textContent = "";
+      this.interimOriginalLine.textContent = "";
+      this.interimLine.classList.remove(
+        "has-translation",
+      );
+      this.interimLine.classList.add(
+        "is-empty",
+      );
+      return;
+    }
+
+    const useEnglishFallback =
+      this.translationPath === "none";
+    const showTranslated =
+      !useEnglishFallback &&
+      this.interimJapaneseText !== "";
+
+    if (useEnglishFallback) {
       this.interimPrimaryLine.textContent =
         clampCaptionTail(
           this.interimEnglishText,
@@ -458,11 +679,36 @@ export class CaptionOverlay {
         );
       this.interimOriginalLine.textContent =
         "";
-      this.interimLine.classList.remove(
-        "has-translation",
-      );
+    } else if (showTranslated) {
+      this.interimPrimaryLine.textContent =
+        clampCaptionTail(
+          this.interimJapaneseText,
+          MAX_PRIMARY_CAPTION_CHARS,
+        );
+      this.interimOriginalLine.textContent =
+        this.showOriginal
+          ? clampCaptionTail(
+              this.interimEnglishText,
+              MAX_SECONDARY_CAPTION_CHARS,
+            )
+          : "";
+    } else if (this.showOriginal) {
+      this.interimPrimaryLine.textContent =
+        clampCaptionTail(
+          this.interimEnglishText,
+          MAX_SECONDARY_CAPTION_CHARS,
+        );
+      this.interimOriginalLine.textContent =
+        "";
+    } else {
+      this.interimPrimaryLine.textContent = "";
+      this.interimOriginalLine.textContent = "";
     }
 
+    this.interimLine.classList.toggle(
+      "has-translation",
+      showTranslated,
+    );
     this.interimLine.classList.toggle(
       "is-empty",
       this.interimPrimaryLine.textContent === "",
@@ -474,6 +720,8 @@ export class CaptionOverlay {
     this.interimEnglishText = "";
     this.interimJapaneseText = "";
     this.interimEnglishAt = null;
+    this.interimSnapshotVersion = 0;
+    this.interimJapaneseVersion = null;
     this.interimPrimaryLine.textContent = "";
     this.interimOriginalLine.textContent = "";
     this.interimLine.classList.remove(
@@ -872,14 +1120,19 @@ export class CaptionOverlay {
       barHeight - verticalPadding * 2,
     );
 
+    const originalRowsInFontUnits =
+      this.showOriginal
+        ? FINAL_ORIGINAL_FONT_SCALE *
+            FINAL_ORIGINAL_LINE_HEIGHT +
+          INTERIM_ORIGINAL_FONT_SCALE *
+            INTERIM_ORIGINAL_LINE_HEIGHT
+        : 0;
+
     const rowHeightInFontUnits =
       FINAL_PRIMARY_LINE_HEIGHT * 2 +
-      FINAL_ORIGINAL_FONT_SCALE *
-        FINAL_ORIGINAL_LINE_HEIGHT +
       INTERIM_PRIMARY_FONT_SCALE *
         INTERIM_PRIMARY_LINE_HEIGHT +
-      INTERIM_ORIGINAL_FONT_SCALE *
-        INTERIM_ORIGINAL_LINE_HEIGHT;
+      originalRowsInFontUnits;
 
     const widthScaledFontSize = Math.max(
       14,
@@ -901,17 +1154,21 @@ export class CaptionOverlay {
       FINAL_PRIMARY_LINE_HEIGHT *
       2;
     const finalOriginalSlot =
-      fontSize *
-      FINAL_ORIGINAL_FONT_SCALE *
-      FINAL_ORIGINAL_LINE_HEIGHT;
+      this.showOriginal
+        ? fontSize *
+          FINAL_ORIGINAL_FONT_SCALE *
+          FINAL_ORIGINAL_LINE_HEIGHT
+        : 0;
     const interimPrimarySlot =
       fontSize *
       INTERIM_PRIMARY_FONT_SCALE *
       INTERIM_PRIMARY_LINE_HEIGHT;
     const interimOriginalSlot =
-      fontSize *
-      INTERIM_ORIGINAL_FONT_SCALE *
-      INTERIM_ORIGINAL_LINE_HEIGHT;
+      this.showOriginal
+        ? fontSize *
+          INTERIM_ORIGINAL_FONT_SCALE *
+          INTERIM_ORIGINAL_LINE_HEIGHT
+        : 0;
 
     this.captionStack.style.display =
       "flex";
@@ -1022,17 +1279,59 @@ export class CaptionOverlay {
     );
   }
 
-  private scheduleFinalFade(): void {
+  private syncFinalFadeAfterRender(): void {
     if (
-      this.destroyed ||
+      this.finalId === null ||
+      !this.hasFinalCaption()
+    ) {
+      this.cancelFinalFade();
+      return;
+    }
+
+    this.highestShownFinalId =
+      this.highestShownFinalId === null
+        ? this.finalId
+        : Math.max(
+            this.highestShownFinalId,
+            this.finalId,
+          );
+
+    this.scheduleFinalFade();
+  }
+
+  private refreshFinalFadeIfVisible(): void {
+    if (
+      this.finalId === null ||
       !this.hasFinalCaption()
     ) {
       return;
     }
 
+    this.cancelFinalFade();
+    this.scheduleFinalFade();
+  }
+
+  private scheduleFinalFade(): void {
+    if (
+      this.destroyed ||
+      this.finalId === null ||
+      !this.hasFinalCaption() ||
+      this.finalFadeTimerId !== null ||
+      this.finalRemovalTimerId !== null
+    ) {
+      return;
+    }
+
+    const expiringId = this.finalId;
+
     this.finalFadeTimerId =
       window.setTimeout(() => {
         this.finalFadeTimerId = null;
+
+        if (this.finalId !== expiringId) {
+          return;
+        }
+
         this.finalLine.classList.add(
           "is-fading",
         );
@@ -1040,7 +1339,14 @@ export class CaptionOverlay {
         this.finalRemovalTimerId =
           window.setTimeout(() => {
             this.finalRemovalTimerId = null;
+
+            if (this.finalId !== expiringId) {
+              return;
+            }
+
             this.finalId = null;
+            this.finalEnglishText = "";
+            this.finalJapaneseText = "";
             this.finalPrimaryLine.textContent =
               "";
             this.finalOriginalLine.textContent =
@@ -1151,9 +1457,9 @@ function getOverlayStyles(): string {
       --bar-padding-x: 12px;
       --bar-padding-y: 6px;
       --final-primary-slot: 40px;
-      --final-original-slot: 14px;
+      --final-original-slot: 0px;
       --interim-primary-slot: 14px;
-      --interim-original-slot: 12px;
+      --interim-original-slot: 0px;
 
       position: fixed;
       display: none;
