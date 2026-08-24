@@ -6,6 +6,7 @@ import {
   nowIso,
   toProbeError,
   type AdapterInfo,
+  type CsPcmMessage,
   type M1Message,
   type OffscreenProbeResult,
   type OffscreenProbeResultMessage,
@@ -59,10 +60,12 @@ interface WhisperSessionCallbacks {
 const OFFSCREEN_PORT_NAME = "offscreen";
 const INITIAL_RECONNECT_DELAY_MS = 100;
 const MAX_RECONNECT_DELAY_MS = 1_000;
+const PCM_GAP_LOG_INTERVAL_MS = 5_000;
 
 const audioCapture = new AudioCapture();
 
-let backgroundPort: chrome.runtime.Port | null = null;
+let backgroundPort: chrome.runtime.Port | null =
+  null;
 let reconnectTimerId: number | null = null;
 let reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
 let localCaptureState =
@@ -79,6 +82,12 @@ let activeSegmenter:
 let activeRecognitionRequestId:
   | string
   | null = null;
+let activePcmRequestId:
+  | string
+  | null = null;
+let expectedPcmSequence = 0;
+let lastPcmGapLogAt =
+  Number.NEGATIVE_INFINITY;
 let lastModelProgress = 0;
 
 const requestedStopIds = new Set<string>();
@@ -174,6 +183,13 @@ function connectBackgroundPort(): void {
         }
 
         if (
+          isMessageOfType(message, "CS_PCM")
+        ) {
+          handlePcm(message);
+          return;
+        }
+
+        if (
           isMessageOfType(message, "OFF_START")
         ) {
           requestedStopIds.delete(
@@ -182,7 +198,6 @@ function connectBackgroundPort(): void {
 
           void enqueueCaptureOperation(() =>
             handleCaptureStart(
-              message.streamId,
               message.requestId,
               message.settings,
             ),
@@ -283,8 +298,74 @@ function enqueueCaptureOperation(
   return next;
 }
 
+function handlePcm(
+  message: CsPcmMessage,
+): void {
+  if (
+    activePcmRequestId !==
+      message.requestId ||
+    requestedStopIds.has(
+      message.requestId,
+    ) ||
+    !audioCapture.isActive()
+  ) {
+    return;
+  }
+
+  detectPcmSequenceGap(message.seq);
+
+  try {
+    const samples =
+      decodeFloat32Base64(message.b64);
+
+    audioCapture.acceptPcm(
+      message.requestId,
+      samples,
+    );
+  } catch (error) {
+    console.warn(
+      "[offscreen]",
+      "ignored invalid PCM chunk",
+      {
+        requestId: message.requestId,
+        seq: message.seq,
+        error,
+      },
+    );
+  }
+}
+
+function detectPcmSequenceGap(
+  receivedSequence: number,
+): void {
+  if (
+    receivedSequence !==
+    expectedPcmSequence
+  ) {
+    const now = performance.now();
+
+    if (
+      now - lastPcmGapLogAt >=
+      PCM_GAP_LOG_INTERVAL_MS
+    ) {
+      lastPcmGapLogAt = now;
+
+      console.warn(
+        "[offscreen]",
+        "PCM sequence gap detected",
+        {
+          expected: expectedPcmSequence,
+          received: receivedSequence,
+        },
+      );
+    }
+  }
+
+  expectedPcmSequence =
+    receivedSequence + 1;
+}
+
 async function handleCaptureStart(
-  streamId: string,
   requestId: string,
   settings: Settings,
 ): Promise<void> {
@@ -308,7 +389,7 @@ async function handleCaptureStart(
         error: {
           name: "InvalidStateError",
           message:
-            "An audio capture session is already active",
+            "A PCM capture session is already active",
         },
       }),
     );
@@ -326,63 +407,17 @@ async function handleCaptureStart(
       latestRms = rms;
       postLevel();
     },
-
-    onEnded(endedRequestId) {
-      requestedStopIds.add(endedRequestId);
-      terminateRecognition(endedRequestId);
-
-      void enqueueCaptureOperation(async () => {
-        if (
-          localCaptureState.requestId !==
-          endedRequestId
-        ) {
-          requestedStopIds.delete(
-            endedRequestId,
-          );
-          return;
-        }
-
-        publishState(
-          createCaptureState("stopping", {
-            requestId: endedRequestId,
-            ...(localCaptureState.model ===
-            undefined
-              ? {}
-              : {
-                  model:
-                    localCaptureState.model,
-                }),
-            ...(localCaptureState.device ===
-            undefined
-              ? {}
-              : {
-                  device:
-                    localCaptureState.device,
-                }),
-          }),
-        );
-
-        latestRms = 0;
-        postLevel();
-
-        publishState(
-          createCaptureState("idle", {
-            requestId: endedRequestId,
-          }),
-        );
-
-        requestedStopIds.delete(
-          endedRequestId,
-        );
-      });
-    },
   };
 
   let model: WhisperModel | undefined;
 
   try {
+    activePcmRequestId = requestId;
+    expectedPcmSequence = 0;
+    lastPcmGapLogAt =
+      Number.NEGATIVE_INFINITY;
+
     await audioCapture.start(
-      streamId,
       requestId,
       callbacks,
     );
@@ -392,11 +427,6 @@ async function handleCaptureStart(
     }
 
     model = settings.model;
-
-    if (requestedStopIds.has(requestId)) {
-      return;
-    }
-
     lastModelProgress = 0;
 
     publishState(
@@ -585,11 +615,15 @@ async function handleCaptureStart(
       }),
     );
 
-    console.log("[offscreen]", "capture running", {
-      requestId,
-      model,
-      device,
-    });
+    console.log(
+      "[offscreen]",
+      "recognition running",
+      {
+        requestId,
+        model,
+        device,
+      },
+    );
   } catch (error) {
     if (
       requestedStopIds.has(requestId) ||
@@ -605,13 +639,14 @@ async function handleCaptureStart(
     );
 
     terminateRecognition(requestId);
+    activePcmRequestId = null;
 
     try {
       await audioCapture.stop();
     } catch (cleanupError) {
       console.error(
         "[offscreen]",
-        "capture cleanup after startup failure failed",
+        "PCM sink cleanup after startup failure failed",
         cleanupError,
       );
     }
@@ -639,7 +674,10 @@ async function handleCaptureStop(
       requestId,
       ...(localCaptureState.model === undefined
         ? {}
-        : { model: localCaptureState.model }),
+        : {
+            model:
+              localCaptureState.model,
+          }),
       ...(localCaptureState.device === undefined
         ? {}
         : {
@@ -650,6 +688,10 @@ async function handleCaptureStop(
   );
 
   terminateRecognition(requestId);
+
+  if (activePcmRequestId === requestId) {
+    activePcmRequestId = null;
+  }
 
   try {
     await audioCapture.stop();
@@ -663,9 +705,11 @@ async function handleCaptureStop(
       }),
     );
 
-    console.log("[offscreen]", "capture stopped", {
-      requestId,
-    });
+    console.log(
+      "[offscreen]",
+      "capture stopped",
+      { requestId },
+    );
   } catch (error) {
     console.error(
       "[offscreen]",
@@ -705,12 +749,14 @@ async function handleRecognitionFatal(
       return;
     }
 
+    activePcmRequestId = null;
+
     try {
       await audioCapture.stop();
     } catch (cleanupError) {
       console.error(
         "[offscreen]",
-        "audio cleanup after fatal recognition failure failed",
+        "PCM sink cleanup after fatal recognition failure failed",
         cleanupError,
       );
     }
@@ -767,6 +813,36 @@ function createWhisperWorker(): Worker {
     ),
     { type: "module" },
   );
+}
+
+function decodeFloat32Base64(
+  b64: string,
+): Float32Array {
+  const binary = atob(b64);
+
+  if (
+    binary.length %
+    Float32Array.BYTES_PER_ELEMENT !==
+    0
+  ) {
+    throw new RangeError(
+      "PCM byte length is not aligned to Float32 samples",
+    );
+  }
+
+  const bytes =
+    new Uint8Array(binary.length);
+
+  for (
+    let index = 0;
+    index < binary.length;
+    index += 1
+  ) {
+    bytes[index] =
+      binary.charCodeAt(index);
+  }
+
+  return new Float32Array(bytes.buffer);
 }
 
 function postRecognition(
