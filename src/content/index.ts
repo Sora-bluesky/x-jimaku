@@ -48,7 +48,14 @@ let contentTranslationTail: Promise<void> =
 let contentTranslator:
   | TranslatorInstance
   | null = null;
+let contentTranslatorCreatePromise:
+  | Promise<TranslatorInstance | null>
+  | null = null;
+let contentTranslatorCreateGeneration:
+  | number
+  | null = null;
 let contentTranslatorCreateAttempted = false;
+let contentTranslatorGeneration = 0;
 let contentSessionRequestId:
   | string
   | null = null;
@@ -381,28 +388,35 @@ function enqueueContentTranslation(
 async function handleContentTranslation(
   message: CsTranslateMessage,
 ): Promise<void> {
+  const sessionGeneration =
+    contentTranslatorGeneration;
+
   if (
-    contentSessionRequestId !==
-      message.requestId
+    !isContentTranslationSessionCurrent(
+      message.requestId,
+      sessionGeneration,
+    )
   ) {
-    postTranslationResult({
-      t: "CS_TRANSLATE_RESULT",
-      requestId: message.requestId,
-      id: message.id,
-      ja: "",
-      available: false,
-      error: {
-        name: "AbortError",
-        message:
-          "Translation request does not belong to the active content session",
-      },
-    });
+    postAbortedContentTranslation(message);
     return;
   }
 
   try {
     const translator =
-      await ensureContentTranslator();
+      await ensureContentTranslator(
+        message.requestId,
+        sessionGeneration,
+      );
+
+    if (
+      !isContentTranslationSessionCurrent(
+        message.requestId,
+        sessionGeneration,
+      )
+    ) {
+      postAbortedContentTranslation(message);
+      return;
+    }
 
     if (translator === null) {
       postTranslationResult({
@@ -432,9 +446,12 @@ async function handleContentTranslation(
       );
 
     if (
-      contentSessionRequestId !==
-        message.requestId
+      !isContentTranslationSessionCurrent(
+        message.requestId,
+        sessionGeneration,
+      )
     ) {
+      postAbortedContentTranslation(message);
       return;
     }
 
@@ -446,6 +463,16 @@ async function handleContentTranslation(
       available: true,
     });
   } catch (error) {
+    if (
+      !isContentTranslationSessionCurrent(
+        message.requestId,
+        sessionGeneration,
+      )
+    ) {
+      postAbortedContentTranslation(message);
+      return;
+    }
+
     destroyContentTranslator();
 
     postTranslationResult({
@@ -459,52 +486,181 @@ async function handleContentTranslation(
   }
 }
 
-async function ensureContentTranslator(): Promise<
-  TranslatorInstance | null
-> {
-  if (contentTranslator !== null) {
-    return contentTranslator;
-  }
-
-  if (contentTranslatorCreateAttempted) {
-    return null;
-  }
-
-  const scope =
-    globalThis as TranslatorScope;
-  const factory = scope.Translator;
-
-  if (
-    !("Translator" in scope) ||
-    factory === undefined ||
-    typeof factory.availability !==
-      "function" ||
-    typeof factory.create !== "function"
+async function ensureContentTranslator(
+  requestId: string,
+  generation: number,
+): Promise<TranslatorInstance | null> {
+  while (
+    isContentTranslationSessionCurrent(
+      requestId,
+      generation,
+    )
   ) {
-    return null;
+    if (contentTranslator !== null) {
+      return contentTranslator;
+    }
+
+    let createPromise =
+      contentTranslatorCreatePromise;
+    let createGeneration =
+      contentTranslatorCreateGeneration;
+
+    if (createPromise === null) {
+      if (contentTranslatorCreateAttempted) {
+        return null;
+      }
+
+      createGeneration = generation;
+      createPromise =
+        createContentTranslator(
+          requestId,
+          generation,
+        );
+      contentTranslatorCreatePromise =
+        createPromise;
+      contentTranslatorCreateGeneration =
+        createGeneration;
+    }
+
+    let translator:
+      | TranslatorInstance
+      | null;
+
+    try {
+      translator = await createPromise;
+    } finally {
+      if (
+        contentTranslatorCreatePromise ===
+          createPromise
+      ) {
+        contentTranslatorCreatePromise = null;
+        contentTranslatorCreateGeneration =
+          null;
+      }
+    }
+
+    if (
+      !isContentTranslationSessionCurrent(
+        requestId,
+        generation,
+      )
+    ) {
+      return null;
+    }
+
+    if (createGeneration !== generation) {
+      continue;
+    }
+
+    return translator;
   }
 
-  const availability =
-    await factory.availability({
-      sourceLanguage: "en",
-      targetLanguage: "ja",
-    });
+  return null;
+}
 
-  if (availability !== "available") {
-    return null;
+async function createContentTranslator(
+  requestId: string,
+  generation: number,
+): Promise<TranslatorInstance | null> {
+  try {
+    const scope =
+      globalThis as TranslatorScope;
+    const factory = scope.Translator;
+
+    if (
+      !("Translator" in scope) ||
+      factory === undefined ||
+      typeof factory.availability !==
+        "function" ||
+      typeof factory.create !== "function"
+    ) {
+      return null;
+    }
+
+    const availability =
+      await factory.availability({
+        sourceLanguage: "en",
+        targetLanguage: "ja",
+      });
+
+    if (
+      !isContentTranslationSessionCurrent(
+        requestId,
+        generation,
+      )
+    ) {
+      return null;
+    }
+
+    if (availability !== "available") {
+      return null;
+    }
+
+    contentTranslatorCreateAttempted = true;
+
+    const translator =
+      await factory.create({
+        sourceLanguage: "en",
+        targetLanguage: "ja",
+      });
+
+    if (
+      !isContentTranslationSessionCurrent(
+        requestId,
+        generation,
+      )
+    ) {
+      destroyContentTranslatorInstance(
+        translator,
+      );
+      return null;
+    }
+
+    contentTranslator = translator;
+    return translator;
+  } catch (error) {
+    if (
+      !isContentTranslationSessionCurrent(
+        requestId,
+        generation,
+      )
+    ) {
+      return null;
+    }
+
+    throw error;
   }
+}
 
-  contentTranslatorCreateAttempted = true;
-  contentTranslator =
-    await factory.create({
-      sourceLanguage: "en",
-      targetLanguage: "ja",
-    });
+function isContentTranslationSessionCurrent(
+  requestId: string,
+  generation: number,
+): boolean {
+  return (
+    contentSessionRequestId === requestId &&
+    contentTranslatorGeneration === generation
+  );
+}
 
-  return contentTranslator;
+function postAbortedContentTranslation(
+  message: CsTranslateMessage,
+): void {
+  postTranslationResult({
+    t: "CS_TRANSLATE_RESULT",
+    requestId: message.requestId,
+    id: message.id,
+    ja: "",
+    available: false,
+    error: {
+      name: "AbortError",
+      message:
+        "Translation request was aborted because the content session changed",
+    },
+  });
 }
 
 function resetContentTranslator(): void {
+  contentTranslatorGeneration += 1;
   destroyContentTranslator();
   contentTranslatorCreateAttempted = false;
   contentTranslationTail =
@@ -519,6 +675,14 @@ function destroyContentTranslator(): void {
     return;
   }
 
+  destroyContentTranslatorInstance(
+    translator,
+  );
+}
+
+function destroyContentTranslatorInstance(
+  translator: TranslatorInstance,
+): void {
   try {
     translator.destroy();
   } catch (error) {
