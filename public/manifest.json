@@ -10,6 +10,14 @@
   "action": {
     "default_title": "日本語字幕 ON/OFF"
   },
+  "commands": {
+    "_execute_action": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+9"
+      },
+      "description": "字幕 ON/OFF"
+    }
+  },
   "options_page": "options.html",
   "permissions": [
     "tabCapture",

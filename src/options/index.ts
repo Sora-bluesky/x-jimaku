@@ -11,6 +11,10 @@ import {
   type TranslatorProbeResult,
   type WebGpuProbeResult,
 } from "../shared/messages";
+import type {
+  CaptureState,
+  CaptureStatus,
+} from "../shared/state";
 
 interface GpuLike {
   requestAdapter(): Promise<GpuAdapterLike | null>;
@@ -32,12 +36,38 @@ type TableValue =
   | undefined
   | object;
 
+const OPTIONS_PORT_NAME = "options";
+const INITIAL_RECONNECT_DELAY_MS = 250;
+const MAX_RECONNECT_DELAY_MS = 4_000;
+
+const runDiagnosticsButton =
+  requireElement<HTMLButtonElement>(
+    "run-diagnostics",
+  );
 const runTranslatorButton =
-  requireElement<HTMLButtonElement>("run-translator");
+  requireElement<HTMLButtonElement>(
+    "run-translator",
+  );
 const fetchLastButton =
   requireElement<HTMLButtonElement>("fetch-last");
 const statusElement =
-  requireElement<HTMLElement>("status");
+  requireElement<HTMLElement>("probe-status");
+const captureStateDot =
+  requireElement<HTMLElement>(
+    "capture-state-dot",
+  );
+const captureStateName =
+  requireElement<HTMLElement>(
+    "capture-state-name",
+  );
+const levelMeter =
+  requireElement<HTMLElement>("level-meter");
+const levelFill =
+  requireElement<HTMLElement>("level-fill");
+const levelValue =
+  requireElement<HTMLOutputElement>(
+    "level-value",
+  );
 const environmentResults =
   requireElement<HTMLTableSectionElement>(
     "environment-results",
@@ -57,10 +87,20 @@ const storedResults =
 
 const optionsWebGpuPromise = probeWebGpu();
 
+let optionsPort: chrome.runtime.Port | null = null;
+let reconnectTimerId: number | null = null;
+let reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
+let meterTarget = 0;
+let meterCurrent = 0;
+let meterAnimationPending = false;
+
 console.log("[options]", "diagnostics page loaded");
 
 renderRows(environmentResults, [
-  ["Extension version", chrome.runtime.getManifest().version],
+  [
+    "Extension version",
+    chrome.runtime.getManifest().version,
+  ],
   ["User agent", navigator.userAgent],
   [
     "Chrome version",
@@ -76,9 +116,24 @@ renderRows(storedResults, [
   ["状態", "未取得"],
 ]);
 
+renderCaptureState({
+  status: "idle",
+  updatedAt: nowIso(),
+});
+
+connectOptionsPort();
+
 void optionsWebGpuPromise.then((result) => {
-  console.log("[options]", "WebGPU probe complete", result);
+  console.log(
+    "[options]",
+    "WebGPU probe complete",
+    result,
+  );
   renderWebGpu(result);
+});
+
+runDiagnosticsButton.addEventListener("click", () => {
+  void runBackgroundDiagnostics();
 });
 
 runTranslatorButton.addEventListener("click", () => {
@@ -89,9 +144,152 @@ fetchLastButton.addEventListener("click", () => {
   void fetchLastProbeResults();
 });
 
+function connectOptionsPort(): void {
+  if (optionsPort !== null) {
+    return;
+  }
+
+  if (reconnectTimerId !== null) {
+    globalThis.clearTimeout(reconnectTimerId);
+    reconnectTimerId = null;
+  }
+
+  try {
+    const port = chrome.runtime.connect({
+      name: OPTIONS_PORT_NAME,
+    });
+
+    optionsPort = port;
+    reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
+
+    port.onMessage.addListener(
+      (message: unknown) => {
+        if (
+          isMessageOfType(message, "OFF_STATE")
+        ) {
+          renderCaptureState(message.state);
+          return;
+        }
+
+        if (
+          isMessageOfType(message, "OFF_LEVEL")
+        ) {
+          updateMeter(message.rms);
+        }
+      },
+    );
+
+    port.onDisconnect.addListener(() => {
+      if (optionsPort === port) {
+        optionsPort = null;
+      }
+
+      const disconnectError =
+        chrome.runtime.lastError?.message;
+
+      console.warn(
+        "[options]",
+        "background port disconnected",
+        disconnectError ?? "",
+      );
+
+      schedulePortReconnect();
+    });
+
+    console.log(
+      "[options]",
+      "background port connected",
+    );
+  } catch (error) {
+    console.warn(
+      "[options]",
+      "could not connect background port",
+      error,
+    );
+    schedulePortReconnect();
+  }
+}
+
+function schedulePortReconnect(): void {
+  if (reconnectTimerId !== null) {
+    return;
+  }
+
+  const delay = reconnectDelayMs;
+  reconnectDelayMs = Math.min(
+    reconnectDelayMs * 2,
+    MAX_RECONNECT_DELAY_MS,
+  );
+
+  reconnectTimerId = globalThis.setTimeout(() => {
+    reconnectTimerId = null;
+    connectOptionsPort();
+  }, delay);
+}
+
+async function runBackgroundDiagnostics(): Promise<void> {
+  setBusy(runDiagnosticsButton, true);
+  setStatus(
+    "Offscreen documentとWorkerの診断を実行しています…",
+  );
+
+  const requestId =
+    createProbeRequestId("options-diagnostics");
+
+  try {
+    const response = (await chrome.runtime.sendMessage({
+      t: "RUN_DIAGNOSTICS",
+      requestId,
+    })) as unknown;
+
+    if (
+      isMessageOfType(
+        response,
+        "DIAGNOSTICS_RESULT",
+      ) &&
+      response.requestId === requestId
+    ) {
+      renderSnapshot(response.snapshot);
+      setStatus(
+        "Offscreen documentとWorkerの診断が完了しました。",
+      );
+      console.log(
+        "[options]",
+        "background diagnostics complete",
+        response.snapshot,
+      );
+      return;
+    }
+
+    if (
+      isMessageOfType(response, "PROBE_ERROR") &&
+      response.requestId === requestId
+    ) {
+      throw new Error(response.error.message);
+    }
+
+    throw new Error(
+      "Background returned an invalid diagnostics response",
+    );
+  } catch (error) {
+    console.error(
+      "[options]",
+      "background diagnostics failed",
+      error,
+    );
+    setStatus(
+      `診断に失敗しました: ${toProbeError(error).message}`,
+    );
+  } finally {
+    setBusy(runDiagnosticsButton, false);
+  }
+}
+
 async function runOptionsTranslatorProbe(): Promise<void> {
   setBusy(runTranslatorButton, true);
-  setStatus("Translator availabilityを確認しています…");
+  setStatus(
+    "Translator availabilityを確認しています…",
+  );
 
   const requestId =
     createProbeRequestId("options-translator");
@@ -136,7 +334,7 @@ async function runOptionsTranslatorProbe(): Promise<void> {
       response.requestId === requestId
     ) {
       setStatus(
-        `Translator probe完了。結果を保存しました（${response.storedAt}）。`,
+        `Translator診断完了。結果を保存しました（${response.storedAt}）。`,
       );
       return;
     }
@@ -146,13 +344,13 @@ async function runOptionsTranslatorProbe(): Promise<void> {
       response.requestId === requestId
     ) {
       setStatus(
-        `プローブは完了しましたが保存に失敗しました: ${response.error.message}`,
+        `診断は完了しましたが保存に失敗しました: ${response.error.message}`,
       );
       return;
     }
 
     setStatus(
-      "プローブは完了しましたが、保存応答を確認できませんでした。",
+      "診断は完了しましたが、保存応答を確認できませんでした。",
     );
   } catch (error) {
     console.error(
@@ -161,7 +359,7 @@ async function runOptionsTranslatorProbe(): Promise<void> {
       error,
     );
     setStatus(
-      `Translator probeに失敗しました: ${toProbeError(error).message}`,
+      `Translator診断に失敗しました: ${toProbeError(error).message}`,
     );
   } finally {
     setBusy(runTranslatorButton, false);
@@ -170,14 +368,21 @@ async function runOptionsTranslatorProbe(): Promise<void> {
 
 async function fetchLastProbeResults(): Promise<void> {
   setBusy(fetchLastButton, true);
-  setStatus("保存済みプローブ結果を取得しています…");
+  setStatus(
+    "保存済みプローブ結果を取得しています…",
+  );
 
   try {
     const response = (await chrome.runtime.sendMessage({
       t: "GET_LAST_PROBE",
     })) as unknown;
 
-    if (isMessageOfType(response, "LAST_PROBE_RESULT")) {
+    if (
+      isMessageOfType(
+        response,
+        "LAST_PROBE_RESULT",
+      )
+    ) {
       renderSnapshot(response.snapshot);
       setStatus(
         response.snapshot === null
@@ -192,7 +397,9 @@ async function fetchLastProbeResults(): Promise<void> {
       return;
     }
 
-    if (isMessageOfType(response, "PROBE_ERROR")) {
+    if (
+      isMessageOfType(response, "PROBE_ERROR")
+    ) {
       throw new Error(response.error.message);
     }
 
@@ -317,7 +524,95 @@ async function probeTranslator(): Promise<TranslatorProbeResult> {
   }
 }
 
-function renderWebGpu(result: WebGpuProbeResult): void {
+function renderCaptureState(
+  state: CaptureState,
+): void {
+  captureStateName.textContent = state.status;
+  captureStateDot.dataset.state = state.status;
+  captureStateDot.title =
+    captureStatusDescription(state.status);
+
+  if (state.status !== "running") {
+    updateMeter(0);
+  }
+
+  if (
+    state.status === "error" &&
+    state.error !== undefined
+  ) {
+    captureStateName.textContent =
+      `${state.status}: ${state.error.message}`;
+  }
+}
+
+function captureStatusDescription(
+  status: CaptureStatus,
+): string {
+  switch (status) {
+    case "idle":
+      return "停止中";
+    case "starting":
+      return "開始処理中";
+    case "running":
+      return "キャプチャ中";
+    case "stopping":
+      return "停止処理中";
+    case "error":
+      return "エラー";
+  }
+}
+
+function updateMeter(rms: number): void {
+  const safeRms = Number.isFinite(rms)
+    ? Math.max(0, rms)
+    : 0;
+
+  meterTarget = Math.min(
+    1,
+    Math.sqrt(Math.min(1, safeRms)),
+  );
+  levelValue.value = safeRms.toFixed(4);
+  levelValue.textContent = safeRms.toFixed(4);
+
+  if (!meterAnimationPending) {
+    meterAnimationPending = true;
+    requestAnimationFrame(animateMeter);
+  }
+}
+
+function animateMeter(): void {
+  meterCurrent +=
+    (meterTarget - meterCurrent) * 0.24;
+
+  if (
+    Math.abs(meterTarget - meterCurrent) <
+    0.001
+  ) {
+    meterCurrent = meterTarget;
+  }
+
+  const percentage = Math.max(
+    0,
+    Math.min(100, meterCurrent * 100),
+  );
+
+  levelFill.style.width = `${percentage}%`;
+  levelMeter.setAttribute(
+    "aria-valuenow",
+    percentage.toFixed(1),
+  );
+
+  if (meterCurrent !== meterTarget) {
+    requestAnimationFrame(animateMeter);
+    return;
+  }
+
+  meterAnimationPending = false;
+}
+
+function renderWebGpu(
+  result: WebGpuProbeResult,
+): void {
   renderRows(webGpuResults, [
     ["navigator.gpu", result.apiAvailable],
     ["Adapter available", result.adapterAvailable],
@@ -455,7 +750,10 @@ function setBusy(
   busy: boolean,
 ): void {
   button.disabled = busy;
-  button.setAttribute("aria-busy", String(busy));
+  button.setAttribute(
+    "aria-busy",
+    String(busy),
+  );
 }
 
 function setStatus(message: string): void {
@@ -468,7 +766,9 @@ function requireElement<T extends HTMLElement>(
   const element = document.getElementById(id);
 
   if (element === null) {
-    throw new Error(`Missing required element #${id}`);
+    throw new Error(
+      `Missing required element #${id}`,
+    );
   }
 
   return element as T;

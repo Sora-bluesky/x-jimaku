@@ -1,3 +1,8 @@
+import {
+  isCaptureState,
+  type CaptureState,
+} from "./state";
+
 export const LAST_PROBE_STORAGE_KEY = "m0.lastProbe" as const;
 
 export type TranslatorProbeContext =
@@ -140,6 +145,39 @@ export interface WorkerProbeResultMessage {
   result: WebGpuProbeResult;
 }
 
+export interface RunDiagnosticsMessage {
+  t: "RUN_DIAGNOSTICS";
+  requestId: string;
+}
+
+export interface DiagnosticsResultMessage {
+  t: "DIAGNOSTICS_RESULT";
+  requestId: string;
+  snapshot: ProbeSnapshot;
+}
+
+export interface OffStartMessage {
+  t: "OFF_START";
+  streamId: string;
+  requestId: string;
+}
+
+export interface OffStopMessage {
+  t: "OFF_STOP";
+  requestId: string;
+}
+
+export interface OffStateMessage {
+  t: "OFF_STATE";
+  state: CaptureState;
+}
+
+export interface OffLevelMessage {
+  t: "OFF_LEVEL";
+  rms: number;
+  at: string;
+}
+
 export type M0Message =
   | ProbeRequest
   | OffscreenProbeResultMessage
@@ -152,6 +190,18 @@ export type M0Message =
   | WorkerProbeRequest
   | WorkerProbeResultMessage;
 
+export type CapturePortMessage =
+  | OffStartMessage
+  | OffStopMessage
+  | OffStateMessage
+  | OffLevelMessage;
+
+export type M1Message =
+  | M0Message
+  | RunDiagnosticsMessage
+  | DiagnosticsResultMessage
+  | CapturePortMessage;
+
 export function nowIso(): string {
   return new Date().toISOString();
 }
@@ -160,7 +210,9 @@ export function createProbeRequestId(prefix: string): string {
   return `${prefix}:${crypto.randomUUID()}`;
 }
 
-export function parseChromeVersion(userAgent: string): string | null {
+export function parseChromeVersion(
+  userAgent: string,
+): string | null {
   const match = userAgent.match(
     /(?:Chrome|Chromium)\/(\d+(?:\.\d+){0,3})/,
   );
@@ -182,7 +234,9 @@ export function toProbeError(error: unknown): ProbeError {
     return {
       name: error.name,
       message: error.message,
-      ...(error.stack === undefined ? {} : { stack: error.stack }),
+      ...(error.stack === undefined
+        ? {}
+        : { stack: error.stack }),
     };
   }
 
@@ -207,18 +261,24 @@ export function toProbeError(error: unknown): ProbeError {
   };
 }
 
-export function isProbeSnapshot(value: unknown): value is ProbeSnapshot {
+export function isProbeSnapshot(
+  value: unknown,
+): value is ProbeSnapshot {
   return (
     isRecord(value) &&
     typeof value.updatedAt === "string" &&
-    (value.offscreen === undefined || isRecord(value.offscreen)) &&
+    (value.offscreen === undefined ||
+      isRecord(value.offscreen)) &&
     (value.contentScript === undefined ||
       isRecord(value.contentScript)) &&
-    (value.optionsPage === undefined || isRecord(value.optionsPage))
+    (value.optionsPage === undefined ||
+      isRecord(value.optionsPage))
   );
 }
 
-export function isM0Message(value: unknown): value is M0Message {
+export function isM0Message(
+  value: unknown,
+): value is M0Message {
   if (!isRecord(value) || typeof value.t !== "string") {
     return false;
   }
@@ -241,7 +301,10 @@ export function isM0Message(value: unknown): value is M0Message {
       return true;
 
     case "LAST_PROBE_RESULT":
-      return value.snapshot === null || isProbeSnapshot(value.snapshot);
+      return (
+        value.snapshot === null ||
+        isProbeSnapshot(value.snapshot)
+      );
 
     case "PROBE_STORED":
       return (
@@ -256,6 +319,8 @@ export function isM0Message(value: unknown): value is M0Message {
         typeof value.requestId === "string" &&
         typeof value.source === "string" &&
         isRecord(value.error) &&
+        typeof value.error.name === "string" &&
+        typeof value.error.message === "string" &&
         typeof value.at === "string"
       );
 
@@ -264,13 +329,74 @@ export function isM0Message(value: unknown): value is M0Message {
   }
 }
 
-export function isMessageOfType<T extends M0Message["t"]>(
+export function isM1Message(
   value: unknown,
-  type: T,
-): value is Extract<M0Message, { t: T }> {
-  return isM0Message(value) && value.t === type;
+): value is M1Message {
+  if (isM0Message(value)) {
+    return true;
+  }
+
+  if (!isRecord(value) || typeof value.t !== "string") {
+    return false;
+  }
+
+  switch (value.t) {
+    case "RUN_DIAGNOSTICS":
+      return typeof value.requestId === "string";
+
+    case "DIAGNOSTICS_RESULT":
+      return (
+        typeof value.requestId === "string" &&
+        isProbeSnapshot(value.snapshot)
+      );
+
+    case "OFF_START":
+      return (
+        typeof value.streamId === "string" &&
+        typeof value.requestId === "string"
+      );
+
+    case "OFF_STOP":
+      return typeof value.requestId === "string";
+
+    case "OFF_STATE":
+      return isCaptureState(value.state);
+
+    case "OFF_LEVEL":
+      return (
+        typeof value.rms === "number" &&
+        Number.isFinite(value.rms) &&
+        value.rms >= 0 &&
+        typeof value.at === "string"
+      );
+
+    default:
+      return false;
+  }
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
+export function isMessageOfType<
+  T extends M1Message["t"],
+>(
+  value: unknown,
+  type: T,
+): value is Extract<M1Message, { t: T }> {
+  return isM1Message(value) && value.t === type;
+}
+
+export function isCapturePortMessage(
+  value: unknown,
+): value is CapturePortMessage {
+  return (
+    isMessageOfType(value, "OFF_START") ||
+    isMessageOfType(value, "OFF_STOP") ||
+    isMessageOfType(value, "OFF_STATE") ||
+    isMessageOfType(value, "OFF_LEVEL")
+  );
+}
+
+function isRecord(
+  value: unknown,
+): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }

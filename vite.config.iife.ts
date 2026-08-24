@@ -25,5 +25,7 @@ export default defineConfig({
     },
   },
 
-  // M1: add pcm-worklet.ts as a second IIFE build entry.
+  // pcm-worklet.js is emitted by the main ESM pass.
+  // AudioWorklet.addModule() loads module scripts, and the
+  // worklet entry has no imports from extension application code.
 });
