@@ -318,11 +318,23 @@ function connectBackgroundPort(): void {
         return;
       }
 
-      console.warn(
-        "[cs]",
-        "background port disconnected",
-        disconnectError ?? "",
-      );
+      const disconnectDuringCapture =
+        contentSessionRequestId !== null ||
+        activeTap !== null;
+
+      if (disconnectDuringCapture) {
+        console.warn(
+          "[cs]",
+          "background port disconnected during capture",
+          disconnectError ?? "",
+        );
+      } else {
+        console.info(
+          "[cs]",
+          "background port disconnected (routine service-worker suspend)",
+          disconnectError ?? "",
+        );
+      }
 
       lastCaptureStatus = "idle";
       activeTranslationPath = null;
