@@ -25,7 +25,7 @@ export default defineConfig({
   build: {
     target: "esnext",
     outDir: resolve(projectRoot, "dist"),
-    emptyOutDir: true,
+    emptyOutDir: !process.argv.includes("--watch"),
     rollupOptions: {
       input: {
         background: resolve(
@@ -93,18 +93,6 @@ function finalizeDist(): Plugin {
       );
 
       for (const plan of htmlPlans) {
-        if (
-          plan.sourcePath !== plan.targetPath &&
-          await pathExists(plan.targetPath)
-        ) {
-          throw new Error(
-            `Cannot move ${formatDistPath(outDir, plan.sourcePath)} ` +
-              `to ${plan.fileName}: the target already exists`,
-          );
-        }
-      }
-
-      for (const plan of htmlPlans) {
         const html = await readFile(
           plan.sourcePath,
           "utf8",
@@ -121,6 +109,10 @@ function finalizeDist(): Plugin {
         }
 
         if (plan.sourcePath !== plan.targetPath) {
+          if (await pathExists(plan.targetPath)) {
+            await rm(plan.targetPath);
+          }
+
           await rename(
             plan.sourcePath,
             plan.targetPath,
