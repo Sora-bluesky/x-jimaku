@@ -231,6 +231,15 @@ export interface SwRecognitionMessage
   t: "SW_RECOG";
 }
 
+export interface SwCaptionMessage
+  extends RecognitionPayload {
+  t: "SW_CAPTION";
+}
+
+export interface SwCaptionClearMessage {
+  t: "SW_CAPTION_CLEAR";
+}
+
 export interface WhisperInitMessage {
   t: "WHISPER_INIT";
   model: WhisperModel;
@@ -293,11 +302,17 @@ export type M0Message =
   | WorkerProbeRequest
   | WorkerProbeResultMessage;
 
+export type CaptionPortMessage =
+  | SwCaptionMessage
+  | SwCaptionClearMessage;
+
 export type ContentPortMessage =
   | CsStartTapMessage
   | CsStopTapMessage
   | CsTapStateMessage
-  | CsPcmMessage;
+  | CsPcmMessage
+  | OffStateMessage
+  | CaptionPortMessage;
 
 export type CapturePortMessage =
   | OffStartMessage
@@ -319,7 +334,8 @@ export type M1Message =
   | DiagnosticsResultMessage
   | CapturePortMessage
   | ContentPortMessage
-  | SwRecognitionMessage;
+  | SwRecognitionMessage
+  | CaptionPortMessage;
 
 export function nowIso(): string {
   return new Date().toISOString();
@@ -537,7 +553,11 @@ export function isM1Message(
 
     case "OFF_RECOG":
     case "SW_RECOG":
+    case "SW_CAPTION":
       return isRecognitionPayload(value);
+
+    case "SW_CAPTION_CLEAR":
+      return true;
 
     default:
       return false;
@@ -573,7 +593,13 @@ export function isContentPortMessage(
     isMessageOfType(value, "CS_START_TAP") ||
     isMessageOfType(value, "CS_STOP_TAP") ||
     isMessageOfType(value, "CS_TAP_STATE") ||
-    isMessageOfType(value, "CS_PCM")
+    isMessageOfType(value, "CS_PCM") ||
+    isMessageOfType(value, "OFF_STATE") ||
+    isMessageOfType(value, "SW_CAPTION") ||
+    isMessageOfType(
+      value,
+      "SW_CAPTION_CLEAR",
+    )
   );
 }
 
