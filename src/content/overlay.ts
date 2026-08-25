@@ -10,8 +10,35 @@ const CUE_ACCELERATED_DISPLAY_MS = 1_000;
 const MAX_WAITING_CUES = 2;
 const MAX_CUE_UNITS = 28;
 const MAX_LINE_UNITS = 14;
-const CUE_BOUNDARY_SEARCH_CHARACTERS = 10;
+const MIN_CUE_SEGMENT_CHARACTERS = 5;
+const MIN_LINE_SEGMENT_CHARACTERS = 2;
 const MAX_ORPHAN_CUE_CHARACTERS = 4;
+const JAPANESE_PARTICLES:
+  readonly string[] = [
+    "から",
+    "まで",
+    "より",
+    "は",
+    "が",
+    "を",
+    "に",
+    "で",
+    "と",
+    "へ",
+    "の",
+    "も",
+    "て",
+  ];
+const SENTENCE_BOUNDARY_CHARACTER =
+  /[。！？!?]/u;
+const CLAUSE_BOUNDARY_CHARACTER =
+  /[、,\s]/u;
+const JAPANESE_PUNCTUATION_CHARACTER =
+  /[。！？!?、,]/u;
+const JAPANESE_PARTICLE_START_CHARACTER =
+  /[はがをにでとへのもかまよて]/u;
+const KATAKANA_CHARACTER =
+  /[\p{Script=Katakana}ー]/u;
 const MAX_ORIGINAL_CHARS = 140;
 const PRIMARY_LINE_HEIGHT = 1.16;
 const ORIGINAL_FONT_SCALE = 0.68;
@@ -2308,28 +2335,13 @@ export function splitCueText(
       );
     }
 
-    const preferred =
-      findPreferredCueBoundary(
-        normalized,
-        characters,
-        start,
-        target,
-        Math.max(
-          start + 1,
-          target -
-            CUE_BOUNDARY_SEARCH_CHARACTERS,
-        ),
-        protectedRanges,
-      );
     const boundary =
-      preferred ??
-      findFallbackCueBoundary(
+      findNaturalTextBoundary(
         normalized,
         characters,
         start,
         target,
-        start + 1,
-        characters.length,
+        MIN_CUE_SEGMENT_CHARACTERS,
         protectedRanges,
       );
     const part = characters
@@ -2374,57 +2386,35 @@ export function wrapCueText(
   const characters = Array.from(normalized);
   const protectedRanges =
     findProtectedUrlRanges(normalized);
-  const maximumBoundary =
+  const balancedTarget =
+    findMaximumUnitBoundary(
+      characters,
+      0,
+      displayUnits(normalized) / 2,
+    );
+  // Both lines must fit the slot: the first line caps the boundary from
+  // above, the second line (total minus first) caps it from below.
+  const maximumLineBoundary =
     findMaximumUnitBoundary(
       characters,
       0,
       maxLineUnits,
     );
-  let minimumBoundary = 1;
-
-  while (
-    minimumBoundary < maximumBoundary &&
-    displayUnits(
-      characters
-        .slice(minimumBoundary)
-        .join(""),
-    ) > maxLineUnits
-  ) {
-    minimumBoundary += 1;
-  }
-
-  const halfUnits =
-    displayUnits(normalized) / 2;
-  const balancedTarget = Math.max(
-    minimumBoundary,
-    Math.min(
-      maximumBoundary,
-      findMaximumUnitBoundary(
-        characters,
-        0,
-        halfUnits,
-      ),
-    ),
-  );
-  const preferred =
-    findPreferredCueBoundary(
-      normalized,
+  const minimumLineBoundary =
+    findMinimumRemainderBoundary(
       characters,
-      0,
-      balancedTarget,
-      minimumBoundary,
-      protectedRanges,
+      maxLineUnits,
     );
   const boundary =
-    preferred ??
-    findFallbackCueBoundary(
+    findNaturalTextBoundary(
       normalized,
       characters,
       0,
       balancedTarget,
-      minimumBoundary,
-      maximumBoundary,
+      MIN_LINE_SEGMENT_CHARACTERS,
       protectedRanges,
+      minimumLineBoundary,
+      maximumLineBoundary,
     );
   const first = characters
     .slice(0, boundary)
@@ -2438,6 +2428,30 @@ export function wrapCueText(
   return second === ""
     ? first
     : `${first}\n${second}`;
+}
+
+function findMinimumRemainderBoundary(
+  characters: readonly string[],
+  maxUnits: number,
+): number {
+  let units = 0;
+  let boundary = characters.length;
+
+  while (boundary > 0) {
+    const character =
+      characters[boundary - 1] ?? "";
+    const nextUnits =
+      units + characterUnits(character);
+
+    if (nextUnits > maxUnits) {
+      break;
+    }
+
+    units = nextUnits;
+    boundary -= 1;
+  }
+
+  return Math.max(1, boundary);
 }
 
 function findMaximumUnitBoundary(
@@ -2502,54 +2516,231 @@ function segmentCharacterCount(
   ).length;
 }
 
-function findPreferredCueBoundary(
+function findNaturalTextBoundary(
   text: string,
   characters: readonly string[],
   start: number,
   target: number,
-  minimumBoundary: number,
+  minimumSegmentCharacters: number,
   ranges: ReadonlyArray<
     readonly [start: number, end: number]
   >,
-): number | null {
-  const windowStart = Math.max(
-    start + 1,
-    minimumBoundary,
-    target -
-      CUE_BOUNDARY_SEARCH_CHARACTERS,
+  minimumBoundary: number = start + 1,
+  maximumBoundaryLimit: number = target,
+): number {
+  let bestBoundary: number | null = null;
+  let bestEffectiveDistance =
+    Number.POSITIVE_INFINITY;
+  let bestDistance =
+    Number.POSITIVE_INFINITY;
+
+  // The window keeps both sides within their slot capacity: a boundary past
+  // the limit overflows this segment, one before the minimum overflows the
+  // remainder.
+  const maximumBoundary = Math.min(
+    maximumBoundaryLimit,
+    characters.length - 1,
   );
-  const priorities:
-    readonly RegExp[] = [
-      /[。！？!?]/u,
-      /、/u,
-      /\s/u,
-    ];
 
-  for (const expression of priorities) {
-    for (
-      let boundary = target;
-      boundary >= windowStart;
-      boundary -= 1
+  for (
+    let boundary = Math.max(
+      start + 1,
+      minimumBoundary,
+    );
+    boundary <= maximumBoundary;
+    boundary += 1
+  ) {
+    if (
+      !isSegmentBoundaryAllowed(
+        text,
+        characters,
+        start,
+        boundary,
+        minimumSegmentCharacters,
+        ranges,
+      )
     ) {
-      if (
-        !expression.test(
-          characters[boundary - 1] ?? "",
-        ) ||
-        isCharacterBoundaryProtected(
-          text,
-          characters,
-          boundary,
-          ranges,
-        )
-      ) {
-        continue;
-      }
+      continue;
+    }
 
-      return boundary;
+    const bonus =
+      naturalBoundaryBonus(
+        characters,
+        start,
+        boundary,
+      );
+
+    if (bonus === null) {
+      continue;
+    }
+
+    const distance =
+      Math.abs(boundary - target);
+    const effectiveDistance =
+      distance - bonus;
+
+    if (
+      effectiveDistance <
+        bestEffectiveDistance ||
+      (
+        effectiveDistance ===
+          bestEffectiveDistance &&
+        (
+          distance < bestDistance ||
+          (
+            distance === bestDistance &&
+            (
+              bestBoundary === null ||
+              boundary < bestBoundary
+            )
+          )
+        )
+      )
+    ) {
+      bestBoundary = boundary;
+      bestEffectiveDistance =
+        effectiveDistance;
+      bestDistance = distance;
     }
   }
 
-  return null;
+  return (
+    bestBoundary ??
+    findFallbackCueBoundary(
+      text,
+      characters,
+      start,
+      target,
+      minimumSegmentCharacters,
+      ranges,
+      minimumBoundary,
+      maximumBoundaryLimit,
+    )
+  );
+}
+
+function naturalBoundaryBonus(
+  characters: readonly string[],
+  start: number,
+  boundary: number,
+): number | null {
+  const previous =
+    characters[boundary - 1] ?? "";
+
+  if (
+    SENTENCE_BOUNDARY_CHARACTER.test(
+      previous,
+    )
+  ) {
+    return 6;
+  }
+
+  if (
+    CLAUSE_BOUNDARY_CHARACTER.test(
+      previous,
+    )
+  ) {
+    return 3;
+  }
+
+  if (
+    !endsWithJapaneseParticle(
+      characters,
+      start,
+      boundary,
+    )
+  ) {
+    return null;
+  }
+
+  const next = characters[boundary] ?? "";
+
+  if (
+    JAPANESE_PARTICLE_START_CHARACTER.test(
+      next,
+    ) ||
+    JAPANESE_PUNCTUATION_CHARACTER.test(
+      next,
+    )
+  ) {
+    return null;
+  }
+
+  return 1;
+}
+
+function endsWithJapaneseParticle(
+  characters: readonly string[],
+  start: number,
+  boundary: number,
+): boolean {
+  return JAPANESE_PARTICLES.some(
+    (particle) => {
+      const particleCharacters =
+        Array.from(particle);
+      const particleStart =
+        boundary -
+        particleCharacters.length;
+
+      return (
+        particleStart >= start &&
+        particleCharacters.every(
+          (character, index) =>
+            characters[
+              particleStart + index
+            ] === character,
+        )
+      );
+    },
+  );
+}
+
+function isSegmentBoundaryAllowed(
+  text: string,
+  characters: readonly string[],
+  start: number,
+  boundary: number,
+  minimumSegmentCharacters: number,
+  ranges: ReadonlyArray<
+    readonly [start: number, end: number]
+  >,
+): boolean {
+  return (
+    segmentCharacterCount(
+      characters,
+      start,
+      boundary,
+    ) >= minimumSegmentCharacters &&
+    segmentCharacterCount(
+      characters,
+      boundary,
+      characters.length,
+    ) >= minimumSegmentCharacters &&
+    !isCharacterBoundaryProtected(
+      text,
+      characters,
+      boundary,
+      ranges,
+    ) &&
+    !isInsideKatakanaRun(
+      characters,
+      boundary,
+    )
+  );
+}
+
+function isInsideKatakanaRun(
+  characters: readonly string[],
+  boundary: number,
+): boolean {
+  return (
+    KATAKANA_CHARACTER.test(
+      characters[boundary - 1] ?? "",
+    ) &&
+    KATAKANA_CHARACTER.test(
+      characters[boundary] ?? "",
+    )
+  );
 }
 
 function findFallbackCueBoundary(
@@ -2557,20 +2748,84 @@ function findFallbackCueBoundary(
   characters: readonly string[],
   start: number,
   target: number,
-  minimumBoundary: number,
-  maximumBoundary: number,
+  minimumSegmentCharacters: number,
+  ranges: ReadonlyArray<
+    readonly [start: number, end: number]
+  >,
+  minimumBoundary: number = start + 1,
+  maximumBoundaryLimit: number = target,
+): number {
+  let nearestBoundary: number | null = null;
+  let nearestDistance =
+    Number.POSITIVE_INFINITY;
+  const maximumBoundary = Math.min(
+    maximumBoundaryLimit,
+    characters.length - 1,
+  );
+
+  for (
+    let boundary = Math.max(
+      start + 1,
+      minimumBoundary,
+    );
+    boundary <= maximumBoundary;
+    boundary += 1
+  ) {
+    if (
+      !isSegmentBoundaryAllowed(
+        text,
+        characters,
+        start,
+        boundary,
+        minimumSegmentCharacters,
+        ranges,
+      )
+    ) {
+      continue;
+    }
+
+    const distance =
+      Math.abs(boundary - target);
+
+    if (
+      distance < nearestDistance ||
+      (
+        distance === nearestDistance &&
+        (
+          nearestBoundary === null ||
+          boundary < nearestBoundary
+        )
+      )
+    ) {
+      nearestBoundary = boundary;
+      nearestDistance = distance;
+    }
+  }
+
+  if (nearestBoundary !== null) {
+    return nearestBoundary;
+  }
+
+  return findConventionalCueBoundary(
+    text,
+    characters,
+    start,
+    maximumBoundaryLimit,
+    ranges,
+  );
+}
+
+function findConventionalCueBoundary(
+  text: string,
+  characters: readonly string[],
+  start: number,
+  target: number,
   ranges: ReadonlyArray<
     readonly [start: number, end: number]
   >,
 ): number {
-  const minimum = Math.max(
-    start + 1,
-    minimumBoundary,
-  );
-  const maximum = Math.min(
-    characters.length,
-    maximumBoundary,
-  );
+  const minimum = start + 1;
+  const maximum = characters.length - 1;
 
   for (
     let boundary = Math.min(target, maximum);
