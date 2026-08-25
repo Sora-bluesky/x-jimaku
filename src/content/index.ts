@@ -1577,8 +1577,13 @@ function extractPostContextTerms(): string[] {
         .normalize("NFKC")
         .trim();
 
+      // The wire guard (isContextTerms) rejects terms over 128 characters;
+      // a single oversized term must not invalidate the whole message.
+      const termLength = Array.from(term).length;
+
       if (
-        Array.from(term).length < 4 ||
+        termLength < 4 ||
+        termLength > 128 ||
         !(
           term.startsWith("@") ||
           /^\p{Lu}/u.test(term)

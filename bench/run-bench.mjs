@@ -697,11 +697,35 @@ class ClauseCollector {
   }
 }
 
-async function readSessionStorage(worker) {
-  return worker.evaluate(async () => chrome.storage.session.get(null));
+async function readSessionStorage(browser) {
+  return evaluateInServiceWorker(
+    browser,
+    async () => chrome.storage.session.get(null),
+  );
+}
+
+let lastTracedCaptureState = "";
+
+function traceCaptureState(state) {
+  if (!TRACE_ENABLED) {
+    return;
+  }
+
+  const snapshot = JSON.stringify(state ?? null);
+
+  if (snapshot !== lastTracedCaptureState) {
+    lastTracedCaptureState = snapshot;
+    traceLines.push(`[bench-state] ${new Date().toISOString()} ${snapshot}`);
+  }
 }
 
 function findCaptureState(storage) {
+  const state = findCaptureStateRaw(storage);
+  traceCaptureState(state);
+  return state;
+}
+
+function findCaptureStateRaw(storage) {
   if (Object.prototype.hasOwnProperty.call(storage, "m1.captureState")) {
     return storage["m1.captureState"];
   }
@@ -742,12 +766,12 @@ function isRunningCaptureState(value) {
   return Object.values(value).some((child) => isRunningCaptureState(child));
 }
 
-async function waitForCaptureState(worker, statuses, timeoutMs) {
+async function waitForCaptureState(browser, statuses, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   let lastState;
 
   while (Date.now() < deadline) {
-    const storage = await readSessionStorage(worker);
+    const storage = await readSessionStorage(browser);
     lastState = findCaptureState(storage);
 
     if (lastState && statuses.includes(lastState.status)) {
@@ -762,12 +786,12 @@ async function waitForCaptureState(worker, statuses, timeoutMs) {
   );
 }
 
-async function waitForCaptureRunning(worker) {
+async function waitForCaptureRunning(browser) {
   const deadline = Date.now() + 240_000;
   let lastState;
 
   while (Date.now() < deadline) {
-    const storage = await readSessionStorage(worker);
+    const storage = await readSessionStorage(browser);
     lastState = findCaptureState(storage);
 
     if (isRunningCaptureState(lastState)) {
@@ -782,11 +806,11 @@ async function waitForCaptureRunning(worker) {
   );
 }
 
-async function waitForCaptureStopped(worker) {
+async function waitForCaptureStopped(browser) {
   const deadline = Date.now() + 240_000;
 
   while (Date.now() < deadline) {
-    const storage = await readSessionStorage(worker);
+    const storage = await readSessionStorage(browser);
     const state = findCaptureState(storage);
 
     if (state === undefined || !isRunningCaptureState(state)) {
@@ -831,8 +855,8 @@ async function setRecognitionModel(browser, model) {
   }, model);
 }
 
-async function dispatchCaptureForUrl(worker, targetUrl) {
-  return worker.evaluate(async (url) => {
+async function dispatchCaptureForUrl(browser, targetUrl) {
+  return evaluateInServiceWorker(browser, async (url) => {
     // Without the "tabs" permission tab.url is undefined, so match the
     // active tab (the bench brings the case page to front before dispatch).
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -846,8 +870,8 @@ async function dispatchCaptureForUrl(worker, targetUrl) {
   }, targetUrl);
 }
 
-async function dispatchCaptureForTabId(worker, tabId) {
-  await worker.evaluate(async (id) => {
+async function dispatchCaptureForTabId(browser, tabId) {
+  await evaluateInServiceWorker(browser, async (id) => {
     const tab = await chrome.tabs.get(id);
     await chrome.action.onClicked.dispatch(tab);
   }, tabId);
@@ -979,17 +1003,17 @@ async function openOptionsPage(browser, extensionBase) {
 }
 
 async function collectForDuration({
+  browser,
   collector,
   durationSeconds,
   optionsPage,
   optionsReady,
-  worker,
 }) {
   const startedAt = Date.now();
   const deadline = startedAt + durationSeconds * 1_000;
 
   while (Date.now() < deadline) {
-    const storage = await readSessionStorage(worker);
+    const storage = await readSessionStorage(browser);
     collector.ingestSession(extractFinalClausesFromSession(storage));
 
     if (optionsReady) {
@@ -1074,7 +1098,6 @@ async function runBench(options, caseDefinition) {
   let profileDirectory;
   let captureStarted = false;
   let caseTabId;
-  let worker;
 
   try {
     server = await startBenchServer({
@@ -1133,9 +1156,7 @@ async function runBench(options, caseDefinition) {
       },
     );
 
-    worker = await serviceWorkerTarget.worker();
-
-    if (!worker) {
+    if (!(await serviceWorkerTarget.worker())) {
       throw new Error("Extension service worker target has no worker");
     }
 
@@ -1167,16 +1188,16 @@ async function runBench(options, caseDefinition) {
       },
     );
 
-    caseTabId = await dispatchCaptureForUrl(worker, server.caseUrl);
+    caseTabId = await dispatchCaptureForUrl(browser, server.caseUrl);
     captureStarted = true;
     // The tap needs a playing video at dispatch, but a short clip must not
     // end (and stop the session) while the model downloads. Once the tap is
     // acquired (loadingModel reached), pause; resume from 0 when running.
-    await waitForCaptureState(worker, ["loadingModel", "running"], 60_000);
+    await waitForCaptureState(browser, ["loadingModel", "running"], 60_000);
     await casePage.evaluate(() => {
       document.getElementById("bench-media").pause();
     });
-    await waitForCaptureRunning(worker);
+    await waitForCaptureRunning(browser);
     await casePage.evaluate(async () => {
       const media = document.getElementById("bench-media");
       media.currentTime = 0;
@@ -1198,11 +1219,11 @@ async function runBench(options, caseDefinition) {
     }
 
     const timing = await collectForDuration({
+      browser,
       collector,
       durationSeconds: options.durationSeconds,
       optionsPage: optionsView.page,
       optionsReady: optionsView.ready,
-      worker,
     });
 
     // Model-load time varies run to run, so a fixed duration can land before
@@ -1223,7 +1244,7 @@ async function runBench(options, caseDefinition) {
     }
 
     {
-      const storage = await readSessionStorage(worker);
+      const storage = await readSessionStorage(browser);
       collector.ingestSession(extractFinalClausesFromSession(storage));
 
       if (optionsView.ready) {
@@ -1233,20 +1254,20 @@ async function runBench(options, caseDefinition) {
 
     await casePage.bringToFront();
     await delay(100);
-    await dispatchCaptureForTabId(worker, caseTabId);
+    await dispatchCaptureForTabId(browser, caseTabId);
     captureStarted = false;
 
     let captureStopped = false;
 
     try {
-      await waitForCaptureStopped(worker);
+      await waitForCaptureStopped(browser);
       captureStopped = true;
     } catch (error) {
       console.error(`[bench] ${error.message}`);
     }
 
     for (let attempt = 0; attempt < 4; attempt += 1) {
-      const storage = await readSessionStorage(worker);
+      const storage = await readSessionStorage(browser);
       collector.ingestSession(extractFinalClausesFromSession(storage));
 
       if (optionsView.ready) {
@@ -1333,9 +1354,9 @@ async function runBench(options, caseDefinition) {
       );
     }
   } finally {
-    if (captureStarted && worker && typeof caseTabId === "number") {
+    if (captureStarted && browser && typeof caseTabId === "number") {
       try {
-        await dispatchCaptureForTabId(worker, caseTabId);
+        await dispatchCaptureForTabId(browser, caseTabId);
       } catch {
         // Browser shutdown below terminates a capture that could not be toggled.
       }

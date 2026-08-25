@@ -1593,9 +1593,16 @@ function replaceTokenCore(
     return null;
   }
 
+  // A possessive on the recognized token ("OpenAI's") is not part of the
+  // dictionary surface; keep it attached to the replacement.
+  const possessive =
+    (match[2] ?? "").match(/['’]s$/iu)?.[0] ??
+    "";
+
   return (
     (match[1] ?? "") +
     replacement +
+    possessive +
     (match[3] ?? "")
   );
 }
