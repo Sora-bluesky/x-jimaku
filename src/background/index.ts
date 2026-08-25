@@ -9,6 +9,7 @@ import {
   nowIso,
   toProbeError,
   type ContentScriptProbeResultMessage,
+  type CsEosMessage,
   type CsPcmMessage,
   type CsPingMessage,
   type CsPongMessage,
@@ -926,6 +927,16 @@ function handleContentPortConnected(
       }
 
       if (
+        isMessageOfType(message, "CS_EOS")
+      ) {
+        relayContentEndOfStream(
+          tabId,
+          message,
+        );
+        return;
+      }
+
+      if (
         isMessageOfType(
           message,
           "CS_TRANSLATE_RESULT",
@@ -1085,6 +1096,36 @@ function relayContentPcm(
     console.warn(
       "[bg]",
       "could not relay PCM to offscreen",
+      error,
+    );
+  }
+}
+
+function relayContentEndOfStream(
+  tabId: number,
+  message: CsEosMessage,
+): void {
+  if (
+    captureState.tabId !== tabId ||
+    captureState.requestId !==
+      message.requestId ||
+    !isCaptureActive(captureState.status)
+  ) {
+    return;
+  }
+
+  const port = offscreenPort;
+
+  if (port === null) {
+    return;
+  }
+
+  try {
+    port.postMessage(message);
+  } catch (error) {
+    console.warn(
+      "[bg]",
+      "could not relay end-of-stream to offscreen",
       error,
     );
   }

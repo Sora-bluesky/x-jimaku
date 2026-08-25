@@ -245,6 +245,11 @@ export interface CsStopTapMessage {
   requestId: string;
 }
 
+export interface CsEosMessage {
+  t: "CS_EOS";
+  requestId: string;
+}
+
 export interface CsTapStateMessage {
   t: "CS_TAP_STATE";
   requestId: string;
@@ -394,6 +399,7 @@ export type CaptionPortMessage =
 export type ContentPortMessage =
   | CsStartTapMessage
   | CsStopTapMessage
+  | CsEosMessage
   | CsTapStateMessage
   | CsPcmMessage
   | CsTranslateMessage
@@ -413,6 +419,7 @@ export type CapturePortMessage =
   | OffRecognitionMessage
   | OffTranslationStateMessage
   | CsPcmMessage
+  | CsEosMessage
   | CsTranslateMessage
   | CsTranslateResultMessage;
 
@@ -621,6 +628,7 @@ export function isM1Message(
 
     case "OFF_STOP":
     case "CS_STOP_TAP":
+    case "CS_EOS":
       return typeof value.requestId === "string";
 
     case "OFF_QUERY":
@@ -751,6 +759,7 @@ export function isCapturePortMessage(
       "OFF_TRANSLATION_STATE",
     ) ||
     isMessageOfType(value, "CS_PCM") ||
+    isMessageOfType(value, "CS_EOS") ||
     isMessageOfType(value, "CS_TRANSLATE") ||
     isMessageOfType(
       value,
@@ -765,6 +774,7 @@ export function isContentPortMessage(
   return (
     isMessageOfType(value, "CS_START_TAP") ||
     isMessageOfType(value, "CS_STOP_TAP") ||
+    isMessageOfType(value, "CS_EOS") ||
     isMessageOfType(value, "CS_TAP_STATE") ||
     isMessageOfType(value, "CS_PCM") ||
     isMessageOfType(value, "CS_TRANSLATE") ||

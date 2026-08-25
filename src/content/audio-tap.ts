@@ -19,7 +19,10 @@ let currentAudioTapTarget:
 export interface AudioTapCallbacks {
   onChunk(seq: number, b64: string): void;
   onDetail(detail: string): void;
-  onStopped(detail: string): void;
+  onStopped(
+    detail: string,
+    target: HTMLVideoElement | null,
+  ): void;
   onError(error: unknown): void;
 }
 
@@ -481,6 +484,11 @@ export class AudioTap {
     }
 
     this.ending = true;
+    const target = this.video;
+
+    if (detail === "track-ended") {
+      this.flushPendingChunk();
+    }
 
     try {
       await this.cleanup();
@@ -492,7 +500,36 @@ export class AudioTap {
       );
     }
 
-    this.callbacks.onStopped(detail);
+    this.callbacks.onStopped(
+      detail,
+      target,
+    );
+  }
+
+  private flushPendingChunk(): void {
+    if (
+      !this.active ||
+      this.chunkWriteOffset === 0
+    ) {
+      return;
+    }
+
+    const chunk = this.chunkBuffer.slice(
+      0,
+      this.chunkWriteOffset,
+    );
+
+    this.chunkBuffer =
+      new Float32Array(PCM_CHUNK_SAMPLES);
+    this.chunkWriteOffset = 0;
+
+    const seq = this.nextSequence;
+    this.nextSequence += 1;
+
+    this.callbacks.onChunk(
+      seq,
+      encodeFloat32Base64(chunk),
+    );
   }
 
   private async fail(

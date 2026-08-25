@@ -10,6 +10,8 @@ const CUE_ACCELERATED_DISPLAY_MS = 1_000;
 const MAX_WAITING_CUES = 2;
 const MAX_CUE_UNITS = 28;
 const MAX_LINE_UNITS = 14;
+const CUE_BOUNDARY_SEARCH_CHARACTERS = 10;
+const MAX_ORPHAN_CUE_CHARACTERS = 4;
 const MAX_ORIGINAL_CHARS = 140;
 const PRIMARY_LINE_HEIGHT = 1.16;
 const ORIGINAL_FONT_SCALE = 0.68;
@@ -2273,41 +2275,12 @@ export function splitCueText(
   let start = 0;
 
   while (start < characters.length) {
-    let units = 0;
-    let end = start;
-    let preferred = -1;
-
-    while (end < characters.length) {
-      const character =
-        characters[end] ?? "";
-      const nextUnits =
-        units + characterUnits(character);
-
-      if (
-        nextUnits > maxUnits &&
-        end > start
-      ) {
-        break;
-      }
-
-      units = nextUnits;
-      end += 1;
-
-      if (
-        isPreferredTextBoundary(
-          characters,
-          end,
-        ) &&
-        !isCharacterBoundaryProtected(
-          normalized,
-          characters,
-          end,
-          protectedRanges,
-        )
-      ) {
-        preferred = end;
-      }
-    }
+    const end =
+      findMaximumUnitBoundary(
+        characters,
+        start,
+        maxUnits,
+      );
 
     if (end >= characters.length) {
       const tail =
@@ -2319,30 +2292,46 @@ export function splitCueText(
       break;
     }
 
-    let boundary =
-      preferred > start
-        ? preferred
-        : end;
+    let target = end;
 
-    while (
-      boundary < characters.length &&
-      isCharacterBoundaryProtected(
-        normalized,
+    if (
+      segmentCharacterCount(
         characters,
-        boundary,
-        protectedRanges,
-      )
-    ) {
-      boundary += 1;
-    }
-
-    if (boundary <= start) {
-      boundary = Math.min(
+        end,
         characters.length,
-        start + 1,
+      ) <= MAX_ORPHAN_CUE_CHARACTERS
+    ) {
+      target = findOrphanSafeTarget(
+        characters,
+        start,
+        end,
       );
     }
 
+    const preferred =
+      findPreferredCueBoundary(
+        normalized,
+        characters,
+        start,
+        target,
+        Math.max(
+          start + 1,
+          target -
+            CUE_BOUNDARY_SEARCH_CHARACTERS,
+        ),
+        protectedRanges,
+      );
+    const boundary =
+      preferred ??
+      findFallbackCueBoundary(
+        normalized,
+        characters,
+        start,
+        target,
+        start + 1,
+        characters.length,
+        protectedRanges,
+      );
     const part = characters
       .slice(start, boundary)
       .join("")
@@ -2370,17 +2359,258 @@ export function wrapCueText(
   maxLineUnits: number =
     MAX_LINE_UNITS,
 ): string {
-  const lines =
-    splitCueText(text, maxLineUnits);
+  const normalized = text
+    .replace(/\s+/gu, " ")
+    .trim();
 
-  if (lines.length <= 2) {
-    return lines.join("\n");
+  if (
+    normalized === "" ||
+    displayUnits(normalized) <=
+      maxLineUnits
+  ) {
+    return normalized;
   }
 
-  return [
-    lines[0] ?? "",
-    lines.slice(1).join(" "),
-  ].join("\n");
+  const characters = Array.from(normalized);
+  const protectedRanges =
+    findProtectedUrlRanges(normalized);
+  const maximumBoundary =
+    findMaximumUnitBoundary(
+      characters,
+      0,
+      maxLineUnits,
+    );
+  let minimumBoundary = 1;
+
+  while (
+    minimumBoundary < maximumBoundary &&
+    displayUnits(
+      characters
+        .slice(minimumBoundary)
+        .join(""),
+    ) > maxLineUnits
+  ) {
+    minimumBoundary += 1;
+  }
+
+  const halfUnits =
+    displayUnits(normalized) / 2;
+  const balancedTarget = Math.max(
+    minimumBoundary,
+    Math.min(
+      maximumBoundary,
+      findMaximumUnitBoundary(
+        characters,
+        0,
+        halfUnits,
+      ),
+    ),
+  );
+  const preferred =
+    findPreferredCueBoundary(
+      normalized,
+      characters,
+      0,
+      balancedTarget,
+      minimumBoundary,
+      protectedRanges,
+    );
+  const boundary =
+    preferred ??
+    findFallbackCueBoundary(
+      normalized,
+      characters,
+      0,
+      balancedTarget,
+      minimumBoundary,
+      maximumBoundary,
+      protectedRanges,
+    );
+  const first = characters
+    .slice(0, boundary)
+    .join("")
+    .trim();
+  const second = characters
+    .slice(boundary)
+    .join("")
+    .trim();
+
+  return second === ""
+    ? first
+    : `${first}\n${second}`;
+}
+
+function findMaximumUnitBoundary(
+  characters: readonly string[],
+  start: number,
+  maxUnits: number,
+): number {
+  let units = 0;
+  let end = start;
+
+  while (end < characters.length) {
+    const character =
+      characters[end] ?? "";
+    const nextUnits =
+      units + characterUnits(character);
+
+    if (
+      nextUnits > maxUnits &&
+      end > start
+    ) {
+      break;
+    }
+
+    units = nextUnits;
+    end += 1;
+  }
+
+  return end;
+}
+
+function findOrphanSafeTarget(
+  characters: readonly string[],
+  start: number,
+  target: number,
+): number {
+  let redistributed = target;
+
+  while (
+    redistributed > start + 1 &&
+    segmentCharacterCount(
+      characters,
+      redistributed,
+      characters.length,
+    ) <= MAX_ORPHAN_CUE_CHARACTERS
+  ) {
+    redistributed -= 1;
+  }
+
+  return redistributed;
+}
+
+function segmentCharacterCount(
+  characters: readonly string[],
+  start: number,
+  end: number,
+): number {
+  return Array.from(
+    characters
+      .slice(start, end)
+      .join("")
+      .trim(),
+  ).length;
+}
+
+function findPreferredCueBoundary(
+  text: string,
+  characters: readonly string[],
+  start: number,
+  target: number,
+  minimumBoundary: number,
+  ranges: ReadonlyArray<
+    readonly [start: number, end: number]
+  >,
+): number | null {
+  const windowStart = Math.max(
+    start + 1,
+    minimumBoundary,
+    target -
+      CUE_BOUNDARY_SEARCH_CHARACTERS,
+  );
+  const priorities:
+    readonly RegExp[] = [
+      /[。！？!?]/u,
+      /、/u,
+      /\s/u,
+    ];
+
+  for (const expression of priorities) {
+    for (
+      let boundary = target;
+      boundary >= windowStart;
+      boundary -= 1
+    ) {
+      if (
+        !expression.test(
+          characters[boundary - 1] ?? "",
+        ) ||
+        isCharacterBoundaryProtected(
+          text,
+          characters,
+          boundary,
+          ranges,
+        )
+      ) {
+        continue;
+      }
+
+      return boundary;
+    }
+  }
+
+  return null;
+}
+
+function findFallbackCueBoundary(
+  text: string,
+  characters: readonly string[],
+  start: number,
+  target: number,
+  minimumBoundary: number,
+  maximumBoundary: number,
+  ranges: ReadonlyArray<
+    readonly [start: number, end: number]
+  >,
+): number {
+  const minimum = Math.max(
+    start + 1,
+    minimumBoundary,
+  );
+  const maximum = Math.min(
+    characters.length,
+    maximumBoundary,
+  );
+
+  for (
+    let boundary = Math.min(target, maximum);
+    boundary >= minimum;
+    boundary -= 1
+  ) {
+    if (
+      !isCharacterBoundaryProtected(
+        text,
+        characters,
+        boundary,
+        ranges,
+      )
+    ) {
+      return boundary;
+    }
+  }
+
+  for (
+    let boundary =
+      Math.max(minimum, target + 1);
+    boundary <= maximum;
+    boundary += 1
+  ) {
+    if (
+      !isCharacterBoundaryProtected(
+        text,
+        characters,
+        boundary,
+        ranges,
+      )
+    ) {
+      return boundary;
+    }
+  }
+
+  return Math.min(
+    characters.length,
+    Math.max(start + 1, target),
+  );
 }
 
 function displayUnits(
@@ -2403,36 +2633,6 @@ function characterUnits(
   )
     ? 0.5
     : 1;
-}
-
-function isPreferredTextBoundary(
-  characters: readonly string[],
-  boundary: number,
-): boolean {
-  const previous =
-    characters[boundary - 1] ?? "";
-  const next =
-    characters[boundary] ?? "";
-
-  if (
-    /[\s、。！？,.!?]/u.test(previous)
-  ) {
-    return true;
-  }
-
-  const prefix = characters
-    .slice(
-      Math.max(0, boundary - 3),
-      boundary,
-    )
-    .join("");
-
-  return (
-    /(?:から|まで|より|ので|けど|には|では|とは|は|が|を|に|で|と|へ|も|や|の)$/u.test(
-      prefix,
-    ) &&
-    next !== ""
-  );
 }
 
 function findProtectedUrlRanges(

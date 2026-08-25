@@ -9,6 +9,8 @@ import type { AudioEnergyFrame } from "./audio-capture";
 const SAMPLE_RATE = 16_000;
 const TICK_INTERVAL_MS = 300;
 const MIN_SEGMENT_SAMPLES = SAMPLE_RATE;
+const MIN_EOS_FLUSH_SAMPLES =
+  Math.round(SAMPLE_RATE * 0.3);
 const MAX_SEGMENT_SAMPLES = SAMPLE_RATE * 8;
 const SILENCE_TAIL_SAMPLES = SAMPLE_RATE;
 const TRAILING_SILENCE_SAMPLES =
@@ -192,6 +194,7 @@ interface InFlightSegment {
   endOffset: number;
   sampleLength: number;
   maxRms: number;
+  flush: boolean;
 }
 
 export class WhisperSegmenter {
@@ -219,6 +222,14 @@ export class WhisperSegmenter {
   private nextRequestSequence = 1;
   private nextLineId = 1;
   private inFlight: InFlightSegment | null = null;
+  private eosPending = false;
+  private eosTargetOffset:
+    | number
+    | null = null;
+  private eosCompletedOffset:
+    | number
+    | null = null;
+  private eosTranscriptionIssued = false;
 
   private previousHypothesis:
     HypothesisToken[] | null = null;
@@ -282,6 +293,7 @@ export class WhisperSegmenter {
     this.committedOffset =
       this.getAvailableStartOffset();
     this.resetAgreementSeries();
+    this.resetEndOfStreamState();
 
     this.worker.addEventListener(
       "message",
@@ -316,6 +328,7 @@ export class WhisperSegmenter {
     this.busy = false;
     this.inFlight = null;
     this.resetAgreementSeries();
+    this.resetEndOfStreamState();
 
     if (this.tickTimerId !== null) {
       globalThis.clearInterval(
@@ -330,8 +343,49 @@ export class WhisperSegmenter {
     );
   }
 
+  flushPendingAudio(): void {
+    if (!this.started) {
+      return;
+    }
+
+    const writeOffset = this.getWriteOffset();
+
+    if (
+      this.eosPending ||
+      (
+        this.eosCompletedOffset !== null &&
+        writeOffset <=
+          this.eosCompletedOffset
+      )
+    ) {
+      return;
+    }
+
+    this.eosPending = true;
+    this.eosTargetOffset = writeOffset;
+    this.eosCompletedOffset = null;
+    this.eosTranscriptionIssued = false;
+
+    if (!this.busy) {
+      this.processEndOfStreamFlush();
+    }
+  }
+
   tick(): void {
     if (!this.started) {
+      return;
+    }
+
+    const writeOffset = this.getWriteOffset();
+
+    this.resumeAfterEndOfStream(
+      writeOffset,
+    );
+
+    if (this.eosPending) {
+      if (!this.busy) {
+        this.processEndOfStreamFlush();
+      }
       return;
     }
 
@@ -341,7 +395,6 @@ export class WhisperSegmenter {
       return;
     }
 
-    const writeOffset = this.getWriteOffset();
     const capacity = this.getCapacitySamples();
     const availableStart = Math.max(
       0,
@@ -430,6 +483,7 @@ export class WhisperSegmenter {
       endOffset,
       sampleLength,
       maxRms,
+      flush: false,
     };
     this.busy = true;
 
@@ -489,6 +543,14 @@ export class WhisperSegmenter {
 
     this.busy = false;
     this.inFlight = null;
+
+    if (segment.flush) {
+      this.handleEndOfStreamResult(
+        segment,
+        text,
+      );
+      return;
+    }
 
     const shouldForceAudioBoundary =
       segment.sampleLength >=
@@ -591,9 +653,292 @@ export class WhisperSegmenter {
       this.emitTentative();
     }
 
+    if (this.eosPending) {
+      this.continueEndOfStreamAfterResult(
+        segment,
+      );
+    }
+
     queueMicrotask(() => {
       this.tick();
     });
+  }
+
+  private handleEndOfStreamResult(
+    segment: InFlightSegment,
+    text: string,
+  ): void {
+    let tokens = tokenizeHypothesis(text);
+
+    if (
+      this.shouldRejectRepetitionGrowth(
+        tokens,
+        segment.endOffset,
+      )
+    ) {
+      console.warn(
+        "[seg]",
+        "discarded repetition growth during end-of-stream flush",
+        {
+          requestId: segment.requestId,
+          endOffset: segment.endOffset,
+        },
+      );
+
+      tokens =
+        this.previousHypothesis === null
+          ? []
+          : [...this.previousHypothesis];
+    }
+
+    this.lastHypothesisEndOffset =
+      segment.endOffset;
+
+    const lowAudioConfidence =
+      segment.maxRms <
+      SILENCE_RMS_THRESHOLD;
+
+    if (tokens.length > 0) {
+      this.latestHypothesis = tokens;
+      this.processAgreement(
+        tokens,
+        lowAudioConfidence,
+      );
+    }
+
+    if (this.hasPendingRecognitionText()) {
+      this.forceAdoptLatest(
+        "end-of-stream",
+        true,
+        true,
+        lowAudioConfidence,
+      );
+    }
+
+    this.commitSegment(
+      segment,
+      "end-of-stream",
+    );
+    this.completeEndOfStreamFlush(
+      segment.endOffset,
+    );
+
+    queueMicrotask(() => {
+      this.tick();
+    });
+  }
+
+  private continueEndOfStreamAfterResult(
+    segment: InFlightSegment,
+  ): void {
+    const targetOffset =
+      this.eosTargetOffset;
+
+    if (
+      !this.eosPending ||
+      targetOffset === null
+    ) {
+      return;
+    }
+
+    if (
+      this.getWriteOffset() >
+      targetOffset
+    ) {
+      this.resetEndOfStreamState();
+      return;
+    }
+
+    if (
+      this.committedOffset <
+      segment.endOffset
+    ) {
+      if (
+        this.hasPendingRecognitionText()
+      ) {
+        this.forceAdoptLatest(
+          "end-of-stream-in-flight",
+          true,
+          true,
+          segment.maxRms <
+            SILENCE_RMS_THRESHOLD,
+        );
+      }
+
+      this.commitSegment(
+        segment,
+        "end-of-stream-in-flight",
+      );
+    }
+
+    this.processEndOfStreamFlush();
+  }
+
+  private processEndOfStreamFlush(): void {
+    if (
+      !this.started ||
+      !this.eosPending ||
+      this.busy
+    ) {
+      return;
+    }
+
+    const targetOffset =
+      this.eosTargetOffset;
+
+    if (targetOffset === null) {
+      this.resetEndOfStreamState();
+      return;
+    }
+
+    if (
+      this.getWriteOffset() >
+      targetOffset
+    ) {
+      this.resetEndOfStreamState();
+      return;
+    }
+
+    const availableStart =
+      this.getAvailableStartOffset();
+
+    if (
+      this.committedOffset <
+      availableStart
+    ) {
+      if (
+        this.hasPendingRecognitionText()
+      ) {
+        this.forceAdoptLatest(
+          "end-of-stream-ring-buffer-overflow",
+          true,
+          true,
+          false,
+        );
+      }
+
+      this.committedOffset =
+        availableStart;
+      this.resetAgreementSeries();
+    }
+
+    const startOffset =
+      this.committedOffset;
+    const sampleLength =
+      targetOffset - startOffset;
+
+    if (
+      sampleLength <
+      MIN_EOS_FLUSH_SAMPLES
+    ) {
+      if (
+        this.hasPendingRecognitionText()
+      ) {
+        this.forceAdoptLatest(
+          "end-of-stream-short-audio",
+          true,
+          true,
+          false,
+        );
+      }
+
+      this.committedOffset = Math.max(
+        this.committedOffset,
+        targetOffset,
+      );
+      this.resetAgreementSeries();
+      this.completeEndOfStreamFlush(
+        targetOffset,
+      );
+      return;
+    }
+
+    if (this.eosTranscriptionIssued) {
+      this.completeEndOfStreamFlush(
+        targetOffset,
+      );
+      return;
+    }
+
+    const audio = this.copySamples(
+      startOffset,
+      targetOffset,
+    );
+    const history = this.getEnergyHistory();
+    const trackedMaxRms = maxRmsForRange(
+      history,
+      startOffset,
+      targetOffset,
+    );
+    const sampledMaxRms =
+      computeMaxWindowRms(
+        audio,
+        ENERGY_HOP_SAMPLES,
+      );
+    const maxRms =
+      trackedMaxRms === null
+        ? sampledMaxRms
+        : Math.max(
+            trackedMaxRms,
+            sampledMaxRms,
+          );
+    const requestId =
+      `seg:${this.nextRequestSequence}`;
+
+    this.nextRequestSequence += 1;
+    this.eosTranscriptionIssued = true;
+    this.inFlight = {
+      requestId,
+      startOffset,
+      endOffset: targetOffset,
+      sampleLength,
+      maxRms,
+      flush: true,
+    };
+    this.busy = true;
+
+    const message: WhisperTranscribeMessage = {
+      t: "WHISPER_TRANSCRIBE",
+      requestId,
+      audio,
+    };
+
+    this.worker.postMessage(
+      message,
+      [audio.buffer as ArrayBuffer],
+    );
+  }
+
+  private completeEndOfStreamFlush(
+    completedOffset: number,
+  ): void {
+    this.eosPending = false;
+    this.eosTargetOffset = null;
+    this.eosCompletedOffset =
+      completedOffset;
+    this.eosTranscriptionIssued = false;
+  }
+
+  private resumeAfterEndOfStream(
+    writeOffset: number,
+  ): void {
+    const boundary =
+      this.eosTargetOffset ??
+      this.eosCompletedOffset;
+
+    if (
+      boundary !== null &&
+      writeOffset > boundary
+    ) {
+      this.resetEndOfStreamState();
+    }
+  }
+
+  private resetEndOfStreamState(): void {
+    this.eosPending = false;
+    this.eosTargetOffset = null;
+    this.eosCompletedOffset = null;
+    this.eosTranscriptionIssued = false;
   }
 
   private processAgreement(
@@ -1025,7 +1370,30 @@ export class WhisperSegmenter {
       { requestId, message },
     );
     this.onError(message);
-    this.forceAgreementIfTimedOut();
+
+    if (segment.flush) {
+      if (
+        this.hasPendingRecognitionText()
+      ) {
+        this.forceAdoptLatest(
+          "end-of-stream-error",
+          true,
+          true,
+          false,
+        );
+      }
+
+      this.committedOffset = Math.max(
+        this.committedOffset,
+        segment.endOffset,
+      );
+      this.resetAgreementSeries();
+      this.completeEndOfStreamFlush(
+        segment.endOffset,
+      );
+    } else {
+      this.forceAgreementIfTimedOut();
+    }
 
     queueMicrotask(() => {
       this.tick();
