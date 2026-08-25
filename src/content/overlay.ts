@@ -456,6 +456,31 @@ export class CaptionOverlay {
     this.resumeCaptionDisplay();
   }
 
+  clearPlaybackFreezeOnSeek(): void {
+    if (this.destroyed) {
+      return;
+    }
+
+    const soughtAt = performance.now();
+
+    this.cancelCueAdvance();
+    this.cancelCaptionFade();
+    this.resetCaptionFadeVisualState();
+
+    if (this.activeCue !== null) {
+      this.activeCue.shownAt = soughtAt;
+    }
+
+    this.playbackPausedAt =
+      this.playbackPaused
+        ? soughtAt
+        : null;
+
+    this.tryAdvanceCue();
+    this.scheduleCaptionFade();
+    this.updateCaptionVisibility();
+  }
+
   setStatus(
     state: CaptionOverlayStatus,
     progress?: number,

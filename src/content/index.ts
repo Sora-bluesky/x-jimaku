@@ -192,6 +192,11 @@ function installTargetPlaybackListeners():
     handleTargetPlaybackEvent,
     true,
   );
+  document.addEventListener(
+    "seeking",
+    handleTargetPlaybackEvent,
+    true,
+  );
 }
 
 function handleTargetPlaybackEvent(
@@ -212,6 +217,11 @@ function handleTargetPlaybackEvent(
     target === null ||
     event.target !== target
   ) {
+    return;
+  }
+
+  if (event.type === "seeking") {
+    captionOverlay?.clearPlaybackFreezeOnSeek();
     return;
   }
 
