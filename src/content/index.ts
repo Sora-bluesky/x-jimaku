@@ -8,6 +8,7 @@ import {
   type ContentScriptProbeResultMessage,
   type CsDevSetSettingsMessage,
   type CsDevToggleMessage,
+  type CsEosMessage,
   type CsPcmMessage,
   type CsPongMessage,
   type CsTapStateMessage,
@@ -149,6 +150,12 @@ let reconnectTimerId: number | null = null;
 let reconnectDelayMs =
   INITIAL_RECONNECT_DELAY_MS;
 let activeTap: AudioTap | null = null;
+let endedAudioTapTarget:
+  | HTMLVideoElement
+  | null = null;
+let lastEosRequestId:
+  | string
+  | null = null;
 let tapOperationTail: Promise<void> =
   Promise.resolve();
 let contentTranslationTail: Promise<void> =
@@ -347,7 +354,8 @@ function handleTargetPlaybackEvent(
   event: Event,
 ): void {
   const target =
-    getCurrentAudioTapTarget();
+    getCurrentAudioTapTarget() ??
+    endedAudioTapTarget;
 
   if (target !== playbackEventTarget) {
     playbackEventTarget = target;
@@ -374,13 +382,31 @@ function handleTargetPlaybackEvent(
   captionOverlay?.setPlaybackPaused(
     targetPlaybackPaused,
   );
+
+  if (
+    (
+      event.type === "play" ||
+      event.type === "playing"
+    ) &&
+    activeTap === null &&
+    lastEosRequestId !== null &&
+    contentSessionRequestId ===
+      lastEosRequestId
+  ) {
+    const requestId = lastEosRequestId;
+
+    void enqueueTapOperation(() =>
+      startTap(requestId),
+    );
+  }
 }
 
 function syncOverlayPlaybackGate(
   overlay: CaptionOverlay,
 ): void {
   const target =
-    getCurrentAudioTapTarget();
+    getCurrentAudioTapTarget() ??
+    endedAudioTapTarget;
 
   if (target !== playbackEventTarget) {
     playbackEventTarget = target;
@@ -602,6 +628,8 @@ function connectBackgroundPort(): void {
       activeCaptureRequestId = null;
       activeTranslationPath = null;
       activeSilentInputHint = false;
+      endedAudioTapTarget = null;
+      lastEosRequestId = null;
       activeShowOriginal =
         DEFAULT_SETTINGS.showOriginal;
       contentSessionRequestId = null;
@@ -706,6 +734,8 @@ function handleStartTapMessage(
     activeCaptureRequestId ===
     message.requestId;
 
+  endedAudioTapTarget = null;
+  lastEosRequestId = null;
   contentSessionRequestId =
     message.requestId;
   activeCaptureRequestId =
@@ -1164,6 +1194,12 @@ async function startTap(
         return;
       }
 
+      endedAudioTapTarget = null;
+
+      if (lastEosRequestId === requestId) {
+        lastEosRequestId = null;
+      }
+
       const attachContextTerms =
         pendingContextTermsRequestId ===
         requestId;
@@ -1210,11 +1246,22 @@ async function startTap(
       }
     },
 
-    onStopped(detail) {
+    onStopped(detail, target) {
       if (activeTap === tap) {
         activeTap = null;
       }
 
+      if (detail === "track-ended") {
+        endedAudioTapTarget =
+          target?.isConnected === true
+            ? target
+            : null;
+        postEndOfStream(requestId);
+        return;
+      }
+
+      endedAudioTapTarget = null;
+      lastEosRequestId = null;
       clearPendingContextTerms(requestId);
 
       if (
@@ -1243,6 +1290,8 @@ async function startTap(
         activeTap = null;
       }
 
+      endedAudioTapTarget = null;
+      lastEosRequestId = null;
       clearPendingContextTerms(requestId);
 
       if (
@@ -1286,6 +1335,8 @@ async function startTap(
       activeTap = null;
     }
 
+    endedAudioTapTarget = null;
+    lastEosRequestId = null;
     clearPendingContextTerms(requestId);
 
     if (
@@ -1312,6 +1363,8 @@ async function stopTap(
   requestId: string,
   detail: string,
 ): Promise<void> {
+  endedAudioTapTarget = null;
+  lastEosRequestId = null;
   clearPendingContextTerms(requestId);
 
   const tap = activeTap;
@@ -1413,6 +1466,8 @@ function handleCaptureState(
     case "error":
       activeCaptureRequestId = null;
       activeTranslationPath = null;
+      endedAudioTapTarget = null;
+      lastEosRequestId = null;
       activeSilentInputHint = false;
       contentSessionRequestId = null;
       clearPendingContextTerms();
@@ -1424,6 +1479,8 @@ function handleCaptureState(
     case "idle":
       activeCaptureRequestId = null;
       activeTranslationPath = null;
+      endedAudioTapTarget = null;
+      lastEosRequestId = null;
       activeSilentInputHint = false;
       contentSessionRequestId = null;
       clearPendingContextTerms();
@@ -1474,8 +1531,9 @@ function ensureOverlay(): CaptionOverlay {
   }
 
   const overlay = new CaptionOverlay({
-    getTargetVideo:
-      getCurrentAudioTapTarget,
+    getTargetVideo: () =>
+      getCurrentAudioTapTarget() ??
+      endedAudioTapTarget,
     showOriginal: activeShowOriginal,
     onCaptionFadeOut() {
       if (
@@ -1542,6 +1600,23 @@ function destroyOverlay(): void {
   overlay?.destroy();
 }
 
+function postEndOfStream(
+  requestId: string,
+): void {
+  if (lastEosRequestId === requestId) {
+    return;
+  }
+
+  lastEosRequestId = requestId;
+
+  const message: CsEosMessage = {
+    t: "CS_EOS",
+    requestId,
+  };
+
+  postContentMessage(message);
+}
+
 function postTapState(
   requestId: string,
   state: CsTapStateMessage["state"],
@@ -1562,6 +1637,7 @@ function postTapState(
 function postContentMessage(
   message:
     | CsPcmMessage
+    | CsEosMessage
     | CsTapStateMessage
     | CsTranslateResultMessage,
 ): void {

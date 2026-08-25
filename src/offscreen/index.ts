@@ -6,6 +6,7 @@ import {
   nowIso,
   toProbeError,
   type AdapterInfo,
+  type CsEosMessage,
   type CsPcmMessage,
   type CsTranslateMessage,
   type CsTranslateResultMessage,
@@ -115,6 +116,9 @@ let activeRecognitionRequestId:
 let activePcmRequestId:
   | string
   | null = null;
+let pendingEosRequestId:
+  | string
+  | null = null;
 let activeContextTerms: string[] = [];
 let expectedPcmSequence = 0;
 let lastPcmGapLogAt =
@@ -217,6 +221,13 @@ function connectBackgroundPort(): void {
           isMessageOfType(message, "CS_PCM")
         ) {
           handlePcm(message);
+          return;
+        }
+
+        if (
+          isMessageOfType(message, "CS_EOS")
+        ) {
+          handleEndOfStream(message);
           return;
         }
 
@@ -395,6 +406,8 @@ function handlePcm(
     return;
   }
 
+  pendingEosRequestId = null;
+
   if (message.contextTerms !== undefined) {
     activeContextTerms = [
       ...message.contextTerms,
@@ -436,6 +449,36 @@ function handlePcm(
       },
     );
   }
+}
+
+function handleEndOfStream(
+  message: CsEosMessage,
+): void {
+  if (
+    activePcmRequestId !==
+      message.requestId ||
+    requestedStopIds.has(
+      message.requestId,
+    ) ||
+    !audioCapture.isActive()
+  ) {
+    return;
+  }
+
+  pendingEosRequestId = message.requestId;
+
+  const segmenter = activeSegmenter;
+
+  if (
+    segmenter === null ||
+    activeRecognitionRequestId !==
+      message.requestId
+  ) {
+    return;
+  }
+
+  pendingEosRequestId = null;
+  segmenter.flushPendingAudio();
 }
 
 function handleContentTranslationResult(
@@ -532,6 +575,7 @@ async function handleCaptureStart(
     return;
   }
 
+  pendingEosRequestId = null;
   activeContextTerms = [];
 
   publishState(
@@ -828,6 +872,11 @@ async function handleCaptureStart(
 
     activeSegmenter.start();
 
+    if (pendingEosRequestId === requestId) {
+      pendingEosRequestId = null;
+      activeSegmenter.flushPendingAudio();
+    }
+
     publishState(
       createCaptureState("running", {
         requestId,
@@ -875,6 +924,8 @@ async function handleCaptureStart(
 async function handleCaptureStop(
   requestId: string,
 ): Promise<void> {
+  pendingEosRequestId = null;
+
   publishState(
     createCaptureState("stopping", {
       requestId,
