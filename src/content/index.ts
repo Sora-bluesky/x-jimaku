@@ -73,6 +73,9 @@ let contentTranslatorGeneration = 0;
 let contentSessionRequestId:
   | string
   | null = null;
+let activeCaptureRequestId:
+  | string
+  | null = null;
 let captionOverlay:
   | CaptionOverlay
   | null = null;
@@ -84,8 +87,13 @@ let lastCaptureStatus: CaptureStatus =
 let activeTranslationPath:
   | TranslationPath
   | null = null;
+let activeSilentInputHint = false;
 let activeShowOriginal =
   DEFAULT_SETTINGS.showOriginal;
+let playbackEventTarget:
+  | HTMLVideoElement
+  | null = null;
+let targetPlaybackPaused = false;
 
 const instanceWindow =
   window as ContentInstanceWindow;
@@ -113,6 +121,7 @@ function initializeContentScript(): void {
     version: CONTENT_INSTANCE_VERSION,
   });
 
+  installTargetPlaybackListeners();
   connectBackgroundPort();
   void runInitialProbe();
 
@@ -164,6 +173,76 @@ function initializeContentScript(): void {
       return true;
     },
   );
+}
+
+function installTargetPlaybackListeners():
+  void {
+  document.addEventListener(
+    "pause",
+    handleTargetPlaybackEvent,
+    true,
+  );
+  document.addEventListener(
+    "play",
+    handleTargetPlaybackEvent,
+    true,
+  );
+  document.addEventListener(
+    "playing",
+    handleTargetPlaybackEvent,
+    true,
+  );
+}
+
+function handleTargetPlaybackEvent(
+  event: Event,
+): void {
+  const target =
+    getCurrentAudioTapTarget();
+
+  if (target !== playbackEventTarget) {
+    playbackEventTarget = target;
+    targetPlaybackPaused = false;
+    captionOverlay?.setPlaybackPaused(
+      false,
+    );
+  }
+
+  if (
+    target === null ||
+    event.target !== target
+  ) {
+    return;
+  }
+
+  targetPlaybackPaused =
+    event.type === "pause";
+  captionOverlay?.setPlaybackPaused(
+    targetPlaybackPaused,
+  );
+}
+
+function syncOverlayPlaybackGate(
+  overlay: CaptionOverlay,
+): void {
+  const target =
+    getCurrentAudioTapTarget();
+
+  if (target !== playbackEventTarget) {
+    playbackEventTarget = target;
+    targetPlaybackPaused = false;
+  }
+
+  overlay.setPlaybackPaused(
+    target !== null &&
+    targetPlaybackPaused,
+  );
+}
+
+function clearTargetPlaybackFreeze(): void {
+  playbackEventTarget = null;
+  targetPlaybackPaused = false;
+  captionOverlay?.setPlaybackPaused(false);
 }
 
 function connectBackgroundPort(): void {
@@ -249,9 +328,9 @@ function connectBackgroundPort(): void {
           )
         ) {
           if (
-            contentSessionRequestId !== null &&
-            message.requestId !==
-              contentSessionRequestId
+            !isPresentationMessageCurrent(
+              message.requestId,
+            )
           ) {
             return;
           }
@@ -260,6 +339,29 @@ function connectBackgroundPort(): void {
             message.path;
           ensureOverlay().setTranslationPath(
             message.path,
+          );
+          return;
+        }
+
+        if (
+          isMessageOfType(
+            message,
+            "SW_SILENT_INPUT",
+          )
+        ) {
+          if (
+            lastCaptureStatus !== "running" ||
+            !isPresentationMessageCurrent(
+              message.requestId,
+            )
+          ) {
+            return;
+          }
+
+          activeSilentInputHint =
+            message.showHint;
+          ensureOverlay().setSilentInputHint(
+            message.showHint,
           );
           return;
         }
@@ -313,6 +415,7 @@ function connectBackgroundPort(): void {
           "extension was updated; this page's script is retiring (reload the page to refresh)",
         );
         lastCaptureStatus = "idle";
+        activeCaptureRequestId = null;
         contentSessionRequestId = null;
         destroyOverlay();
         return;
@@ -337,7 +440,9 @@ function connectBackgroundPort(): void {
       }
 
       lastCaptureStatus = "idle";
+      activeCaptureRequestId = null;
       activeTranslationPath = null;
+      activeSilentInputHint = false;
       activeShowOriginal =
         DEFAULT_SETTINGS.showOriginal;
       contentSessionRequestId = null;
@@ -414,11 +519,16 @@ function handleStartTapMessage(
       message.requestId
   ) {
     lastCaptureStatus = "starting";
+    activeCaptureRequestId =
+      message.requestId;
     cancelOverlayDestroy();
 
     const overlay = ensureOverlay();
     overlay.setTranslationPath(
       activeTranslationPath,
+    );
+    overlay.setSilentInputHint(
+      activeSilentInputHint,
     );
     overlay.setStatus("loadingModel");
 
@@ -432,16 +542,32 @@ function handleStartTapMessage(
     return;
   }
 
+  const preservePresentation =
+    activeCaptureRequestId ===
+    message.requestId;
+
   contentSessionRequestId =
     message.requestId;
+  activeCaptureRequestId =
+    message.requestId;
   resetContentTranslator();
-  activeTranslationPath = null;
+
+  if (!preservePresentation) {
+    activeTranslationPath = null;
+    activeSilentInputHint = false;
+  }
+
   lastCaptureStatus = "starting";
 
   destroyOverlay();
 
   const overlay = ensureOverlay();
-  overlay.setTranslationPath(null);
+  overlay.setTranslationPath(
+    activeTranslationPath,
+  );
+  overlay.setSilentInputHint(
+    activeSilentInputHint,
+  );
   overlay.setStatus("loadingModel");
 
   void enqueueTapOperation(() =>
@@ -906,7 +1032,9 @@ async function startTap(
       }
 
       lastCaptureStatus = "stopping";
+      activeCaptureRequestId = null;
       activeTranslationPath = null;
+      activeSilentInputHint = false;
       destroyOverlay();
 
       postTapState(
@@ -929,6 +1057,9 @@ async function startTap(
         resetContentTranslator();
       }
 
+      activeCaptureRequestId = null;
+      activeTranslationPath = null;
+      activeSilentInputHint = false;
       showOverlayError();
 
       postTapState(
@@ -966,6 +1097,9 @@ async function startTap(
       resetContentTranslator();
     }
 
+    activeCaptureRequestId = null;
+    activeTranslationPath = null;
+    activeSilentInputHint = false;
     showOverlayError();
 
     postTapState(
@@ -1018,18 +1152,50 @@ async function stopTap(
 function handleCaptureState(
   state: CaptureState,
 ): void {
+  if (
+    isActivePresentationStatus(
+      state.status,
+    ) &&
+    state.requestId !== undefined
+  ) {
+    if (
+      activeCaptureRequestId !==
+      state.requestId
+    ) {
+      activeCaptureRequestId =
+        state.requestId;
+      activeTranslationPath = null;
+      activeSilentInputHint = false;
+
+      captionOverlay?.setTranslationPath(
+        null,
+      );
+      captionOverlay?.setSilentInputHint(
+        false,
+      );
+    }
+  }
+
   lastCaptureStatus = state.status;
 
   switch (state.status) {
     case "starting":
+      activeSilentInputHint = false;
       cancelOverlayDestroy();
+      ensureOverlay().setSilentInputHint(
+        false,
+      );
       ensureOverlay().setStatus(
         "loadingModel",
       );
       return;
 
     case "loadingModel":
+      activeSilentInputHint = false;
       cancelOverlayDestroy();
+      ensureOverlay().setSilentInputHint(
+        false,
+      );
       ensureOverlay().setStatus(
         "loadingModel",
         state.progress,
@@ -1038,11 +1204,16 @@ function handleCaptureState(
 
     case "running":
       cancelOverlayDestroy();
+      ensureOverlay().setSilentInputHint(
+        activeSilentInputHint,
+      );
       ensureOverlay().setStatus("running");
       return;
 
     case "error":
+      activeCaptureRequestId = null;
       activeTranslationPath = null;
+      activeSilentInputHint = false;
       contentSessionRequestId = null;
       resetContentTranslator();
       showOverlayError(state.progress);
@@ -1050,11 +1221,39 @@ function handleCaptureState(
 
     case "stopping":
     case "idle":
+      activeCaptureRequestId = null;
       activeTranslationPath = null;
+      activeSilentInputHint = false;
       contentSessionRequestId = null;
       resetContentTranslator();
       destroyOverlay();
   }
+}
+
+function isActivePresentationStatus(
+  status: CaptureStatus,
+): boolean {
+  return (
+    status === "starting" ||
+    status === "loadingModel" ||
+    status === "running"
+  );
+}
+
+function isPresentationMessageCurrent(
+  requestId: string,
+): boolean {
+  const expectedRequestId =
+    contentSessionRequestId ??
+    activeCaptureRequestId;
+
+  return (
+    expectedRequestId !== null &&
+    expectedRequestId === requestId &&
+    isActivePresentationStatus(
+      lastCaptureStatus,
+    )
+  );
 }
 
 function handleCaption(
@@ -1066,6 +1265,9 @@ function handleCaption(
 
 function ensureOverlay(): CaptionOverlay {
   if (captionOverlay !== null) {
+    syncOverlayPlaybackGate(
+      captionOverlay,
+    );
     return captionOverlay;
   }
 
@@ -1086,7 +1288,11 @@ function ensureOverlay(): CaptionOverlay {
   overlay.setTranslationPath(
     activeTranslationPath,
   );
+  overlay.setSilentInputHint(
+    activeSilentInputHint,
+  );
   captionOverlay = overlay;
+  syncOverlayPlaybackGate(overlay);
   return overlay;
 }
 
@@ -1094,11 +1300,14 @@ function showOverlayError(
   progress?: number,
 ): void {
   lastCaptureStatus = "error";
+  activeSilentInputHint = false;
   cancelOverlayDestroy();
+  clearTargetPlaybackFreeze();
 
   const overlay = ensureOverlay();
   overlay.clear();
   overlay.setTranslationPath(null);
+  overlay.setSilentInputHint(false);
   overlay.setStatus("error", progress);
 
   overlayDestroyTimerId =
@@ -1124,6 +1333,7 @@ function cancelOverlayDestroy(): void {
 
 function destroyOverlay(): void {
   cancelOverlayDestroy();
+  clearTargetPlaybackFreeze();
 
   const overlay = captionOverlay;
   captionOverlay = null;

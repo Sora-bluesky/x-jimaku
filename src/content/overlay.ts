@@ -55,6 +55,11 @@ interface ActiveCue {
   element: HTMLDivElement;
 }
 
+interface SuspendedCaptionTimer {
+  remainingMs: number;
+  revision: number;
+}
+
 export interface CaptionLine {
   id: number;
   text: string;
@@ -133,11 +138,45 @@ export class CaptionOverlay {
     | null = null;
   private tentativeId: number | null = null;
   private tentativeAt: string | null = null;
+  private deferredTentative:
+    | CaptionLine
+    | null = null;
+  private deferredTentativeClearThroughId:
+    | number
+    | null = null;
   private cueMutationCount = 0;
   private droppedCueCount = 0;
   private acceleratedUntilDrained = false;
   private captionRevision = 0;
   private captionBarEnabled = true;
+  private silentInputHint = false;
+  private playbackPaused = false;
+  private playbackPausedAt:
+    | number
+    | null = null;
+  private captionFadeDeadline:
+    | number
+    | null = null;
+  private captionRemovalDeadline:
+    | number
+    | null = null;
+  private captionFadeRevision:
+    | number
+    | null = null;
+  private captionRemovalRevision:
+    | number
+    | null = null;
+  private suspendedCaptionFade:
+    | SuspendedCaptionTimer
+    | null = null;
+  private suspendedCaptionRemoval:
+    | SuspendedCaptionTimer
+    | null = null;
+  private pausedFadeOpacity:
+    | string
+    | null = null;
+  private restoreCaptionOpacityOnResume =
+    false;
 
   private frameId: number | null = null;
   private stableFrameCount = 0;
@@ -330,6 +369,7 @@ export class CaptionOverlay {
     this.captionRevision += 1;
     this.cancelCueAdvance();
     this.cancelCaptionFade();
+    this.resetCaptionFadeVisualState();
     this.pendingFinals.clear();
     this.waitingCues.splice(
       0,
@@ -338,14 +378,14 @@ export class CaptionOverlay {
     this.activeCue = null;
     this.tentativeId = null;
     this.tentativeAt = null;
+    this.deferredTentative = null;
+    this.deferredTentativeClearThroughId =
+      null;
     this.acceleratedUntilDrained = false;
     this.captionBarEnabled = false;
 
     this.cueContainer.replaceChildren();
     this.tentativeLine.textContent = "";
-    this.captionLine.classList.remove(
-      "is-fading",
-    );
     this.captionLine.classList.add(
       "is-empty",
     );
@@ -381,6 +421,39 @@ export class CaptionOverlay {
 
     this.updateCaptionVisibility();
     this.updateLayout();
+  }
+
+  setSilentInputHint(
+    showHint: boolean,
+  ): void {
+    if (this.destroyed) {
+      return;
+    }
+
+    if (this.silentInputHint === showHint) {
+      return;
+    }
+
+    this.silentInputHint = showHint;
+    this.updateTargetChip();
+    this.updateLayout();
+    this.startFrameLoop();
+  }
+
+  setPlaybackPaused(paused: boolean): void {
+    if (
+      this.destroyed ||
+      this.playbackPaused === paused
+    ) {
+      return;
+    }
+
+    if (paused) {
+      this.pauseCaptionDisplay();
+      return;
+    }
+
+    this.resumeCaptionDisplay();
   }
 
   setStatus(
@@ -428,6 +501,7 @@ export class CaptionOverlay {
     this.destroyed = true;
     this.cancelCueAdvance();
     this.cancelCaptionFade();
+    this.resetCaptionFadeVisualState();
 
     if (this.frameId !== null) {
       cancelAnimationFrame(this.frameId);
@@ -451,12 +525,237 @@ export class CaptionOverlay {
       0,
       this.waitingCues.length,
     );
+    this.deferredTentative = null;
+    this.deferredTentativeClearThroughId =
+      null;
+    this.playbackPaused = false;
+    this.playbackPausedAt = null;
     this.targetVideo = null;
     this.lastLayoutSnapshot = null;
     this.hideHostPopover();
     this.host.remove();
 
     console.log("[overlay]", "overlay destroyed");
+  }
+
+  private pauseCaptionDisplay(): void {
+    const pausedAt = performance.now();
+
+    this.playbackPaused = true;
+    this.playbackPausedAt = pausedAt;
+    this.cancelCueAdvance();
+    this.suspendCaptionTimers(pausedAt);
+  }
+
+  private resumeCaptionDisplay(): void {
+    const resumedAt = performance.now();
+    const pausedAt = this.playbackPausedAt;
+
+    this.playbackPaused = false;
+    this.playbackPausedAt = null;
+
+    if (
+      pausedAt !== null &&
+      this.activeCue !== null
+    ) {
+      this.activeCue.shownAt +=
+        Math.max(0, resumedAt - pausedAt);
+    }
+
+    if (
+      this.restoreCaptionOpacityOnResume
+    ) {
+      this.resetCaptionFadeVisualState();
+    }
+
+    this.applyDeferredTentativeState();
+    this.resumeSuspendedCaptionTimers();
+    this.tryAdvanceCue();
+    this.updateCaptionVisibility();
+  }
+
+  private suspendCaptionTimers(
+    pausedAt: number,
+  ): void {
+    if (this.captionFadeTimerId !== null) {
+      globalThis.clearTimeout(
+        this.captionFadeTimerId,
+      );
+      this.captionFadeTimerId = null;
+
+      this.suspendedCaptionFade = {
+        remainingMs: Math.max(
+          0,
+          (
+            this.captionFadeDeadline ??
+            pausedAt
+          ) - pausedAt,
+        ),
+        revision:
+          this.captionFadeRevision ??
+          this.captionRevision,
+      };
+      this.captionFadeDeadline = null;
+      this.captionFadeRevision = null;
+    }
+
+    if (
+      this.captionRemovalTimerId !== null
+    ) {
+      this.freezeCaptionFadeVisual();
+
+      globalThis.clearTimeout(
+        this.captionRemovalTimerId,
+      );
+      this.captionRemovalTimerId = null;
+
+      this.suspendedCaptionRemoval = {
+        remainingMs: Math.max(
+          0,
+          (
+            this.captionRemovalDeadline ??
+            pausedAt
+          ) - pausedAt,
+        ),
+        revision:
+          this.captionRemovalRevision ??
+          this.captionRevision,
+      };
+      this.captionRemovalDeadline = null;
+      this.captionRemovalRevision = null;
+    }
+  }
+
+  private resumeSuspendedCaptionTimers():
+    void {
+    if (
+      (
+        this.activeCue === null &&
+        this.tentativeLine.textContent === ""
+      ) ||
+      this.waitingCues.length > 0
+    ) {
+      this.suspendedCaptionFade = null;
+      this.suspendedCaptionRemoval = null;
+      return;
+    }
+
+    const suspendedRemoval =
+      this.suspendedCaptionRemoval;
+    const suspendedFade =
+      this.suspendedCaptionFade;
+
+    this.suspendedCaptionRemoval = null;
+    this.suspendedCaptionFade = null;
+
+    if (suspendedRemoval !== null) {
+      this.armCaptionRemoval(
+        suspendedRemoval.remainingMs,
+        suspendedRemoval.revision,
+      );
+      return;
+    }
+
+    if (suspendedFade !== null) {
+      this.armCaptionFade(
+        suspendedFade.remainingMs,
+        suspendedFade.revision,
+      );
+    }
+  }
+
+  private freezeCaptionFadeVisual(): void {
+    if (
+      !this.captionLine.classList.contains(
+        "is-fading",
+      )
+    ) {
+      return;
+    }
+
+    const opacity =
+      getComputedStyle(
+        this.captionLine,
+      ).opacity;
+
+    this.pausedFadeOpacity = opacity;
+    this.captionLine.style.transition =
+      "none";
+    this.captionLine.style.opacity =
+      opacity;
+  }
+
+  private resumeCaptionFadeVisual(
+    remainingMs: number,
+  ): void {
+    if (this.pausedFadeOpacity === null) {
+      return;
+    }
+
+    this.captionLine.style.setProperty(
+      "--caption-fade-duration",
+      `${Math.max(
+        1,
+        Math.ceil(remainingMs),
+      )}ms`,
+    );
+    this.captionLine.style.transition =
+      "none";
+    this.captionLine.style.opacity =
+      this.pausedFadeOpacity;
+
+    void this.captionLine.offsetWidth;
+
+    this.captionLine.style.removeProperty(
+      "transition",
+    );
+    this.captionLine.style.removeProperty(
+      "opacity",
+    );
+    this.pausedFadeOpacity = null;
+  }
+
+  private resetCaptionFadeVisualState():
+    void {
+    this.captionLine.classList.remove(
+      "is-fading",
+    );
+    this.captionLine.style.removeProperty(
+      "transition",
+    );
+    this.captionLine.style.removeProperty(
+      "opacity",
+    );
+    this.captionLine.style.removeProperty(
+      "--caption-fade-duration",
+    );
+    this.pausedFadeOpacity = null;
+    this.restoreCaptionOpacityOnResume =
+      false;
+  }
+
+  private applyDeferredTentativeState():
+    void {
+    const clearThroughId =
+      this.deferredTentativeClearThroughId;
+    const deferred =
+      this.deferredTentative;
+
+    this.deferredTentativeClearThroughId =
+      null;
+    this.deferredTentative = null;
+
+    if (
+      clearThroughId !== null &&
+      this.tentativeId !== null &&
+      this.tentativeId <= clearThroughId
+    ) {
+      this.clearTentative();
+    }
+
+    if (deferred !== null) {
+      this.receiveTentative(deferred);
+    }
   }
 
   private receiveCommittedClause(
@@ -479,12 +778,7 @@ export class CaptionOverlay {
         line.id,
       );
 
-    if (
-      this.tentativeId !== null &&
-      this.tentativeId <= line.id
-    ) {
-      this.clearTentative();
-    }
+    this.clearTentativeThrough(line.id);
 
     if (
       ja === "" &&
@@ -621,17 +915,43 @@ export class CaptionOverlay {
       return;
     }
 
+    const latestTentativeId =
+      this.deferredTentative?.id ??
+      this.tentativeId;
+    const latestTentativeAt =
+      this.deferredTentative?.at ??
+      this.tentativeAt;
+
     if (
-      this.tentativeId !== null &&
+      latestTentativeId !== null &&
       (
-        line.id < this.tentativeId ||
+        line.id < latestTentativeId ||
         (
-          line.id === this.tentativeId &&
-          this.tentativeAt !== null &&
-          line.at < this.tentativeAt
+          line.id === latestTentativeId &&
+          latestTentativeAt !== null &&
+          line.at < latestTentativeAt
         )
       )
     ) {
+      return;
+    }
+
+    if (this.playbackPaused) {
+      if (
+        this.deferredTentativeClearThroughId !==
+          null &&
+        line.id <=
+          this.deferredTentativeClearThroughId
+      ) {
+        return;
+      }
+
+      this.deferredTentative = {
+        ...line,
+        final: false,
+      };
+      this.captionBarEnabled = true;
+      this.cancelCaptionFade();
       return;
     }
 
@@ -644,6 +964,43 @@ export class CaptionOverlay {
     this.cancelCaptionFade();
     this.updateCaptionVisibility();
     this.scheduleCaptionFade();
+  }
+
+  private clearTentativeThrough(
+    id: number,
+  ): void {
+    const clearsVisible =
+      this.tentativeId !== null &&
+      this.tentativeId <= id;
+    const clearsDeferred =
+      this.deferredTentative !== null &&
+      this.deferredTentative.id <= id;
+
+    if (!clearsVisible && !clearsDeferred) {
+      return;
+    }
+
+    if (this.playbackPaused) {
+      this.deferredTentativeClearThroughId =
+        maximumNullable(
+          this.deferredTentativeClearThroughId,
+          id,
+        );
+
+      if (clearsDeferred) {
+        this.deferredTentative = null;
+      }
+
+      return;
+    }
+
+    if (clearsVisible) {
+      this.clearTentative();
+    }
+
+    if (clearsDeferred) {
+      this.deferredTentative = null;
+    }
   }
 
   private clearTentative(): void {
@@ -766,7 +1123,10 @@ export class CaptionOverlay {
   }
 
   private tryAdvanceCue(): void {
-    if (this.destroyed) {
+    if (
+      this.destroyed ||
+      this.playbackPaused
+    ) {
       return;
     }
 
@@ -979,10 +1339,11 @@ export class CaptionOverlay {
       !visible,
     );
 
-    if (!visible) {
-      this.captionLine.classList.remove(
-        "is-fading",
-      );
+    if (
+      !visible &&
+      !this.playbackPaused
+    ) {
+      this.resetCaptionFadeVisualState();
     }
 
     this.startFrameLoop();
@@ -1272,6 +1633,10 @@ export class CaptionOverlay {
       return;
     }
 
+    if (this.playbackPaused) {
+      this.setPlaybackPaused(false);
+    }
+
     const previous = this.targetVideo;
 
     if (previous !== null) {
@@ -1387,6 +1752,15 @@ export class CaptionOverlay {
       }
 
       case "running":
+        if (this.silentInputHint) {
+          this.targetChip.classList.add(
+            "status-silent",
+          );
+          this.targetText.textContent =
+            "▶ 音声がありません — 動画を再生してください";
+          return;
+        }
+
         this.targetChip.classList.add(
           "status-running",
         );
@@ -1706,17 +2080,44 @@ export class CaptionOverlay {
       ) ||
       this.waitingCues.length > 0 ||
       this.captionFadeTimerId !== null ||
-      this.captionRemovalTimerId !== null
+      this.captionRemovalTimerId !== null ||
+      this.suspendedCaptionFade !== null ||
+      this.suspendedCaptionRemoval !== null
     ) {
       return;
     }
 
-    const expiringRevision =
-      this.captionRevision;
+    this.armCaptionFade(
+      CAPTION_VISIBLE_MS,
+      this.captionRevision,
+    );
+  }
+
+  private armCaptionFade(
+    delayMs: number,
+    expiringRevision: number,
+  ): void {
+    const normalizedDelay =
+      Math.max(0, delayMs);
+
+    if (this.playbackPaused) {
+      this.suspendedCaptionFade = {
+        remainingMs: normalizedDelay,
+        revision: expiringRevision,
+      };
+      return;
+    }
+
+    this.captionFadeRevision =
+      expiringRevision;
+    this.captionFadeDeadline =
+      performance.now() + normalizedDelay;
 
     this.captionFadeTimerId =
       window.setTimeout(() => {
         this.captionFadeTimerId = null;
+        this.captionFadeDeadline = null;
+        this.captionFadeRevision = null;
 
         if (
           this.captionRevision !==
@@ -1730,31 +2131,60 @@ export class CaptionOverlay {
           "is-fading",
         );
 
-        this.captionRemovalTimerId =
-          window.setTimeout(() => {
-            this.captionRemovalTimerId = null;
+        this.armCaptionRemoval(
+          CAPTION_FADE_MS,
+          expiringRevision,
+        );
+      }, Math.ceil(normalizedDelay));
+  }
 
-            if (
-              this.captionRevision !==
-                expiringRevision ||
-              this.waitingCues.length > 0
-            ) {
-              return;
-            }
+  private armCaptionRemoval(
+    delayMs: number,
+    expiringRevision: number,
+  ): void {
+    const normalizedDelay =
+      Math.max(0, delayMs);
 
-            this.activeCue = null;
-            this.clearTentative();
-            this.cueContainer.replaceChildren();
-            this.captionLine.classList.remove(
-              "is-fading",
-            );
-            this.captionLine.classList.add(
-              "is-empty",
-            );
-            this.updateLayout();
-            this.options.onCaptionFadeOut?.();
-          }, CAPTION_FADE_MS);
-      }, CAPTION_VISIBLE_MS);
+    if (this.playbackPaused) {
+      this.suspendedCaptionRemoval = {
+        remainingMs: normalizedDelay,
+        revision: expiringRevision,
+      };
+      return;
+    }
+
+    this.resumeCaptionFadeVisual(
+      normalizedDelay,
+    );
+    this.captionRemovalRevision =
+      expiringRevision;
+    this.captionRemovalDeadline =
+      performance.now() + normalizedDelay;
+
+    this.captionRemovalTimerId =
+      window.setTimeout(() => {
+        this.captionRemovalTimerId = null;
+        this.captionRemovalDeadline = null;
+        this.captionRemovalRevision = null;
+
+        if (
+          this.captionRevision !==
+            expiringRevision ||
+          this.waitingCues.length > 0
+        ) {
+          return;
+        }
+
+        this.activeCue = null;
+        this.clearTentative();
+        this.cueContainer.replaceChildren();
+        this.resetCaptionFadeVisualState();
+        this.captionLine.classList.add(
+          "is-empty",
+        );
+        this.updateLayout();
+        this.options.onCaptionFadeOut?.();
+      }, Math.ceil(normalizedDelay));
   }
 
   private cancelCaptionFade(): void {
@@ -1774,9 +2204,28 @@ export class CaptionOverlay {
       this.captionRemovalTimerId = null;
     }
 
-    this.captionLine.classList.remove(
-      "is-fading",
-    );
+    this.captionFadeDeadline = null;
+    this.captionRemovalDeadline = null;
+    this.captionFadeRevision = null;
+    this.captionRemovalRevision = null;
+    this.suspendedCaptionFade = null;
+    this.suspendedCaptionRemoval = null;
+
+    if (
+      this.playbackPaused &&
+      (
+        this.captionLine.classList.contains(
+          "is-fading",
+        ) ||
+        this.pausedFadeOpacity !== null
+      )
+    ) {
+      this.restoreCaptionOpacityOnResume =
+        true;
+      return;
+    }
+
+    this.resetCaptionFadeVisualState();
   }
 }
 
@@ -2290,7 +2739,12 @@ function getOverlayStyles(): string {
       pointer-events: none;
       opacity: 1;
       transition:
-        opacity ${CAPTION_FADE_MS}ms ease;
+        opacity
+        var(
+          --caption-fade-duration,
+          ${CAPTION_FADE_MS}ms
+        )
+        ease;
     }
 
     .caption-line.is-empty,
@@ -2441,7 +2895,8 @@ function getOverlayStyles(): string {
       text-shadow: none;
     }
 
-    .target-chip.status-loading {
+    .target-chip.status-loading,
+    .target-chip.status-silent {
       color: #422006;
       background: rgba(253, 224, 71, 0.94);
       border-color: rgba(202, 138, 4, 0.8);
