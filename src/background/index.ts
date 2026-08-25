@@ -19,6 +19,7 @@ import {
   type CsTranslateResultMessage,
   type DiagnosticsResultMessage,
   type M1Message,
+  type OffLevelMessage,
   type OffQueryMessage,
   type OffRecognitionMessage,
   type OffStartMessage,
@@ -34,6 +35,7 @@ import {
   type SwCaptionClearMessage,
   type SwCaptionMessage,
   type SwRecognitionMessage,
+  type SwSilentInputMessage,
   type SwTranslationStateMessage,
 } from "../shared/messages";
 import {
@@ -62,6 +64,8 @@ const CAPTURE_SESSION_STORAGE_KEY =
 const PORT_WAIT_MS = 2_000;
 const TRANSIENT_ERROR_MS = 2_500;
 const MAX_RECOGNITION_LINES = 50;
+const SILENT_INPUT_RMS_THRESHOLD = 0.001;
+const SILENT_INPUT_HINT_DELAY_MS = 10_000;
 
 type SnapshotPatch = Partial<
   Omit<ProbeSnapshot, "updatedAt">
@@ -126,6 +130,16 @@ let badgeWriteTail: Promise<void> =
 let storageWriteTail: Promise<void> =
   Promise.resolve();
 let latestRms = 0;
+let silentInputStartedAtMs:
+  | number
+  | null = null;
+let silentInputRequestId:
+  | string
+  | null = null;
+let silentInputHintActive = false;
+let silentInputTimerId:
+  | number
+  | null = null;
 let activeTranslationState:
   | SwTranslationStateMessage
   | null = null;
@@ -518,6 +532,7 @@ async function hydrateCaptureState(): Promise<void> {
     queueCaptureStateWrite(captureState);
     void queueCaptureSessionWrite(null);
   } finally {
+    resetSilentInputTracking();
     queueBadgeUpdate(captureState);
     broadcastCaptureState();
 
@@ -546,6 +561,8 @@ function beginCaptureStart(
 
   recognitionLines.clear();
   activeTranslationState = null;
+  latestRms = 0;
+  resetSilentInputTracking();
   localStartRequestId = requestId;
   offscreenStartRequestId = null;
   contentStartRequestId = null;
@@ -556,6 +573,8 @@ function beginCaptureStart(
     requestId,
     tabId,
   });
+
+  broadcastLevel();
 
   void finishCaptureStart(
     tabId,
@@ -702,6 +721,7 @@ function requestCaptureStop(
     clearSessionTracking();
     latestRms = 0;
     activeTranslationState = null;
+    resetSilentInputTracking();
     broadcastLevel();
     moveCaptureState("idle");
     return;
@@ -721,6 +741,7 @@ function requestCaptureStop(
         clearSessionTracking();
         latestRms = 0;
         activeTranslationState = null;
+        resetSilentInputTracking();
         broadcastLevel();
         moveCaptureState("idle");
       }
@@ -917,6 +938,17 @@ function handleContentPortConnected(
     }
 
     if (
+      captureState.status === "running" &&
+      captureState.requestId !== undefined
+    ) {
+      postSilentInputState(port, {
+        t: "SW_SILENT_INPUT",
+        requestId: captureState.requestId,
+        showHint: silentInputHintActive,
+      });
+    }
+
+    if (
       shouldClearCaptionForStatus(
         captureState.status,
       )
@@ -1047,6 +1079,7 @@ function handleContentTapState(
     clearSessionTracking();
     latestRms = 0;
     activeTranslationState = null;
+    resetSilentInputTracking();
     broadcastLevel();
 
     moveCaptureState("error", {
@@ -1139,8 +1172,9 @@ function handleOffscreenPortConnected(
           "OFF_LEVEL",
         )
       ) {
-        latestRms = message.rms;
-        broadcastLevel();
+        if (offscreenPort === port) {
+          handleOffscreenLevel(message);
+        }
         return;
       }
 
@@ -1245,6 +1279,156 @@ function handleOffscreenPortConnected(
   });
 }
 
+function handleOffscreenLevel(
+  message: OffLevelMessage,
+): void {
+  latestRms = message.rms;
+  broadcastLevel();
+
+  if (
+    captureState.status !== "running" ||
+    captureState.requestId === undefined
+  ) {
+    resetSilentInputTracking();
+    return;
+  }
+
+  if (
+    message.rms >=
+    SILENT_INPUT_RMS_THRESHOLD
+  ) {
+    resetSilentInputTracking();
+    return;
+  }
+
+  beginSilentInputTracking(
+    captureState.requestId,
+  );
+}
+
+function beginSilentInputTracking(
+  requestId: string,
+): void {
+  if (
+    silentInputRequestId === requestId &&
+    silentInputStartedAtMs !== null
+  ) {
+    return;
+  }
+
+  clearSilentInputTimer();
+  silentInputRequestId = requestId;
+  silentInputStartedAtMs = Date.now();
+  setSilentInputHint(false);
+  scheduleSilentInputTimer(
+    requestId,
+    silentInputStartedAtMs,
+  );
+}
+
+function scheduleSilentInputTimer(
+  requestId: string,
+  startedAtMs: number,
+): void {
+  clearSilentInputTimer();
+
+  const elapsed =
+    Date.now() - startedAtMs;
+  const remaining = Math.max(
+    0,
+    SILENT_INPUT_HINT_DELAY_MS - elapsed,
+  );
+
+  silentInputTimerId =
+    self.setTimeout(() => {
+      silentInputTimerId = null;
+
+      if (
+        captureState.status !== "running" ||
+        captureState.requestId !==
+          requestId ||
+        silentInputRequestId !==
+          requestId ||
+        silentInputStartedAtMs !==
+          startedAtMs ||
+        latestRms >=
+          SILENT_INPUT_RMS_THRESHOLD
+      ) {
+        return;
+      }
+
+      const currentElapsed =
+        Date.now() - startedAtMs;
+
+      if (
+        currentElapsed <
+        SILENT_INPUT_HINT_DELAY_MS
+      ) {
+        scheduleSilentInputTimer(
+          requestId,
+          startedAtMs,
+        );
+        return;
+      }
+
+      setSilentInputHint(true);
+    }, remaining);
+}
+
+function resetSilentInputTracking(): void {
+  clearSilentInputTimer();
+  silentInputStartedAtMs = null;
+  silentInputRequestId = null;
+  setSilentInputHint(false);
+}
+
+function clearSilentInputTimer(): void {
+  if (silentInputTimerId === null) {
+    return;
+  }
+
+  globalThis.clearTimeout(
+    silentInputTimerId,
+  );
+  silentInputTimerId = null;
+}
+
+function setSilentInputHint(
+  showHint: boolean,
+): void {
+  if (
+    silentInputHintActive === showHint
+  ) {
+    return;
+  }
+
+  silentInputHintActive = showHint;
+  relaySilentInputStateToContent();
+}
+
+function relaySilentInputStateToContent(): void {
+  if (
+    captureState.status !== "running" ||
+    captureState.requestId === undefined ||
+    captureState.tabId === undefined
+  ) {
+    return;
+  }
+
+  const port =
+    contentPorts.get(captureState.tabId);
+
+  if (port === undefined) {
+    return;
+  }
+
+  postSilentInputState(port, {
+    t: "SW_SILENT_INPUT",
+    requestId: captureState.requestId,
+    showHint: silentInputHintActive,
+  });
+}
+
 async function inspectUnexpectedOffscreenDisconnect(
   disconnectedPort: chrome.runtime.Port,
 ): Promise<void> {
@@ -1319,6 +1503,7 @@ function failActiveCaptureUnexpectedly(
   latestRms = 0;
   activeTranslationState = null;
   recognitionLines.clear();
+  resetSilentInputTracking();
   broadcastLevel();
 
   moveCaptureState("error", {
@@ -1473,6 +1658,14 @@ async function performRecoveredCaptureReconciliation(
     state: status.state,
   });
   postCaptureState(content);
+
+  if (status.state.status === "running") {
+    postSilentInputState(content, {
+      t: "SW_SILENT_INPUT",
+      requestId,
+      showHint: silentInputHintActive,
+    });
+  }
 
   console.info(
     "[bg]",
@@ -1978,6 +2171,7 @@ function resetSessionPresentation(): void {
   latestRms = 0;
   activeTranslationState = null;
   recognitionLines.clear();
+  resetSilentInputTracking();
   broadcastLevel();
 }
 
@@ -2246,6 +2440,10 @@ function replaceCaptureState(
   const previousState = captureState;
 
   captureState = nextState;
+  synchronizeSilentInputForCaptureState(
+    previousState,
+    nextState,
+  );
 
   if (
     nextState.status === "idle" ||
@@ -2283,6 +2481,37 @@ function replaceCaptureState(
   ) {
     scheduleOffscreenClose(
       `${previousState.status}-to-${nextState.status}`,
+    );
+  }
+}
+
+function synchronizeSilentInputForCaptureState(
+  previousState: CaptureState,
+  nextState: CaptureState,
+): void {
+  if (nextState.status !== "running") {
+    resetSilentInputTracking();
+    return;
+  }
+
+  const enteredRunning =
+    previousState.status !== "running" ||
+    previousState.requestId !==
+      nextState.requestId;
+
+  if (!enteredRunning) {
+    return;
+  }
+
+  resetSilentInputTracking();
+
+  if (
+    nextState.requestId !== undefined &&
+    latestRms <
+      SILENT_INPUT_RMS_THRESHOLD
+  ) {
+    beginSilentInputTracking(
+      nextState.requestId,
     );
   }
 }
@@ -2541,6 +2770,21 @@ function postTranslationState(
     console.warn(
       "[bg]",
       "could not relay translation state",
+      error,
+    );
+  }
+}
+
+function postSilentInputState(
+  port: chrome.runtime.Port,
+  message: SwSilentInputMessage,
+): void {
+  try {
+    port.postMessage(message);
+  } catch (error) {
+    console.warn(
+      "[bg]",
+      "could not relay silent-input state",
       error,
     );
   }

@@ -279,6 +279,12 @@ export interface SwTranslationStateMessage {
   path: TranslationPath;
 }
 
+export interface SwSilentInputMessage {
+  t: "SW_SILENT_INPUT";
+  requestId: string;
+  showHint: boolean;
+}
+
 export interface RecognitionPayload {
   id: number;
   text: string;
@@ -382,6 +388,7 @@ export type ContentPortMessage =
   | CsTranslateResultMessage
   | OffStateMessage
   | SwTranslationStateMessage
+  | SwSilentInputMessage
   | CaptionPortMessage;
 
 export type CapturePortMessage =
@@ -414,6 +421,7 @@ export type M1Message =
   | ContentPortMessage
   | SwRecognitionMessage
   | SwTranslationStateMessage
+  | SwSilentInputMessage
   | CaptionPortMessage;
 
 export function nowIso(): string {
@@ -677,6 +685,12 @@ export function isM1Message(
         isTranslationPath(value.path)
       );
 
+    case "SW_SILENT_INPUT":
+      return (
+        typeof value.requestId === "string" &&
+        typeof value.showHint === "boolean"
+      );
+
     case "OFF_RECOG":
     case "SW_RECOG":
     case "SW_CAPTION":
@@ -740,6 +754,10 @@ export function isContentPortMessage(
     isMessageOfType(
       value,
       "SW_TRANSLATION_STATE",
+    ) ||
+    isMessageOfType(
+      value,
+      "SW_SILENT_INPUT",
     ) ||
     isMessageOfType(value, "SW_CAPTION") ||
     isMessageOfType(
