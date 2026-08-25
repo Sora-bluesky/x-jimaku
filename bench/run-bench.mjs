@@ -640,24 +640,40 @@ class ClauseCollector {
     this.revision = 0;
   }
 
-  commit(store, key, text) {
+  commit(store, key, text, ja = "") {
     const cleaned = cleanEnglishText(text);
+    const cleanedJa = typeof ja === "string" ? ja.trim() : "";
 
     if (!cleaned) {
       return;
     }
 
     if (!store.has(key)) {
-      store.set(key, cleaned);
+      store.set(key, {
+        ja: cleanedJa,
+        text: cleaned,
+      });
       return;
     }
 
-    if (store.get(key) === cleaned) {
+    const existing = store.get(key);
+
+    if (existing.text === cleaned) {
+      if (cleanedJa && existing.ja !== cleanedJa) {
+        store.set(key, {
+          ja: cleanedJa,
+          text: cleaned,
+        });
+      }
+
       return;
     }
 
     this.revision += 1;
-    store.set(`${key}:revision-${this.revision}`, cleaned);
+    store.set(`${key}:revision-${this.revision}`, {
+      ja: cleanedJa,
+      text: cleaned,
+    });
   }
 
   ingestSession(records) {
@@ -677,23 +693,33 @@ class ClauseCollector {
         || captureStopped;
 
       if (isFinal) {
-        this.commit(this.optionsClauses, row.key, row.text);
+        this.commit(this.optionsClauses, row.key, row.text, row.ja);
       }
     }
   }
 
-  result() {
-    if (this.sessionClauses.size > 0) {
-      return {
-        clauses: [...this.sessionClauses.values()],
-        source: "chrome.storage.session",
-      };
-    }
+  resultFrom(store, source) {
+    const entries = [...store.values()];
 
     return {
-      clauses: [...this.optionsClauses.values()],
-      source: "options.html#recognition-log",
+      clauses: entries.map((entry) => entry.text),
+      jaClauses: entries.map((entry) => entry.ja),
+      source,
     };
+  }
+
+  result() {
+    if (this.sessionClauses.size > 0) {
+      return this.resultFrom(
+        this.sessionClauses,
+        "chrome.storage.session",
+      );
+    }
+
+    return this.resultFrom(
+      this.optionsClauses,
+      "options.html#recognition-log",
+    );
   }
 }
 
@@ -898,6 +924,8 @@ async function scrapeOptionsRows(page) {
       )
     );
 
+    const ja = row.querySelector(".recognition-ja")?.textContent?.trim() ?? "";
+
     const textWithoutJapanese = (element) => {
       const clone = element.cloneNode(true);
 
@@ -973,6 +1001,7 @@ async function scrapeOptionsRows(page) {
       explicitFinal,
       explicitInterim,
       index,
+      ja,
       key: `${identity}:${index}`,
       text,
     };
@@ -1131,10 +1160,36 @@ async function runBench(options, caseDefinition) {
           const session = await target.createCDPSession();
           await session.send("Runtime.enable");
           session.on("Runtime.consoleAPICalled", (event) => {
-            const parts = event.args.map((a) => (
-              a.value !== undefined ? String(a.value) : (a.description ?? "")
-            ));
-            traceLines.push(`[${target.type()}] ${parts.join(" ")}`);
+            void (async () => {
+              const parts = [];
+
+              for (const argument of event.args) {
+                if (argument.objectId) {
+                  try {
+                    const serialized = await session.send(
+                      "Runtime.callFunctionOn",
+                      {
+                        objectId: argument.objectId,
+                        functionDeclaration:
+                          "function() { try { return JSON.stringify(this); } catch { return String(this); } }",
+                        returnByValue: true,
+                      },
+                    );
+                    parts.push(String(serialized.result?.value).slice(0, 400));
+                  } catch {
+                    parts.push(argument.description ?? "?");
+                  }
+                } else {
+                  parts.push(
+                    argument.value !== undefined
+                      ? String(argument.value)
+                      : (argument.description ?? ""),
+                  );
+                }
+              }
+
+              traceLines.push(`[${target.type()}] ${parts.join(" ")}`);
+            })();
           });
         } catch {
           // best-effort tracing only
@@ -1300,7 +1355,7 @@ async function runBench(options, caseDefinition) {
     });
     const generatedAt = new Date();
     const result = {
-      schemaVersion: 1,
+      schemaVersion: 2,
       generatedAt: generatedAt.toISOString(),
       case: options.caseName,
       model: options.model,
@@ -1316,6 +1371,8 @@ async function runBench(options, caseDefinition) {
         clauses: collected.clauses,
         collectionSource: collected.source,
         hypothesis,
+        jaClauses: collected.jaClauses,
+        jaText: collected.jaClauses.filter(Boolean).join("\n"),
       },
       metrics,
     };
