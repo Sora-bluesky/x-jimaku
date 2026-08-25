@@ -6,6 +6,8 @@ import {
   nowIso,
   toProbeError,
   type ContentScriptProbeResultMessage,
+  type CsDevSetSettingsMessage,
+  type CsDevToggleMessage,
   type CsPcmMessage,
   type CsPongMessage,
   type CsTapStateMessage,
@@ -42,6 +44,8 @@ type ContentInstanceWindow = Window & {
 };
 
 const CONTENT_PORT_NAME = "content";
+const DEV_ORIGIN =
+  "http://127.0.0.1:8123";
 const INITIAL_RECONNECT_DELAY_MS = 100;
 const MAX_RECONNECT_DELAY_MS = 1_000;
 const ERROR_CHIP_VISIBLE_MS = 2_500;
@@ -218,6 +222,14 @@ function initializeContentScript(): void {
   });
 
   installTargetPlaybackListeners();
+
+  if (location.origin === DEV_ORIGIN) {
+    window.addEventListener(
+      "message",
+      handleDevMessage,
+    );
+  }
+
   connectBackgroundPort();
   void runInitialProbe();
 
@@ -269,6 +281,42 @@ function initializeContentScript(): void {
       return true;
     },
   );
+}
+
+function handleDevMessage(
+  event: MessageEvent<unknown>,
+): void {
+  if (event.source !== window) {
+    return;
+  }
+
+  if (
+    isMessageOfType(
+      event.data,
+      "CS_DEV_TOGGLE",
+    )
+  ) {
+    const message: CsDevToggleMessage = {
+      t: "CS_DEV_TOGGLE",
+    };
+
+    void chrome.runtime.sendMessage(message);
+    return;
+  }
+
+  if (
+    isMessageOfType(
+      event.data,
+      "CS_DEV_SET_SETTINGS",
+    )
+  ) {
+    const message: CsDevSetSettingsMessage = {
+      t: "CS_DEV_SET_SETTINGS",
+      settings: event.data.settings,
+    };
+
+    void chrome.runtime.sendMessage(message);
+  }
 }
 
 function installTargetPlaybackListeners():
