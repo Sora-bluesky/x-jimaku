@@ -191,6 +191,15 @@ export interface CsPongMessage {
   t: "CS_PONG";
 }
 
+export interface CsDevToggleMessage {
+  t: "CS_DEV_TOGGLE";
+}
+
+export interface CsDevSetSettingsMessage {
+  t: "CS_DEV_SET_SETTINGS";
+  settings: Record<string, unknown>;
+}
+
 export interface OffStartMessage {
   t: "OFF_START";
   requestId: string;
@@ -420,6 +429,8 @@ export type M1Message =
   | DiagnosticsResultMessage
   | CsPingMessage
   | CsPongMessage
+  | CsDevToggleMessage
+  | CsDevSetSettingsMessage
   | CapturePortMessage
   | ContentPortMessage
   | SwRecognitionMessage
@@ -596,7 +607,11 @@ export function isM1Message(
 
     case "CS_PING":
     case "CS_PONG":
+    case "CS_DEV_TOGGLE":
       return true;
+
+    case "CS_DEV_SET_SETTINGS":
+      return isRecord(value.settings);
 
     case "OFF_START":
       return (

@@ -40,6 +40,7 @@ import {
 } from "../shared/messages";
 import {
   readSettings,
+  writeSettings,
   type Settings,
 } from "../shared/settings";
 import {
@@ -56,6 +57,8 @@ import {
 const OFFSCREEN_DOCUMENT_PATH =
   "offscreen.html";
 const CONTENT_SCRIPT_PATH = "content.js";
+const DEV_ORIGIN =
+  "http://127.0.0.1:8123";
 const OFFSCREEN_PORT_NAME = "offscreen";
 const CONTENT_PORT_NAME = "content";
 const OPTIONS_PORT_NAME = "options";
@@ -270,6 +273,39 @@ chrome.runtime.onMessage.addListener(
     }
 
     if (
+      message.t === "CS_DEV_TOGGLE" ||
+      message.t === "CS_DEV_SET_SETTINGS"
+    ) {
+      if (
+        sender.tab === undefined ||
+        getMessageSenderOrigin(sender) !==
+          DEV_ORIGIN
+      ) {
+        console.warn(
+          "[bg]",
+          "ignored development hook message from untrusted sender",
+        );
+        return false;
+      }
+
+      if (message.t === "CS_DEV_TOGGLE") {
+        void handleActionClick(sender.tab);
+        return false;
+      }
+
+      void updateDevSettings(message.settings)
+        .catch((error: unknown) => {
+          console.error(
+            "[bg]",
+            "could not update settings from development hook",
+            error,
+          );
+        });
+
+      return false;
+    }
+
+    if (
       isMessageOfType(
         message,
         "RUN_DIAGNOSTICS",
@@ -363,6 +399,52 @@ chrome.runtime.onMessage.addListener(
     return false;
   },
 );
+
+function getMessageSenderOrigin(
+  sender: chrome.runtime.MessageSender,
+): string | null {
+  if (typeof sender.origin === "string") {
+    return sender.origin;
+  }
+
+  if (sender.url === undefined) {
+    return null;
+  }
+
+  try {
+    return new URL(sender.url).origin;
+  } catch {
+    return null;
+  }
+}
+
+async function updateDevSettings(
+  patch: Record<string, unknown>,
+): Promise<void> {
+  let settings = await readSettings();
+
+  for (const key of Object.keys(settings)) {
+    if (
+      !Object.prototype.hasOwnProperty.call(
+        patch,
+        key,
+      )
+    ) {
+      continue;
+    }
+
+    const candidate = {
+      ...settings,
+      [key]: patch[key],
+    };
+
+    if (isSettings(candidate)) {
+      settings = candidate;
+    }
+  }
+
+  await writeSettings(settings);
+}
 
 async function handleActionClick(
   tab: chrome.tabs.Tab,
