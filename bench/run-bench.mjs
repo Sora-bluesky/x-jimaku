@@ -3,10 +3,12 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import puppeteer from "puppeteer-core";
@@ -20,9 +22,14 @@ const DIST_DIRECTORY = path.join(PROJECT_ROOT, "dist");
 const RESULTS_DIRECTORY = path.join(BENCH_DIRECTORY, "results");
 const WORK_DIRECTORY = path.join(BENCH_DIRECTORY, "work");
 const REFS_DIRECTORY = path.join(BENCH_DIRECTORY, "refs");
+const PUPPETEER_CHROME_DIRECTORY = path.join(
+  homedir(),
+  ".cache",
+  "puppeteer",
+  "chrome",
+);
 
-const CHROME_EXECUTABLE =
-  "C:/Users/sorab/.cache/puppeteer/chrome/win64-149.0.7827.22/chrome-win64/chrome.exe";
+const ALLOWED_MODELS = ["tiny", "base", "small", "turbo"];
 const DEFAULT_MODEL = "base";
 const DEFAULT_DURATION_SECONDS = 90;
 const DEFAULT_BROWSER_TIMEOUT_MS = 30_000;
@@ -32,9 +39,18 @@ const delay = (milliseconds) => new Promise((resolve) => {
   setTimeout(resolve, milliseconds);
 });
 
+class ArgumentError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "ArgumentError";
+    this.exitCode = 2;
+  }
+}
+
 function parseArguments(argv) {
   const options = {
     caseName: null,
+    chromePath: null,
     durationSeconds: DEFAULT_DURATION_SECONDS,
     help: false,
     model: DEFAULT_MODEL,
@@ -52,7 +68,7 @@ function parseArguments(argv) {
 
     if (argument === "--case") {
       if (!value) {
-        throw new Error("--case requires tts or tibo");
+        throw new ArgumentError("--case requires tts or tibo");
       }
 
       options.caseName = value;
@@ -60,9 +76,19 @@ function parseArguments(argv) {
       continue;
     }
 
+    if (argument === "--chrome") {
+      if (!value) {
+        throw new ArgumentError("--chrome requires an executable path");
+      }
+
+      options.chromePath = value;
+      index += 1;
+      continue;
+    }
+
     if (argument === "--model") {
       if (!value) {
-        throw new Error("--model requires a value");
+        throw new ArgumentError("--model requires a value");
       }
 
       options.model = value;
@@ -72,7 +98,9 @@ function parseArguments(argv) {
 
     if (argument === "--duration") {
       if (!value) {
-        throw new Error("--duration requires a number of seconds");
+        throw new ArgumentError(
+          "--duration requires a number of seconds",
+        );
       }
 
       options.durationSeconds = Number(value);
@@ -80,7 +108,7 @@ function parseArguments(argv) {
       continue;
     }
 
-    throw new Error(`Unknown argument: ${argument}`);
+    throw new ArgumentError(`Unknown argument: ${argument}`);
   }
 
   if (options.help) {
@@ -88,18 +116,20 @@ function parseArguments(argv) {
   }
 
   if (options.caseName !== "tts" && options.caseName !== "tibo") {
-    throw new Error("--case must be tts or tibo");
+    throw new ArgumentError("--case must be tts or tibo");
   }
 
   if (
     !Number.isFinite(options.durationSeconds)
     || options.durationSeconds <= 0
   ) {
-    throw new Error("--duration must be a positive number");
+    throw new ArgumentError("--duration must be a positive number");
   }
 
-  if (options.model.trim() === "") {
-    throw new Error("--model must not be empty");
+  if (!ALLOWED_MODELS.includes(options.model)) {
+    throw new ArgumentError(
+      `--model must be one of: ${ALLOWED_MODELS.join(", ")}`,
+    );
   }
 
   return options;
@@ -108,7 +138,204 @@ function parseArguments(argv) {
 function printUsage() {
   console.log(
     "Usage: node bench/run-bench.mjs --case tts|tibo "
-      + "[--model base] [--duration 90]",
+      + "[--model tiny|base|small|turbo] [--duration 90] "
+      + "[--chrome <path>]",
+  );
+}
+
+function isFile(filePath) {
+  try {
+    return statSync(filePath).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function normalizeExecutablePath(value) {
+  const trimmed = value.trim();
+
+  if (trimmed === "~") {
+    return homedir();
+  }
+
+  if (trimmed.startsWith("~/") || trimmed.startsWith("~\\")) {
+    return path.join(homedir(), trimmed.slice(2));
+  }
+
+  return path.resolve(trimmed);
+}
+
+function versionParts(value) {
+  const matches = value.match(/\d+(?:\.\d+)+/g);
+
+  if (!matches) {
+    return [];
+  }
+
+  return matches[matches.length - 1]
+    .split(".")
+    .map((part) => Number(part));
+}
+
+function compareVersionPartsDescending(left, right) {
+  const count = Math.max(left.length, right.length);
+
+  for (let index = 0; index < count; index += 1) {
+    const leftPart = left[index] ?? 0;
+    const rightPart = right[index] ?? 0;
+
+    if (leftPart !== rightPart) {
+      return rightPart - leftPart;
+    }
+  }
+
+  return 0;
+}
+
+function readDirectoryEntries(directory) {
+  try {
+    return readdirSync(directory, {
+      withFileTypes: true,
+    });
+  } catch {
+    return [];
+  }
+}
+
+function chromeExecutableWithin(browserDirectory) {
+  if (process.platform === "win32") {
+    return path.join(browserDirectory, "chrome.exe");
+  }
+
+  if (process.platform === "darwin") {
+    return path.join(
+      browserDirectory,
+      "Google Chrome for Testing.app",
+      "Contents",
+      "MacOS",
+      "Google Chrome for Testing",
+    );
+  }
+
+  if (process.platform === "linux") {
+    return path.join(browserDirectory, "chrome");
+  }
+
+  return null;
+}
+
+function matchesPlatformBrowserDirectory(name) {
+  if (process.platform === "win32") {
+    return name === "chrome-win64";
+  }
+
+  if (process.platform === "darwin") {
+    return name.startsWith("chrome-mac");
+  }
+
+  if (process.platform === "linux") {
+    return name.startsWith("chrome-linux");
+  }
+
+  return false;
+}
+
+function findNewestCachedChrome() {
+  const candidates = [];
+
+  for (const releaseEntry of readDirectoryEntries(
+    PUPPETEER_CHROME_DIRECTORY,
+  )) {
+    if (!releaseEntry.isDirectory()) {
+      continue;
+    }
+
+    const releaseDirectory = path.join(
+      PUPPETEER_CHROME_DIRECTORY,
+      releaseEntry.name,
+    );
+
+    for (const browserEntry of readDirectoryEntries(releaseDirectory)) {
+      if (
+        !browserEntry.isDirectory()
+        || !matchesPlatformBrowserDirectory(browserEntry.name)
+      ) {
+        continue;
+      }
+
+      const executablePath = chromeExecutableWithin(
+        path.join(releaseDirectory, browserEntry.name),
+      );
+
+      if (!executablePath || !isFile(executablePath)) {
+        continue;
+      }
+
+      candidates.push({
+        executablePath,
+        modifiedAt: statSync(executablePath).mtimeMs,
+        version: versionParts(releaseEntry.name),
+      });
+    }
+  }
+
+  candidates.sort((left, right) => {
+    const versionOrder = compareVersionPartsDescending(
+      left.version,
+      right.version,
+    );
+
+    if (versionOrder !== 0) {
+      return versionOrder;
+    }
+
+    if (left.modifiedAt !== right.modifiedAt) {
+      return right.modifiedAt - left.modifiedAt;
+    }
+
+    return left.executablePath.localeCompare(right.executablePath);
+  });
+
+  return candidates[0]?.executablePath ?? null;
+}
+
+function resolveProvidedChrome(value, source) {
+  const executablePath = normalizeExecutablePath(value);
+
+  if (!isFile(executablePath)) {
+    throw new Error(
+      `${source} does not point to a Chrome executable: ${executablePath}. `
+        + "Pass a valid executable path with --chrome <path>.",
+    );
+  }
+
+  return executablePath;
+}
+
+function resolveChromeExecutable(chromeArgument) {
+  if (typeof chromeArgument === "string" && chromeArgument.trim()) {
+    return resolveProvidedChrome(chromeArgument, "--chrome");
+  }
+
+  if (
+    typeof process.env.BENCH_CHROME === "string"
+    && process.env.BENCH_CHROME.trim()
+  ) {
+    return resolveProvidedChrome(
+      process.env.BENCH_CHROME,
+      "BENCH_CHROME",
+    );
+  }
+
+  const cachedChrome = findNewestCachedChrome();
+
+  if (cachedChrome) {
+    return cachedChrome;
+  }
+
+  throw new Error(
+    "Chrome for Testing was not found in the Puppeteer cache. "
+      + "Pass its executable path with --chrome <path> or set BENCH_CHROME.",
   );
 }
 
@@ -530,7 +757,7 @@ async function waitForCaptureState(worker, statuses, timeoutMs) {
 }
 
 async function waitForCaptureRunning(worker) {
-  const deadline = Date.now() + 240_000; // model download on a fresh profile can take minutes
+  const deadline = Date.now() + 240_000;
   let lastState;
 
   while (Date.now() < deadline) {
@@ -550,7 +777,7 @@ async function waitForCaptureRunning(worker) {
 }
 
 async function waitForCaptureStopped(worker) {
-  const deadline = Date.now() + 240_000; // model download on a fresh profile can take minutes
+  const deadline = Date.now() + 240_000;
 
   while (Date.now() < deadline) {
     const storage = await readSessionStorage(worker);
@@ -566,8 +793,30 @@ async function waitForCaptureStopped(worker) {
   throw new Error("Capture did not leave the running state");
 }
 
-async function setRecognitionModel(worker, model) {
-  await worker.evaluate(async (selectedModel) => {
+async function freshServiceWorker(browser) {
+  const target = await browser.waitForTarget(
+    (t) => t.type() === "service_worker" && t.url().includes("background.js"),
+    { timeout: 30_000 },
+  );
+  const worker = await target.worker();
+  if (!worker) throw new Error("service worker target has no worker handle");
+  return worker;
+}
+
+async function evaluateInServiceWorker(browser, fn, ...args) {
+  try {
+    const worker = await freshServiceWorker(browser);
+    return await worker.evaluate(fn, ...args);
+  } catch (error) {
+    // The SW may have restarted (install/idle suspend); one fresh retry.
+    await delay(500);
+    const worker = await freshServiceWorker(browser);
+    return await worker.evaluate(fn, ...args);
+  }
+}
+
+async function setRecognitionModel(browser, model) {
+  await evaluateInServiceWorker(browser, async (selectedModel) => {
     await chrome.storage.sync.set({
       settings: {
         model: selectedModel,
@@ -619,34 +868,54 @@ async function scrapeOptionsRows(page) {
       )
     );
 
-    const englishSelectors = [
-      '[data-lang="en"]',
-      '[lang="en"]',
-      '[lang^="en-"]',
-      ".recognition-english",
-      ".recognition-text",
-      ".english",
-      ".en",
-      ".source-text",
-      ".source",
-    ];
+    const textWithoutJapanese = (element) => {
+      const clone = element.cloneNode(true);
+
+      clone.querySelectorAll(".recognition-ja").forEach((node) => {
+        node.remove();
+      });
+
+      return clone.textContent ?? "";
+    };
 
     let text = "";
+    const original = row.querySelector(".recognition-original");
 
-    for (const selector of englishSelectors) {
-      const candidate = row.querySelector(selector);
-      const candidateText = candidate?.innerText ?? candidate?.textContent ?? "";
+    if (original) {
+      text = textWithoutJapanese(original);
+    }
 
-      if (candidateText.trim()) {
-        text = candidateText;
-        break;
+    if (!text.trim()) {
+      const englishSelectors = [
+        '[data-lang="en"]',
+        '[lang="en"]',
+        '[lang^="en-"]',
+        ".recognition-english",
+        ".recognition-text",
+        ".english",
+        ".en",
+        ".source-text",
+        ".source",
+      ];
+
+      for (const selector of englishSelectors) {
+        const candidate = row.querySelector(selector);
+        const candidateText = candidate
+          ? textWithoutJapanese(candidate)
+          : "";
+
+        if (candidateText.trim()) {
+          text = candidateText;
+          break;
+        }
       }
     }
 
-    if (!text) {
+    if (!text.trim()) {
       const clone = row.cloneNode(true);
 
       for (const selector of [
+        ".recognition-ja",
         '[data-lang="ja"]',
         '[lang="ja"]',
         '[lang^="ja-"]',
@@ -786,9 +1055,7 @@ function printMarkdownTable({
 }
 
 async function runBench(options, caseDefinition) {
-  if (!existsSync(CHROME_EXECUTABLE)) {
-    throw new Error(`Chrome for Testing was not found: ${CHROME_EXECUTABLE}`);
-  }
+  const chromeExecutable = resolveChromeExecutable(options.chromePath);
 
   if (!existsSync(DIST_DIRECTORY)) {
     throw new Error(
@@ -807,6 +1074,7 @@ async function runBench(options, caseDefinition) {
     server = await startBenchServer({
       directory: PROJECT_ROOT,
       mediaFile: caseDefinition.mediaFile,
+      contextTerms: caseDefinition.properNouns ?? [],
     });
 
     profileDirectory = mkdtempSync(
@@ -814,7 +1082,7 @@ async function runBench(options, caseDefinition) {
     );
 
     browser = await puppeteer.launch({
-      executablePath: CHROME_EXECUTABLE,
+      executablePath: chromeExecutable,
       headless: false,
       userDataDir: profileDirectory,
       args: [
@@ -841,7 +1109,7 @@ async function runBench(options, caseDefinition) {
       throw new Error("Extension service worker target has no worker");
     }
 
-    await setRecognitionModel(worker, options.model);
+    await setRecognitionModel(browser, options.model);
 
     const casePage = await browser.newPage();
     await casePage.goto(server.caseUrl, {
@@ -886,7 +1154,10 @@ async function runBench(options, caseDefinition) {
     });
 
     // chrome-extension: is a non-special scheme; URL.origin returns "null".
-    const extensionBase = serviceWorkerTarget.url().replace(/\/background\.js$/, "");
+    const extensionBase = serviceWorkerTarget.url().replace(
+      /\/background\.js$/,
+      "",
+    );
     const optionsView = await openOptionsPage(browser, extensionBase);
     const collector = new ClauseCollector();
 
@@ -1051,6 +1322,11 @@ async function main() {
 try {
   process.exitCode = await main();
 } catch (error) {
-  console.error(error instanceof Error ? error.stack : String(error));
-  process.exitCode = 1;
+  if (error instanceof ArgumentError) {
+    console.error(error.message);
+  } else {
+    console.error(error instanceof Error ? error.stack : String(error));
+  }
+
+  process.exitCode = error?.exitCode ?? 1;
 }

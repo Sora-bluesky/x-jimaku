@@ -38,7 +38,7 @@ function mediaUrl(directory, mediaFile) {
     .join("/")}`;
 }
 
-function casePageHtml(sourceUrl) {
+function casePageHtml(sourceUrl, contextTerms = []) {
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -66,7 +66,12 @@ function casePageHtml(sourceUrl) {
   </style>
 </head>
 <body>
-  <video id="bench-media" src="${sourceUrl}" playsinline controls muted></video>
+  <article data-testid="tweet">
+    <div lang="en">${contextTerms.map((t) => `<span>${t}</span>`).join(" ")}
+      <a href="#">@BenchAuthor</a>
+    </div>
+    <video id="bench-media" src="${sourceUrl}" playsinline controls muted></video>
+  </article>
   <script>
     const media = document.querySelector("#bench-media");
     media.play().catch((error) => {
@@ -183,6 +188,7 @@ function sendFile(request, response, filePath) {
 }
 
 export async function startBenchServer({
+  contextTerms = [],
   directory,
   mediaFile,
   port = DEFAULT_PORT,
@@ -224,7 +230,7 @@ export async function startBenchServer({
     }
 
     if (pathname === "/" || pathname === "/case.html") {
-      const html = casePageHtml(sourceUrl);
+      const html = casePageHtml(sourceUrl, contextTerms);
       response.writeHead(200, {
         "Cache-Control": "no-store",
         "Content-Length": Buffer.byteLength(html),
@@ -299,7 +305,8 @@ if (invokedFile === currentFile) {
     const mediaFile = path.isAbsolute(mediaArgument)
       ? mediaArgument
       : path.resolve(directory, mediaArgument);
-    const runningServer = await startBenchServer({ directory, mediaFile });
+    const contextTerms = (process.argv[4] ?? "").split(",").filter(Boolean);
+    const runningServer = await startBenchServer({ directory, mediaFile, contextTerms });
     console.log(runningServer.caseUrl);
   }
 }
