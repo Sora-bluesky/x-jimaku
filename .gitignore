@@ -7,3 +7,7 @@ dist/
 HANDOFF.md
 docs/plan.md
 docs/plan-approved.md
+
+# bench artifacts (local only)
+bench/work/
+bench/results/

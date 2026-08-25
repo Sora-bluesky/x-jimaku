@@ -1,0 +1,1 @@
+Hello everyone and welcome back to the channel. Today we are going to talk about machine learning and how neural networks actually work. The basic idea is surprisingly simple.
