@@ -2,6 +2,9 @@ import type {
   RecognitionPayload,
   TranslationPath,
 } from "../shared/messages";
+import type {
+  TranslationBackend,
+} from "../shared/settings";
 
 type TranslatorScope = typeof globalThis & {
   Translator?: TranslatorFactory;
@@ -21,7 +24,24 @@ export interface TranslationQueueEntry
   skipTranslation?: boolean;
 }
 
+export interface TranslationPair {
+  en: string;
+  ja: string;
+}
+
+export interface TranslationContext {
+  recentPairs: TranslationPair[];
+  properNouns: string[];
+}
+
+interface TranslationAttemptResult {
+  ja: string;
+  recordHistory: boolean;
+}
+
 export interface TranslationEngineOptions {
+  backend: TranslationBackend;
+  getContext(): TranslationContext;
   requestContentTranslation(
     text: string,
   ): Promise<ContentTranslationResponse>;
@@ -38,10 +58,16 @@ const TRANSLATOR_OPTIONS: TranslatorOptions = {
 };
 
 const TRANSLATION_SYSTEM_PROMPT =
-  "Translate the English subtitle clause into natural Japanese. Output only the translation of the current clause.";
+  "あなたは英語動画の日本語字幕翻訳者。与えられた英語の節を、直前の文脈と固有名詞リストに整合する自然な日本語に訳す。出力は当該節の訳だけ。説明・引用符・前後の節の再訳は出力しない";
 
 const MAX_PENDING_TRANSLATIONS = 2;
 const TRANSLATOR_CREATE_TIMEOUT_MS = 8_000;
+const LANGUAGE_MODEL_PROMPT_TIMEOUT_MS =
+  10_000;
+const LANGUAGE_MODEL_SLOW_THRESHOLD_MS =
+  3_000;
+const LANGUAGE_MODEL_LATENCY_WINDOW = 5;
+const LANGUAGE_MODEL_SLOW_LIMIT = 3;
 
 export class TranslationEngine {
   private readonly options:
@@ -50,11 +76,18 @@ export class TranslationEngine {
     TranslationQueueEntry[] = [];
   private readonly failedPaths =
     new Set<TranslationPath>();
+  private readonly recentHistory:
+    TranslationPair[] = [];
+  private readonly languageModelSlowSamples:
+    boolean[] = [];
 
   private translator:
     | TranslatorInstance
     | null = null;
   private languageModel:
+    | LanguageModelSession
+    | null = null;
+  private languageModelClone:
     | LanguageModelSession
     | null = null;
   private path:
@@ -157,6 +190,14 @@ export class TranslationEngine {
 
     this.destroyed = true;
     this.queue.splice(0, this.queue.length);
+    this.recentHistory.splice(
+      0,
+      this.recentHistory.length,
+    );
+    this.languageModelSlowSamples.splice(
+      0,
+      this.languageModelSlowSamples.length,
+    );
     this.destroyTranslator();
     this.destroyLanguageModel();
     this.path = null;
@@ -200,23 +241,33 @@ export class TranslationEngine {
     line: TranslationQueueEntry,
   ): Promise<void> {
     try {
-      const ja =
+      const result =
         line.skipTranslation === true
-          ? line.text
+          ? {
+              ja: line.text,
+              recordHistory: true,
+            }
           : await this.translateWithFallback(
               line.text,
             );
 
       if (
         this.destroyed ||
-        ja === null
+        result === null
       ) {
         return;
       }
 
+      if (result.recordHistory) {
+        this.recordHistory(
+          line.text,
+          result.ja,
+        );
+      }
+
       this.options.onTranslated(
         line,
-        ja,
+        result.ja,
       );
     } finally {
       this.processing = false;
@@ -226,13 +277,14 @@ export class TranslationEngine {
 
   private async translateWithFallback(
     text: string,
-  ): Promise<string | null> {
+  ): Promise<TranslationAttemptResult | null> {
     while (
       !this.destroyed &&
       this.path !== null &&
       this.path !== "none"
     ) {
       const attemptedPath = this.path;
+      const startedAt = performance.now();
 
       try {
         const result =
@@ -240,7 +292,7 @@ export class TranslationEngine {
             attemptedPath,
             text,
           );
-        const normalized = result.trim();
+        const normalized = result.ja.trim();
 
         if (normalized === "") {
           throw new Error(
@@ -248,7 +300,10 @@ export class TranslationEngine {
           );
         }
 
-        return normalized;
+        return {
+          ...result,
+          ja: normalized,
+        };
       } catch (error) {
         if (this.destroyed) {
           return null;
@@ -265,6 +320,17 @@ export class TranslationEngine {
 
         this.failPath(attemptedPath);
         await this.selectBestPath();
+      } finally {
+        console.info(
+          "[translate] latency",
+          {
+            ms: Math.round(
+              performance.now() -
+                startedAt,
+            ),
+            path: attemptedPath,
+          },
+        );
       }
     }
 
@@ -274,7 +340,7 @@ export class TranslationEngine {
   private async translateUsingPath(
     path: TranslationPath,
     text: string,
-  ): Promise<string> {
+  ): Promise<TranslationAttemptResult> {
     switch (path) {
       case "offscreen-translator":
         if (this.translator === null) {
@@ -283,7 +349,12 @@ export class TranslationEngine {
           );
         }
 
-        return this.translator.translate(text);
+        return {
+          ja: await this.translator.translate(
+            text,
+          ),
+          recordHistory: true,
+        };
 
       case "content-translator": {
         const response =
@@ -296,17 +367,16 @@ export class TranslationEngine {
           );
         }
 
-        return response.ja;
+        return {
+          ja: response.ja,
+          recordHistory: true,
+        };
       }
 
       case "language-model":
-        if (this.languageModel === null) {
-          throw new Error(
-            "LanguageModel is not initialized",
-          );
-        }
-
-        return this.languageModel.prompt(text);
+        return this.translateWithLanguageModel(
+          text,
+        );
 
       case "none":
         throw new Error(
@@ -315,8 +385,354 @@ export class TranslationEngine {
     }
   }
 
+  private async translateWithLanguageModel(
+    text: string,
+  ): Promise<TranslationAttemptResult> {
+    const context = this.readContext();
+    const prompt = createTranslationPrompt(
+      text,
+      context,
+    );
+    const startedAt = performance.now();
+    let rawResponse: string;
+
+    try {
+      rawResponse =
+        await this.promptLanguageModel(
+          prompt,
+        );
+    } catch (error) {
+      const elapsedMs =
+        performance.now() - startedAt;
+
+      await this.observeLanguageModelLatency(
+        elapsedMs,
+      );
+
+      if (
+        !this.destroyed &&
+        isTimeoutError(error)
+      ) {
+        console.warn(
+          "[translate]",
+          "LanguageModel prompt timed out; using line rescue",
+          error,
+        );
+        return this.rescueLanguageModelLine(
+          text,
+        );
+      }
+
+      throw error;
+    }
+
+    await this.observeLanguageModelLatency(
+      performance.now() - startedAt,
+    );
+
+    const normalized =
+      normalizeLanguageModelResponse(
+        rawResponse,
+      );
+
+    if (
+      isBadLanguageModelResponse(
+        normalized,
+        text,
+        context.properNouns,
+      )
+    ) {
+      console.warn(
+        "[translate]",
+        "LanguageModel returned an invalid translation; using line rescue",
+        {
+          responseLength:
+            Array.from(normalized).length,
+          sourceLength:
+            Array.from(text).length,
+        },
+      );
+      return this.rescueLanguageModelLine(
+        text,
+      );
+    }
+
+    return {
+      ja: normalized,
+      recordHistory: true,
+    };
+  }
+
+  private async promptLanguageModel(
+    prompt: string,
+  ): Promise<string> {
+    try {
+      return await this.promptLanguageModelOnce(
+        prompt,
+      );
+    } catch (error) {
+      if (
+        this.destroyed ||
+        isTimeoutError(error)
+      ) {
+        throw error;
+      }
+
+      console.warn(
+        "[translate]",
+        "LanguageModel session failed; recreating the base session once",
+        error,
+      );
+
+      const recreated =
+        await this.recreateLanguageModel();
+
+      if (!recreated) {
+        throw error;
+      }
+
+      return this.promptLanguageModelOnce(
+        prompt,
+      );
+    }
+  }
+
+  private async promptLanguageModelOnce(
+    prompt: string,
+  ): Promise<string> {
+    const base = this.languageModel;
+
+    if (base === null) {
+      throw new Error(
+        "LanguageModel is not initialized",
+      );
+    }
+
+    const clone = await base.clone();
+
+    if (this.destroyed) {
+      destroyLanguageModelSession(
+        clone,
+        "LanguageModel clone",
+      );
+      throw new DOMException(
+        "Translation session was stopped",
+        "AbortError",
+      );
+    }
+
+    this.languageModelClone = clone;
+
+    try {
+      return await clone.prompt(
+        prompt,
+        {
+          signal: AbortSignal.timeout(
+            LANGUAGE_MODEL_PROMPT_TIMEOUT_MS,
+          ),
+        },
+      );
+    } finally {
+      if (
+        this.languageModelClone === clone
+      ) {
+        this.languageModelClone = null;
+        destroyLanguageModelSession(
+          clone,
+          "LanguageModel clone",
+        );
+      }
+    }
+  }
+
+  private async recreateLanguageModel(): Promise<boolean> {
+    this.destroyLanguageModel();
+    this.languageModelCreateAttempted =
+      false;
+    this.failedPaths.delete(
+      "language-model",
+    );
+
+    return this.prepareLanguageModel();
+  }
+
+  private async observeLanguageModelLatency(
+    elapsedMs: number,
+  ): Promise<void> {
+    this.languageModelSlowSamples.push(
+      elapsedMs >
+        LANGUAGE_MODEL_SLOW_THRESHOLD_MS,
+    );
+
+    if (
+      this.languageModelSlowSamples.length >
+      LANGUAGE_MODEL_LATENCY_WINDOW
+    ) {
+      this.languageModelSlowSamples.shift();
+    }
+
+    const slowCount =
+      this.languageModelSlowSamples.filter(
+        Boolean,
+      ).length;
+
+    if (
+      this.destroyed ||
+      this.languageModelSlowSamples.length <
+        LANGUAGE_MODEL_LATENCY_WINDOW ||
+      this.failedPaths.has(
+        "language-model",
+      ) ||
+      slowCount <
+        LANGUAGE_MODEL_SLOW_LIMIT
+    ) {
+      return;
+    }
+
+    console.warn(
+      "[translate]",
+      "LanguageModel latency guard triggered; selecting a Translator path",
+      {
+        slowCount,
+        window:
+          this.languageModelSlowSamples
+            .length,
+      },
+    );
+
+    this.failPath("language-model");
+    await this.selectBestPath();
+  }
+
+  private async rescueLanguageModelLine(
+    text: string,
+  ): Promise<TranslationAttemptResult> {
+    for (
+      const rescuePath of [
+        "offscreen-translator",
+        "content-translator",
+      ] as const
+    ) {
+      if (this.failedPaths.has(rescuePath)) {
+        continue;
+      }
+
+      const prepared =
+        rescuePath ===
+        "offscreen-translator"
+          ? await this
+              .prepareOffscreenTranslator()
+          : await this
+              .prepareContentTranslator();
+
+      if (!prepared || this.destroyed) {
+        continue;
+      }
+
+      try {
+        const result =
+          rescuePath ===
+          "offscreen-translator"
+            ? await this.translator
+                ?.translate(text)
+            : await this.options
+                .requestContentTranslation(
+                  text,
+                );
+
+        const ja =
+          typeof result === "string"
+            ? result.trim()
+            : (
+                result?.available === true
+                  ? result.ja.trim()
+                  : ""
+              );
+
+        if (ja === "") {
+          throw new Error(
+            "Translator rescue returned an empty result",
+          );
+        }
+
+        return {
+          ja,
+          recordHistory: true,
+        };
+      } catch (error) {
+        console.warn(
+          "[translate]",
+          "Translator line rescue failed",
+          {
+            path: rescuePath,
+            error,
+          },
+        );
+
+        const wasActive =
+          this.path === rescuePath;
+        this.failPath(rescuePath);
+
+        if (wasActive) {
+          await this.selectBestPath();
+        }
+      }
+    }
+
+    return {
+      ja: text,
+      recordHistory: false,
+    };
+  }
+
+  private readContext(): TranslationContext {
+    const supplied =
+      this.options.getContext();
+
+    return {
+      recentPairs:
+        this.recentHistory.map(
+          (pair) => ({ ...pair }),
+        ),
+      properNouns:
+        supplied.properNouns
+          .map((term) => term.trim())
+          .filter(
+            (term, index, terms) =>
+              term !== "" &&
+              terms.indexOf(term) === index,
+          ),
+    };
+  }
+
+  private recordHistory(
+    en: string,
+    ja: string,
+  ): void {
+    this.recentHistory.push({
+      en,
+      ja,
+    });
+
+    if (this.recentHistory.length > 2) {
+      this.recentHistory.shift();
+    }
+  }
+
   private async selectBestPath(): Promise<void> {
     if (this.destroyed) {
+      return;
+    }
+
+    if (
+      this.options.backend ===
+        "prompt-api" &&
+      !this.failedPaths.has(
+        "language-model",
+      ) &&
+      await this.prepareLanguageModel()
+    ) {
+      this.setPath("language-model");
       return;
     }
 
@@ -343,6 +759,7 @@ export class TranslationEngine {
     }
 
     if (
+      this.options.backend === "auto" &&
       !this.failedPaths.has(
         "language-model",
       ) &&
@@ -550,7 +967,9 @@ export class TranslationEngine {
       this.destroyLanguageModel();
     }
 
-    this.path = null;
+    if (this.path === path) {
+      this.path = null;
+    }
   }
 
   private setPath(
@@ -602,22 +1021,198 @@ export class TranslationEngine {
   }
 
   private destroyLanguageModel(): void {
+    const clone = this.languageModelClone;
     const session = this.languageModel;
+
+    this.languageModelClone = null;
     this.languageModel = null;
 
-    if (session === null) {
-      return;
-    }
-
-    try {
-      session.destroy();
-    } catch (error) {
-      console.warn(
-        "[translate]",
-        "LanguageModel cleanup failed",
-        error,
+    if (clone !== null) {
+      destroyLanguageModelSession(
+        clone,
+        "LanguageModel clone",
       );
     }
+
+    if (session !== null) {
+      destroyLanguageModelSession(
+        session,
+        "LanguageModel",
+      );
+    }
+  }
+}
+
+function createTranslationPrompt(
+  text: string,
+  context: TranslationContext,
+): string {
+  const blocks: string[] = [];
+
+  if (context.properNouns.length > 0) {
+    blocks.push(
+      [
+        "[固有名詞（原綴りのまま使う）]",
+        context.properNouns.join(", "),
+      ].join("\n"),
+    );
+  }
+
+  if (context.recentPairs.length > 0) {
+    blocks.push(
+      [
+        "[直前の文脈]",
+        ...context.recentPairs.flatMap(
+          (pair) => [
+            `EN: ${pair.en}`,
+            `JA: ${pair.ja}`,
+          ],
+        ),
+      ].join("\n"),
+    );
+  }
+
+  blocks.push(
+    [
+      "[今訳す節]",
+      text,
+    ].join("\n"),
+  );
+
+  return blocks.join("\n");
+}
+
+function normalizeLanguageModelResponse(
+  response: string,
+): string {
+  return response
+    .trim()
+    .replace(
+      /^(?:```[^\r\n]*\r?\n)?\s*(?:(?:翻訳|訳|日本語訳)\s*[:：]\s*)?["'“”‘’「『]*|["'“”‘’」』]*\s*(?:\r?\n?```)?$/gu,
+      "",
+    )
+    .trim();
+}
+
+function isBadLanguageModelResponse(
+  response: string,
+  source: string,
+  properNouns: readonly string[],
+): boolean {
+  if (response === "") {
+    return true;
+  }
+
+  if (
+    Array.from(response).length >
+    Array.from(source).length * 4
+  ) {
+    return true;
+  }
+
+  const withoutProperNouns =
+    removeProperNouns(
+      response,
+      properNouns,
+    );
+  const characters =
+    Array.from(withoutProperNouns)
+      .filter(
+        (character) =>
+          !/\s/u.test(character),
+      );
+
+  if (characters.length === 0) {
+    return false;
+  }
+
+  const latinCharacters =
+    characters.filter(
+      (character) =>
+        /[A-Za-z]/u.test(character),
+    ).length;
+
+  return (
+    latinCharacters /
+      characters.length >
+    0.5
+  );
+}
+
+function removeProperNouns(
+  response: string,
+  properNouns: readonly string[],
+): string {
+  const exclusions = new Set<string>();
+
+  for (const term of properNouns) {
+    const trimmed = term.trim();
+
+    if (trimmed === "") {
+      continue;
+    }
+
+    exclusions.add(trimmed);
+
+    for (
+      const word of
+      trimmed.match(/[A-Za-z]+/gu) ?? []
+    ) {
+      exclusions.add(word);
+    }
+  }
+
+  const candidates =
+    Array.from(exclusions)
+      .sort(
+        (left, right) =>
+          right.length - left.length,
+      );
+
+  if (candidates.length === 0) {
+    return response;
+  }
+
+  const pattern = candidates
+    .map(escapeRegExp)
+    .join("|");
+
+  return response.replace(
+    new RegExp(pattern, "giu"),
+    "",
+  );
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(
+    /[.*+?^${}()|[\]\\]/gu,
+    "\\$&",
+  );
+}
+
+function isTimeoutError(
+  error: unknown,
+): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "name" in error &&
+    error.name === "TimeoutError"
+  );
+}
+
+function destroyLanguageModelSession(
+  session: LanguageModelSession,
+  label: string,
+): void {
+  try {
+    session.destroy();
+  } catch (error) {
+    console.warn(
+      "[translate]",
+      `${label} cleanup failed`,
+      error,
+    );
   }
 }
 

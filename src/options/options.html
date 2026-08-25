@@ -417,6 +417,19 @@
         </div>
 
         <div class="settings-row">
+          <label for="translation-backend-select">
+            翻訳エンジン
+          </label>
+          <select id="translation-backend-select">
+            <option value="auto">自動</option>
+            <option value="translator">翻訳API</option>
+            <option value="prompt-api">
+              AIモデル(実験的)
+            </option>
+          </select>
+        </div>
+
+        <div class="settings-row">
           <label
             class="checkbox-label"
             for="show-original"

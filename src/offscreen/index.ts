@@ -577,6 +577,16 @@ async function handleCaptureStart(
 
     const translationEngine =
       new TranslationEngine({
+        backend:
+          settings.translationBackend,
+        getContext() {
+          return {
+            recentPairs: [],
+            properNouns: [
+              ...activeContextTerms,
+            ],
+          };
+        },
         requestContentTranslation(text) {
           return requestContentTranslation(
             requestId,

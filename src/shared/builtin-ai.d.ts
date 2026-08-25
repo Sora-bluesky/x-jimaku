@@ -65,8 +65,22 @@ declare global {
     initialPrompts?: readonly LanguageModelPrompt[];
   }
 
+  interface LanguageModelSessionOperationOptions {
+    signal?: AbortSignal;
+  }
+
   interface LanguageModelSession {
-    prompt(input: string): Promise<string>;
+    clone(
+      options?:
+        LanguageModelSessionOperationOptions,
+    ): Promise<LanguageModelSession>;
+
+    prompt(
+      input: string,
+      options?:
+        LanguageModelSessionOperationOptions,
+    ): Promise<string>;
+
     destroy(): void;
   }
 

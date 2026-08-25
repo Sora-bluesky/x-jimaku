@@ -16,6 +16,7 @@ import {
 import {
   isSettings,
   isSourceLanguage,
+  isTranslationBackend,
   isWhisperModel,
   readSettings,
   SETTINGS_STORAGE_KEY,
@@ -126,6 +127,10 @@ const modelSelect =
 const sourceLanguageSelect =
   requireElement<HTMLSelectElement>(
     "source-language-select",
+  );
+const translationBackendSelect =
+  requireElement<HTMLSelectElement>(
+    "translation-backend-select",
   );
 const showOriginalInput =
   requireElement<HTMLInputElement>(
@@ -271,6 +276,7 @@ prepareTranslationButton.addEventListener(
 for (const control of [
   modelSelect,
   sourceLanguageSelect,
+  translationBackendSelect,
   showOriginalInput,
   showTentativeInput,
 ]) {
@@ -448,6 +454,7 @@ function applySettingsToControls(
   settings: {
     model: string;
     sourceLang: string;
+    translationBackend: string;
     showOriginal: boolean;
     showTentative: boolean;
   },
@@ -455,6 +462,8 @@ function applySettingsToControls(
   modelSelect.value = settings.model;
   sourceLanguageSelect.value =
     settings.sourceLang;
+  translationBackendSelect.value =
+    settings.translationBackend;
   showOriginalInput.checked =
     settings.showOriginal;
   showTentativeInput.checked =
@@ -465,6 +474,8 @@ async function saveSelectedSettings(): Promise<void> {
   const selectedModel = modelSelect.value;
   const selectedSourceLanguage =
     sourceLanguageSelect.value;
+  const selectedTranslationBackend =
+    translationBackendSelect.value;
 
   if (!isWhisperModel(selectedModel)) {
     settingsStatus.textContent =
@@ -482,6 +493,16 @@ async function saveSelectedSettings(): Promise<void> {
     return;
   }
 
+  if (
+    !isTranslationBackend(
+      selectedTranslationBackend,
+    )
+  ) {
+    settingsStatus.textContent =
+      "選択された翻訳エンジンが不正です。";
+    return;
+  }
+
   setSettingsControlsDisabled(true);
   settingsStatus.textContent =
     "設定を保存しています…";
@@ -491,6 +512,8 @@ async function saveSelectedSettings(): Promise<void> {
       model: selectedModel,
       sourceLang:
         selectedSourceLanguage,
+      translationBackend:
+        selectedTranslationBackend,
       showOriginal:
         showOriginalInput.checked,
       showTentative:
@@ -517,6 +540,8 @@ function setSettingsControlsDisabled(
 ): void {
   modelSelect.disabled = disabled;
   sourceLanguageSelect.disabled = disabled;
+  translationBackendSelect.disabled =
+    disabled;
   showOriginalInput.disabled = disabled;
   showTentativeInput.disabled = disabled;
 }

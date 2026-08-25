@@ -32,7 +32,9 @@ const PUPPETEER_CHROME_DIRECTORY = path.join(
 );
 
 const ALLOWED_MODELS = ["tiny", "base", "small", "turbo"];
+const ALLOWED_BACKENDS = ["auto", "translator", "prompt-api"];
 const DEFAULT_MODEL = "base";
+const DEFAULT_BACKEND = "auto";
 const DEFAULT_DURATION_SECONDS = 90;
 const DEFAULT_BROWSER_TIMEOUT_MS = 30_000;
 const SAMPLE_INTERVAL_MS = 500;
@@ -51,6 +53,7 @@ class ArgumentError extends Error {
 
 function parseArguments(argv) {
   const options = {
+    backend: DEFAULT_BACKEND,
     caseName: null,
     chromePath: null,
     durationSeconds: DEFAULT_DURATION_SECONDS,
@@ -71,6 +74,16 @@ function parseArguments(argv) {
     }
 
     const value = argv[index + 1];
+
+    if (argument === "--backend") {
+      if (!value) {
+        throw new ArgumentError("--backend requires a value");
+      }
+
+      options.backend = value;
+      index += 1;
+      continue;
+    }
 
     if (argument === "--case") {
       if (!value) {
@@ -138,13 +151,20 @@ function parseArguments(argv) {
     );
   }
 
+  if (!ALLOWED_BACKENDS.includes(options.backend)) {
+    throw new ArgumentError(
+      `--backend must be one of: ${ALLOWED_BACKENDS.join(", ")}`,
+    );
+  }
+
   return options;
 }
 
 function printUsage() {
   console.log(
     "Usage: node bench/run-bench.mjs --case tts|tibo "
-      + "[--model tiny|base|small|turbo] [--duration 90] "
+      + "[--model tiny|base|small|turbo] "
+      + "[--backend auto|translator|prompt-api] [--duration 90] "
       + "[--chrome <path>]",
   );
 }
@@ -871,14 +891,20 @@ async function evaluateInServiceWorker(browser, fn, ...args) {
   }
 }
 
-async function setRecognitionModel(browser, model) {
-  await evaluateInServiceWorker(browser, async (selectedModel) => {
-    await chrome.storage.sync.set({
-      settings: {
-        model: selectedModel,
-      },
-    });
-  }, model);
+async function setBenchSettings(browser, model, backend) {
+  await evaluateInServiceWorker(
+    browser,
+    async (selectedModel, selectedBackend) => {
+      await chrome.storage.sync.set({
+        settings: {
+          model: selectedModel,
+          translationBackend: selectedBackend,
+        },
+      });
+    },
+    model,
+    backend,
+  );
 }
 
 async function dispatchCaptureForUrl(browser, targetUrl) {
@@ -1215,7 +1241,11 @@ async function runBench(options, caseDefinition) {
       throw new Error("Extension service worker target has no worker");
     }
 
-    await setRecognitionModel(browser, options.model);
+    await setBenchSettings(
+      browser,
+      options.model,
+      options.backend,
+    );
 
     const casePage = await browser.newPage();
     await casePage.goto(server.caseUrl, {
@@ -1359,6 +1389,7 @@ async function runBench(options, caseDefinition) {
       generatedAt: generatedAt.toISOString(),
       case: options.caseName,
       model: options.model,
+      backend: options.backend,
       durationSeconds: options.durationSeconds,
       timing,
       reference: {
