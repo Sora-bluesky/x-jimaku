@@ -2227,7 +2227,12 @@ function stateDetailsFromIncoming(
 function handleOffscreenRecognition(
   message: OffRecognitionMessage,
 ): void {
-  if (captureState.status !== "running") {
+  // "stopping" still accepts lines: the segmenter's stop() flush emits the
+  // final tail clause after the state has already left "running".
+  if (
+    captureState.status !== "running" &&
+    captureState.status !== "stopping"
+  ) {
     return;
   }
 

@@ -20,6 +20,8 @@ export {
 export const LAST_PROBE_STORAGE_KEY =
   "m0.lastProbe" as const;
 
+export const MAX_CONTEXT_TERMS = 40;
+
 export type TranslatorProbeContext =
   | "offscreen-document"
   | "content-script"
@@ -249,6 +251,7 @@ export interface CsPcmMessage {
   requestId: string;
   seq: number;
   b64: string;
+  contextTerms?: string[];
 }
 
 export interface CsTranslateMessage {
@@ -656,7 +659,11 @@ export function isM1Message(
         typeof value.seq === "number" &&
         Number.isSafeInteger(value.seq) &&
         value.seq >= 0 &&
-        typeof value.b64 === "string"
+        typeof value.b64 === "string" &&
+        (
+          value.contextTerms === undefined ||
+          isContextTerms(value.contextTerms)
+        )
       );
 
     case "CS_TRANSLATE":
@@ -874,6 +881,22 @@ function isRecognitionPayload(
     (
       value.ja === undefined ||
       typeof value.ja === "string"
+    )
+  );
+}
+
+function isContextTerms(
+  value: unknown,
+): value is string[] {
+  return (
+    Array.isArray(value) &&
+    value.length <= MAX_CONTEXT_TERMS &&
+    value.every(
+      (term: unknown) =>
+        typeof term === "string" &&
+        term.trim() === term &&
+        Array.from(term).length >= 4 &&
+        Array.from(term).length <= 128,
     )
   );
 }
