@@ -1,5 +1,6 @@
 import {
   isWhisperWorkerOutputMessage,
+  MAX_CONTEXT_TERMS,
   nowIso,
   type WhisperTranscribeMessage,
 } from "../shared/messages";
@@ -17,6 +18,8 @@ const ENERGY_HOP_SAMPLES =
 const LOW_AUDIO_GROWTH_SAMPLES =
   Math.round(SAMPLE_RATE * 0.35);
 const MAX_CLAUSE_WORDS = 10;
+const MIN_STANDALONE_CLAUSE_WORDS = 4;
+const DIAGNOSTIC_LOG_INTERVAL_MS = 5_000;
 
 export const AGREEMENT_TIMEOUT_MS = 6_000;
 export const SILENCE_RMS_THRESHOLD = 0.008;
@@ -32,10 +35,130 @@ const COORDINATING_CONJUNCTIONS =
     "yet",
   ]);
 
+const COMMON_ENGLISH_WORDS =
+  new Set([
+    "about",
+    "after",
+    "again",
+    "against",
+    "also",
+    "another",
+    "because",
+    "before",
+    "being",
+    "between",
+    "both",
+    "could",
+    "does",
+    "doing",
+    "during",
+    "each",
+    "even",
+    "every",
+    "first",
+    "from",
+    "going",
+    "great",
+    "have",
+    "having",
+    "here",
+    "into",
+    "just",
+    "know",
+    "last",
+    "like",
+    "little",
+    "look",
+    "made",
+    "make",
+    "many",
+    "more",
+    "most",
+    "much",
+    "need",
+    "never",
+    "next",
+    "only",
+    "other",
+    "over",
+    "people",
+    "really",
+    "right",
+    "same",
+    "should",
+    "some",
+    "something",
+    "still",
+    "such",
+    "take",
+    "than",
+    "thank",
+    "thanks",
+    "that",
+    "their",
+    "them",
+    "then",
+    "there",
+    "these",
+    "they",
+    "thing",
+    "think",
+    "this",
+    "those",
+    "through",
+    "today",
+    "under",
+    "very",
+    "want",
+    "watching",
+    "well",
+    "were",
+    "what",
+    "when",
+    "where",
+    "which",
+    "while",
+    "will",
+    "with",
+    "would",
+    "your",
+  ]);
+
+const HALLUCINATION_PHRASE_BLACKLIST:
+  readonly RegExp[] = [
+    /^(?:[.\u2026·・]\s*){2,}$/u,
+    /^please subscribe(?: to (?:my|our|the) channel)?[.!?。！？]*$/iu,
+    /^subscribe(?: to (?:my|our|the) channel)?[.!?。！？]*$/iu,
+    /^(?:do not|don't) forget to subscribe(?: to (?:my|our|the) channel)?[.!?。！？]*$/iu,
+    /^like and subscribe(?: to (?:my|our|the) channel)?[.!?。！？]*$/iu,
+    /^please like,? share,? and subscribe[.!?。！？]*$/iu,
+    /^thanks for watching[.!?。！？]*$/iu,
+    /^thank you for watching[.!?。！？]*$/iu,
+    /^see you in (?:the )?next video[.!?。！？]*$/iu,
+    /^see you next time[.!?。！？]*$/iu,
+  ];
+
 interface HypothesisToken {
   surface: string;
   key: string;
   protected: boolean;
+}
+
+interface ProperNounEntry {
+  surface: string;
+  key: string;
+  capitalized: boolean;
+  maximumDistance: number;
+}
+
+interface ProperNounCorrection {
+  from: string;
+  to: string;
+}
+
+interface CorrectedClause {
+  text: string;
+  corrections: ProperNounCorrection[];
 }
 
 export interface RecognitionLine {
@@ -56,6 +179,7 @@ export interface SegmenterOptions {
   getEnergyHistory(): readonly AudioEnergyFrame[];
   onLine(line: RecognitionLine): void;
   onError(message: string): void;
+  properNouns?: readonly string[];
   showTentative?: boolean;
   now?: () => string;
   nowMs?: () => number;
@@ -66,6 +190,7 @@ interface InFlightSegment {
   startOffset: number;
   endOffset: number;
   sampleLength: number;
+  maxRms: number;
 }
 
 export class WhisperSegmenter {
@@ -100,6 +225,8 @@ export class WhisperSegmenter {
     HypothesisToken[] = [];
   private promotedWordCount = 0;
   private clauseBuffer: HypothesisToken[] = [];
+  private heldShortClause:
+    HypothesisToken[] = [];
   private agreementSeriesStartedAt:
     number | null = null;
   private lastAgreementProgressAt:
@@ -108,6 +235,14 @@ export class WhisperSegmenter {
     number | null = null;
   private lastTentativeId: number | null = null;
   private lastTentativeText = "";
+
+  private properNouns: ProperNounEntry[] = [];
+  private pendingCorrectionLogCount = 0;
+  private lastCorrectionLogAt =
+    Number.NEGATIVE_INFINITY;
+  private pendingHallucinationDropCount = 0;
+  private lastHallucinationLogAt =
+    Number.NEGATIVE_INFINITY;
 
   constructor(options: SegmenterOptions) {
     this.worker = options.worker;
@@ -124,6 +259,17 @@ export class WhisperSegmenter {
     this.now = options.now ?? nowIso;
     this.nowMs =
       options.nowMs ?? (() => performance.now());
+
+    this.setProperNounDictionary(
+      options.properNouns ?? [],
+    );
+  }
+
+  setProperNounDictionary(
+    terms: readonly string[],
+  ): void {
+    this.properNouns =
+      buildProperNounDictionary(terms);
   }
 
   start(): void {
@@ -162,7 +308,9 @@ export class WhisperSegmenter {
     this.resetAgreementSeries();
 
     if (this.tickTimerId !== null) {
-      globalThis.clearInterval(this.tickTimerId);
+      globalThis.clearInterval(
+        this.tickTimerId,
+      );
       this.tickTimerId = null;
     }
 
@@ -187,6 +335,15 @@ export class WhisperSegmenter {
     if (this.committedOffset < availableStart) {
       const dropped =
         availableStart - this.committedOffset;
+
+      if (this.hasPendingRecognitionText()) {
+        this.forceAdoptLatest(
+          "ring-buffer-overflow",
+          true,
+          true,
+          false,
+        );
+      }
 
       this.committedOffset = availableStart;
       this.resetAgreementSeries();
@@ -230,6 +387,15 @@ export class WhisperSegmenter {
           );
 
     if (maxRms < SILENCE_RMS_THRESHOLD) {
+      if (this.hasPendingRecognitionText()) {
+        this.forceAdoptLatest(
+          "low-audio-fade",
+          true,
+          true,
+          true,
+        );
+      }
+
       this.committedOffset = Math.max(
         this.committedOffset,
         endOffset - SILENCE_TAIL_SAMPLES,
@@ -247,6 +413,7 @@ export class WhisperSegmenter {
       startOffset,
       endOffset,
       sampleLength,
+      maxRms,
     };
     this.busy = true;
 
@@ -318,6 +485,8 @@ export class WhisperSegmenter {
         SILENCE_RMS_THRESHOLD,
         ENERGY_HOP_SAMPLES,
       );
+    const lowAudioAtCommit =
+      shouldCommitForSilence;
 
     let tokens = tokenizeHypothesis(text);
 
@@ -347,7 +516,10 @@ export class WhisperSegmenter {
 
     if (tokens.length > 0) {
       this.latestHypothesis = tokens;
-      this.processAgreement(tokens);
+      this.processAgreement(
+        tokens,
+        lowAudioAtCommit,
+      );
 
       if (
         shouldCommitForSilence ||
@@ -358,6 +530,8 @@ export class WhisperSegmenter {
             ? "maximum-length"
             : "trailing-silence",
           true,
+          true,
+          lowAudioAtCommit,
         );
         this.commitSegment(
           segment,
@@ -378,6 +552,8 @@ export class WhisperSegmenter {
           ? "maximum-length-empty"
           : "trailing-silence-empty",
         true,
+        true,
+        lowAudioAtCommit,
       );
       this.commitSegment(
         segment,
@@ -394,6 +570,7 @@ export class WhisperSegmenter {
 
   private processAgreement(
     tokens: HypothesisToken[],
+    lowAudioConfidence: boolean,
   ): void {
     const observedAt = this.nowMs();
 
@@ -432,7 +609,11 @@ export class WhisperSegmenter {
     this.clauseBuffer.push(
       ...cloneTokens(newlyCommitted),
     );
-    this.drainClauseBuffer(false);
+    this.drainClauseBuffer(
+      false,
+      false,
+      lowAudioConfidence,
+    );
   }
 
   private forceAgreementIfTimedOut(): void {
@@ -449,6 +630,8 @@ export class WhisperSegmenter {
     this.forceAdoptLatest(
       "agreement-timeout",
       true,
+      false,
+      false,
     );
     this.lastAgreementProgressAt =
       this.nowMs();
@@ -457,6 +640,8 @@ export class WhisperSegmenter {
   private forceAdoptLatest(
     reason: string,
     flush: boolean,
+    flushShortClause: boolean,
+    lowAudioConfidence: boolean,
   ): void {
     if (
       this.latestHypothesis.length >
@@ -473,7 +658,11 @@ export class WhisperSegmenter {
         this.latestHypothesis.length;
     }
 
-    this.drainClauseBuffer(flush);
+    this.drainClauseBuffer(
+      flush,
+      flushShortClause,
+      lowAudioConfidence,
+    );
 
     console.log(
       "[seg]",
@@ -488,6 +677,8 @@ export class WhisperSegmenter {
 
   private drainClauseBuffer(
     flush: boolean,
+    flushShortClause: boolean,
+    lowAudioConfidence: boolean,
   ): void {
     while (this.clauseBuffer.length > 0) {
       const boundary =
@@ -505,28 +696,108 @@ export class WhisperSegmenter {
           0,
           boundary,
         );
-      const clause =
-        joinTokenSurfaces(
-          clauseTokens,
-        ).trim();
 
-      if (clause === "") {
+      if (clauseTokens.length === 0) {
         continue;
       }
 
-      const id = this.nextLineId;
-      this.nextLineId += 1;
+      if (this.heldShortClause.length > 0) {
+        const merged = [
+          ...this.heldShortClause,
+          ...clauseTokens,
+        ];
 
-      this.onLine({
-        id,
-        text: clause,
-        final: true,
-        at: this.now(),
-      });
+        this.heldShortClause = [];
+        this.emitCommittedClause(
+          merged,
+          lowAudioConfidence,
+        );
+        continue;
+      }
 
-      this.lastTentativeId = null;
-      this.lastTentativeText = "";
+      if (
+        clauseTokens.length <
+        MIN_STANDALONE_CLAUSE_WORDS
+      ) {
+        if (this.clauseBuffer.length > 0) {
+          this.heldShortClause =
+            cloneTokens(clauseTokens);
+          continue;
+        }
+
+        if (!flushShortClause) {
+          this.heldShortClause =
+            cloneTokens(clauseTokens);
+          return;
+        }
+      }
+
+      this.emitCommittedClause(
+        clauseTokens,
+        lowAudioConfidence,
+      );
     }
+
+    if (
+      flushShortClause &&
+      this.heldShortClause.length > 0
+    ) {
+      const held =
+        this.heldShortClause;
+      this.heldShortClause = [];
+
+      this.emitCommittedClause(
+        held,
+        lowAudioConfidence,
+      );
+    }
+  }
+
+  private emitCommittedClause(
+    clauseTokens: readonly HypothesisToken[],
+    lowAudioConfidence: boolean,
+  ): void {
+    const clause =
+      joinTokenSurfaces(clauseTokens)
+        .replace(/\s+/gu, " ")
+        .trim();
+
+    if (clause === "") {
+      return;
+    }
+
+    if (
+      lowAudioConfidence &&
+      isBlacklistedHallucination(clause)
+    ) {
+      this.logHallucinationDrop(clause);
+      this.clearTentativeState();
+      return;
+    }
+
+    const corrected =
+      correctProperNouns(
+        clause,
+        this.properNouns,
+      );
+
+    if (corrected.corrections.length > 0) {
+      this.logProperNounCorrections(
+        corrected.corrections,
+      );
+    }
+
+    const id = this.nextLineId;
+    this.nextLineId += 1;
+
+    this.onLine({
+      id,
+      text: corrected.text,
+      final: true,
+      at: this.now(),
+    });
+
+    this.clearTentativeState();
   }
 
   private emitTentative(): void {
@@ -539,6 +810,7 @@ export class WhisperSegmenter {
         this.promotedWordCount,
       );
     const tentative = joinTokenSurfaces([
+      ...this.heldShortClause,
       ...this.clauseBuffer,
       ...unstableTokens,
     ]).trim();
@@ -602,6 +874,7 @@ export class WhisperSegmenter {
     console.log("[seg]", "segment committed", {
       requestId: segment.requestId,
       endOffset: segment.endOffset,
+      maxRms: segment.maxRms,
       reason,
     });
   }
@@ -611,11 +884,85 @@ export class WhisperSegmenter {
     this.latestHypothesis = [];
     this.promotedWordCount = 0;
     this.clauseBuffer = [];
+    this.heldShortClause = [];
     this.agreementSeriesStartedAt = null;
     this.lastAgreementProgressAt = null;
     this.lastHypothesisEndOffset = null;
+    this.clearTentativeState();
+  }
+
+  private clearTentativeState(): void {
     this.lastTentativeId = null;
     this.lastTentativeText = "";
+  }
+
+  private hasPendingRecognitionText(): boolean {
+    return (
+      this.latestHypothesis.length > 0 ||
+      this.clauseBuffer.length > 0 ||
+      this.heldShortClause.length > 0
+    );
+  }
+
+  private logProperNounCorrections(
+    corrections:
+      readonly ProperNounCorrection[],
+  ): void {
+    this.pendingCorrectionLogCount +=
+      corrections.length;
+
+    const observedAt = this.nowMs();
+
+    if (
+      observedAt -
+        this.lastCorrectionLogAt <
+      DIAGNOSTIC_LOG_INTERVAL_MS
+    ) {
+      return;
+    }
+
+    console.info(
+      "[seg]",
+      "proper-noun corrections applied",
+      {
+        count:
+          this.pendingCorrectionLogCount,
+        examples: corrections.slice(0, 3),
+      },
+    );
+
+    this.pendingCorrectionLogCount = 0;
+    this.lastCorrectionLogAt = observedAt;
+  }
+
+  private logHallucinationDrop(
+    clause: string,
+  ): void {
+    this.pendingHallucinationDropCount += 1;
+
+    const observedAt = this.nowMs();
+
+    if (
+      observedAt -
+        this.lastHallucinationLogAt <
+      DIAGNOSTIC_LOG_INTERVAL_MS
+    ) {
+      return;
+    }
+
+    console.info(
+      "[seg]",
+      "low-audio hallucination clause dropped",
+      {
+        count:
+          this.pendingHallucinationDropCount,
+        clause,
+      },
+    );
+
+    this.pendingHallucinationDropCount = 0;
+    this.lastHallucinationLogAt =
+      observedAt;
   }
 
   private handleTranscriptionError(
@@ -689,6 +1036,8 @@ export function splitEnglishClauses(
 ): string[] {
   const buffer = tokenizeHypothesis(text);
   const clauses: string[] = [];
+  let heldShortClause:
+    HypothesisToken[] = [];
 
   while (buffer.length > 0) {
     const boundary =
@@ -701,9 +1050,48 @@ export function splitEnglishClauses(
       break;
     }
 
-    const clause = joinTokenSurfaces(
-      buffer.splice(0, boundary),
-    ).trim();
+    const clauseTokens =
+      buffer.splice(0, boundary);
+
+    if (heldShortClause.length > 0) {
+      const clause = joinTokenSurfaces([
+        ...heldShortClause,
+        ...clauseTokens,
+      ]).trim();
+
+      heldShortClause = [];
+
+      if (clause !== "") {
+        clauses.push(clause);
+      }
+      continue;
+    }
+
+    if (
+      clauseTokens.length <
+        MIN_STANDALONE_CLAUSE_WORDS &&
+      buffer.length > 0
+    ) {
+      heldShortClause =
+        cloneTokens(clauseTokens);
+      continue;
+    }
+
+    const clause =
+      joinTokenSurfaces(
+        clauseTokens,
+      ).trim();
+
+    if (clause !== "") {
+      clauses.push(clause);
+    }
+  }
+
+  if (heldShortClause.length > 0) {
+    const clause =
+      joinTokenSurfaces(
+        heldShortClause,
+      ).trim();
 
     if (clause !== "") {
       clauses.push(clause);
@@ -960,6 +1348,293 @@ function repeatedNgramExcess(
   }
 
   return excess;
+}
+
+function buildProperNounDictionary(
+  terms: readonly string[],
+): ProperNounEntry[] {
+  const entries: ProperNounEntry[] = [];
+  const seen = new Set<string>();
+
+  for (const rawTerm of terms) {
+    if (entries.length >= MAX_CONTEXT_TERMS) {
+      break;
+    }
+
+    const surface = rawTerm
+      .normalize("NFKC")
+      .trim()
+      .replace(/\s+/gu, " ");
+
+    if (
+      Array.from(surface).length < 4 ||
+      /\s/u.test(surface) ||
+      !/^@?[\p{L}\p{N}][\p{L}\p{M}\p{N}'’._-]*$/u.test(
+        surface,
+      ) ||
+      !isCapitalizedDictionaryTerm(surface)
+    ) {
+      continue;
+    }
+
+    const key = normalizeTokenKey(surface);
+
+    if (
+      key.length === 0 ||
+      seen.has(key) ||
+      COMMON_ENGLISH_WORDS.has(key)
+    ) {
+      continue;
+    }
+
+    seen.add(key);
+    entries.push({
+      surface,
+      key,
+      capitalized:
+        isCapitalizedDictionaryTerm(
+          surface,
+        ),
+      maximumDistance:
+        key.length <= 5 ? 1 : 2,
+    });
+  }
+
+  return entries;
+}
+
+function correctProperNouns(
+  clause: string,
+  dictionary: readonly ProperNounEntry[],
+): CorrectedClause {
+  if (dictionary.length === 0) {
+    return {
+      text: clause,
+      corrections: [],
+    };
+  }
+
+  const tokens = tokenizeHypothesis(clause);
+  const corrections:
+    ProperNounCorrection[] = [];
+
+  for (const token of tokens) {
+    if (
+      token.protected ||
+      token.key.length < 4 ||
+      COMMON_ENGLISH_WORDS.has(token.key)
+    ) {
+      continue;
+    }
+
+    const hypothesisCapitalized =
+      isCapitalizedTokenSurface(
+        token.surface,
+      );
+
+    let bestEntry:
+      | ProperNounEntry
+      | null = null;
+    let bestDistance =
+      Number.POSITIVE_INFINITY;
+    let ambiguous = false;
+
+    for (const entry of dictionary) {
+      if (
+        token.key === entry.key ||
+        (
+          !hypothesisCapitalized &&
+          !entry.capitalized
+        ) ||
+        Math.abs(
+          token.key.length -
+            entry.key.length,
+        ) > entry.maximumDistance
+      ) {
+        continue;
+      }
+
+      const distance =
+        levenshteinDistanceWithin(
+          token.key,
+          entry.key,
+          entry.maximumDistance,
+        );
+
+      if (distance === null) {
+        continue;
+      }
+
+      if (distance < bestDistance) {
+        bestEntry = entry;
+        bestDistance = distance;
+        ambiguous = false;
+        continue;
+      }
+
+      if (
+        distance === bestDistance &&
+        bestEntry !== null &&
+        entry.key !== bestEntry.key
+      ) {
+        ambiguous = true;
+      }
+    }
+
+    if (
+      bestEntry === null ||
+      ambiguous
+    ) {
+      continue;
+    }
+
+    const replacement =
+      replaceTokenCore(
+        token.surface,
+        bestEntry.surface,
+      );
+
+    if (
+      replacement === null ||
+      replacement === token.surface
+    ) {
+      continue;
+    }
+
+    corrections.push({
+      from: token.surface,
+      to: replacement,
+    });
+    token.surface = replacement;
+    token.key = bestEntry.key;
+  }
+
+  return {
+    text: joinTokenSurfaces(tokens).trim(),
+    corrections,
+  };
+}
+
+function isCapitalizedDictionaryTerm(
+  term: string,
+): boolean {
+  return (
+    term.startsWith("@") ||
+    /^\p{Lu}/u.test(term)
+  );
+}
+
+function isCapitalizedTokenSurface(
+  surface: string,
+): boolean {
+  const core = surface.replace(
+    /^[^\p{L}\p{N}@]+/u,
+    "",
+  );
+
+  return (
+    core.startsWith("@") ||
+    /^\p{Lu}/u.test(core)
+  );
+}
+
+function replaceTokenCore(
+  surface: string,
+  replacement: string,
+): string | null {
+  const match = surface.match(
+    /^([^\p{L}\p{N}@]*)(@?[\p{L}\p{N}][\p{L}\p{M}\p{N}'’._-]*)([^\p{L}\p{N}]*)$/u,
+  );
+
+  if (match === null) {
+    return null;
+  }
+
+  return (
+    (match[1] ?? "") +
+    replacement +
+    (match[3] ?? "")
+  );
+}
+
+function levenshteinDistanceWithin(
+  left: string,
+  right: string,
+  maximum: number,
+): number | null {
+  if (
+    Math.abs(left.length - right.length) >
+    maximum
+  ) {
+    return null;
+  }
+
+  let previous =
+    Array.from(
+      { length: right.length + 1 },
+      (_unused, index) => index,
+    );
+
+  for (
+    let leftIndex = 1;
+    leftIndex <= left.length;
+    leftIndex += 1
+  ) {
+    const current = [leftIndex];
+    let rowMinimum = leftIndex;
+
+    for (
+      let rightIndex = 1;
+      rightIndex <= right.length;
+      rightIndex += 1
+    ) {
+      const substitutionCost =
+        left[leftIndex - 1] ===
+        right[rightIndex - 1]
+          ? 0
+          : 1;
+      const value = Math.min(
+        (previous[rightIndex] ?? 0) + 1,
+        (current[rightIndex - 1] ?? 0) + 1,
+        (previous[rightIndex - 1] ?? 0) +
+          substitutionCost,
+      );
+
+      current.push(value);
+      rowMinimum = Math.min(
+        rowMinimum,
+        value,
+      );
+    }
+
+    if (rowMinimum > maximum) {
+      return null;
+    }
+
+    previous = current;
+  }
+
+  const distance =
+    previous[right.length] ??
+    Number.POSITIVE_INFINITY;
+
+  return distance <= maximum
+    ? distance
+    : null;
+}
+
+function isBlacklistedHallucination(
+  clause: string,
+): boolean {
+  const normalized = clause
+    .normalize("NFKC")
+    .replace(/\s+/gu, " ")
+    .trim();
+
+  return HALLUCINATION_PHRASE_BLACKLIST
+    .some((pattern) =>
+      pattern.test(normalized),
+    );
 }
 
 export function maxRmsForRange(

@@ -115,6 +115,7 @@ let activeRecognitionRequestId:
 let activePcmRequestId:
   | string
   | null = null;
+let activeContextTerms: string[] = [];
 let expectedPcmSequence = 0;
 let lastPcmGapLogAt =
   Number.NEGATIVE_INFINITY;
@@ -394,6 +395,26 @@ function handlePcm(
     return;
   }
 
+  if (message.contextTerms !== undefined) {
+    activeContextTerms = [
+      ...message.contextTerms,
+    ];
+    activeSegmenter
+      ?.setProperNounDictionary(
+        activeContextTerms,
+      );
+
+    console.info(
+      "[offscreen]",
+      "post context dictionary received",
+      {
+        requestId: message.requestId,
+        termCount:
+          activeContextTerms.length,
+      },
+    );
+  }
+
   detectPcmSequenceGap(message.seq);
 
   try {
@@ -510,6 +531,8 @@ async function handleCaptureStart(
     );
     return;
   }
+
+  activeContextTerms = [];
 
   publishState(
     createCaptureState("starting", {
@@ -775,6 +798,7 @@ async function handleCaptureStart(
           ),
         getEnergyHistory: () =>
           audioCapture.getEnergyHistory(),
+        properNouns: activeContextTerms,
         showTentative:
           settings.showTentative,
         onLine(line) {
@@ -970,6 +994,7 @@ function terminateRecognition(
     activeTranslationRequestId;
   activeTranslationRequestId = null;
   activeTranslationPath = null;
+  activeContextTerms = [];
 
   rejectPendingContentTranslations(
     translationRequestId ?? requestId,

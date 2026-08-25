@@ -2,6 +2,7 @@ import {
   createProbeRequestId,
   getProbeEnvironment,
   isMessageOfType,
+  MAX_CONTEXT_TERMS,
   nowIso,
   toProbeError,
   type ContentScriptProbeResultMessage,
@@ -48,6 +49,95 @@ const TRANSLATOR_CREATE_WAIT_MS = 8_000;
 const CONTENT_INSTANCE_VERSION =
   chrome.runtime.getManifest().version;
 
+const CONTEXT_TERM_STOPLIST =
+  new Set([
+    "about",
+    "after",
+    "again",
+    "against",
+    "also",
+    "another",
+    "because",
+    "before",
+    "being",
+    "between",
+    "both",
+    "could",
+    "does",
+    "doing",
+    "during",
+    "each",
+    "even",
+    "every",
+    "first",
+    "from",
+    "going",
+    "great",
+    "have",
+    "having",
+    "here",
+    "into",
+    "just",
+    "know",
+    "last",
+    "like",
+    "little",
+    "look",
+    "made",
+    "make",
+    "many",
+    "more",
+    "most",
+    "much",
+    "need",
+    "never",
+    "next",
+    "only",
+    "other",
+    "over",
+    "people",
+    "really",
+    "right",
+    "same",
+    "should",
+    "some",
+    "something",
+    "still",
+    "such",
+    "take",
+    "than",
+    "thank",
+    "thanks",
+    "that",
+    "their",
+    "them",
+    "then",
+    "there",
+    "these",
+    "they",
+    "thing",
+    "think",
+    "this",
+    "those",
+    "through",
+    "today",
+    "under",
+    "very",
+    "want",
+    "watching",
+    "well",
+    "were",
+    "what",
+    "when",
+    "where",
+    "which",
+    "while",
+    "will",
+    "with",
+    "would",
+    "your",
+  ]);
+
 let backgroundPort:
   | chrome.runtime.Port
   | null = null;
@@ -74,6 +164,12 @@ let contentSessionRequestId:
   | string
   | null = null;
 let activeCaptureRequestId:
+  | string
+  | null = null;
+let pendingContextTerms:
+  | string[]
+  | null = null;
+let pendingContextTermsRequestId:
   | string
   | null = null;
 let captionOverlay:
@@ -294,6 +390,10 @@ function connectBackgroundPort(): void {
             "CS_STOP_TAP",
           )
         ) {
+          clearPendingContextTerms(
+            message.requestId,
+          );
+
           if (
             contentSessionRequestId ===
               message.requestId
@@ -427,6 +527,7 @@ function connectBackgroundPort(): void {
         lastCaptureStatus = "idle";
         activeCaptureRequestId = null;
         contentSessionRequestId = null;
+        clearPendingContextTerms();
         destroyOverlay();
         return;
       }
@@ -456,6 +557,7 @@ function connectBackgroundPort(): void {
       activeShowOriginal =
         DEFAULT_SETTINGS.showOriginal;
       contentSessionRequestId = null;
+      clearPendingContextTerms();
       resetContentTranslator();
       destroyOverlay();
 
@@ -560,6 +662,11 @@ function handleStartTapMessage(
     message.requestId;
   activeCaptureRequestId =
     message.requestId;
+  pendingContextTermsRequestId =
+    message.requestId;
+  // Extraction must run AFTER the tap target is selected (closest("article")
+  // needs the target element); defer to first-PCM attach time.
+  pendingContextTerms = null;
   resetContentTranslator();
 
   if (!preservePresentation) {
@@ -993,6 +1100,7 @@ async function startTap(
       return;
     }
 
+    clearPendingContextTerms(requestId);
     postTapState(
       requestId,
       "error",
@@ -1008,14 +1116,40 @@ async function startTap(
         return;
       }
 
+      const attachContextTerms =
+        pendingContextTermsRequestId ===
+        requestId;
+      if (
+        attachContextTerms &&
+        pendingContextTerms === null
+      ) {
+        pendingContextTerms =
+          extractPostContextTerms();
+      }
+
+      const contextTerms =
+        attachContextTerms &&
+        pendingContextTerms !== null
+          ? [...pendingContextTerms]
+          : undefined;
+
       const message: CsPcmMessage = {
         t: "CS_PCM",
         requestId,
         seq,
         b64,
+        ...(contextTerms === undefined
+          ? {}
+          : { contextTerms }),
       };
 
       postContentMessage(message);
+
+      if (attachContextTerms) {
+        clearPendingContextTerms(
+          requestId,
+        );
+      }
     },
 
     onDetail(detail) {
@@ -1032,6 +1166,8 @@ async function startTap(
       if (activeTap === tap) {
         activeTap = null;
       }
+
+      clearPendingContextTerms(requestId);
 
       if (
         contentSessionRequestId ===
@@ -1058,6 +1194,8 @@ async function startTap(
       if (activeTap === tap) {
         activeTap = null;
       }
+
+      clearPendingContextTerms(requestId);
 
       if (
         contentSessionRequestId ===
@@ -1100,6 +1238,8 @@ async function startTap(
       activeTap = null;
     }
 
+    clearPendingContextTerms(requestId);
+
     if (
       contentSessionRequestId === requestId
     ) {
@@ -1124,6 +1264,8 @@ async function stopTap(
   requestId: string,
   detail: string,
 ): Promise<void> {
+  clearPendingContextTerms(requestId);
+
   const tap = activeTap;
 
   if (
@@ -1225,6 +1367,7 @@ function handleCaptureState(
       activeTranslationPath = null;
       activeSilentInputHint = false;
       contentSessionRequestId = null;
+      clearPendingContextTerms();
       resetContentTranslator();
       showOverlayError(state.progress);
       return;
@@ -1235,6 +1378,7 @@ function handleCaptureState(
       activeTranslationPath = null;
       activeSilentInputHint = false;
       contentSessionRequestId = null;
+      clearPendingContextTerms();
       resetContentTranslator();
       destroyOverlay();
   }
@@ -1388,6 +1532,102 @@ function postContentMessage(
       error,
     );
   }
+}
+
+function extractPostContextTerms(): string[] {
+  const articles = new Set<HTMLElement>();
+  const target =
+    getCurrentAudioTapTarget();
+  const targetArticle =
+    target?.closest("article");
+
+  if (targetArticle instanceof HTMLElement) {
+    articles.add(targetArticle);
+  }
+
+  if (
+    /^\/[^/]+\/status\/\d+(?:\/|$)/u.test(
+      location.pathname,
+    )
+  ) {
+    const mainPost =
+      document.querySelector(
+        "main article",
+      );
+
+    if (mainPost instanceof HTMLElement) {
+      articles.add(mainPost);
+    }
+  }
+
+  const terms: string[] = [];
+  const seen = new Set<string>();
+
+  for (const article of articles) {
+    const text =
+      article.innerText ||
+      article.textContent ||
+      "";
+    const matches = text.match(
+      /@[A-Za-z0-9_]{3,15}|[\p{Lu}][\p{L}\p{M}\p{N}'’._-]{3,}/gu,
+    ) ?? [];
+
+    for (const match of matches) {
+      const term = match
+        .normalize("NFKC")
+        .trim();
+
+      if (
+        Array.from(term).length < 4 ||
+        !(
+          term.startsWith("@") ||
+          /^\p{Lu}/u.test(term)
+        )
+      ) {
+        continue;
+      }
+
+      const key = term
+        .replace(/^@/u, "")
+        .toLocaleLowerCase("en-US");
+
+      if (
+        key === "" ||
+        seen.has(key) ||
+        (
+          !term.startsWith("@") &&
+          CONTEXT_TERM_STOPLIST.has(key)
+        )
+      ) {
+        continue;
+      }
+
+      seen.add(key);
+      terms.push(term);
+
+      if (
+        terms.length >= MAX_CONTEXT_TERMS
+      ) {
+        return terms;
+      }
+    }
+  }
+
+  return terms;
+}
+
+function clearPendingContextTerms(
+  requestId?: string,
+): void {
+  if (
+    requestId !== undefined &&
+    pendingContextTermsRequestId !== requestId
+  ) {
+    return;
+  }
+
+  pendingContextTerms = null;
+  pendingContextTermsRequestId = null;
 }
 
 async function runInitialProbe(): Promise<void> {
