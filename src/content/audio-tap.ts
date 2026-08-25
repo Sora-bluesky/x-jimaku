@@ -19,6 +19,7 @@ let currentAudioTapTarget:
 export interface AudioTapCallbacks {
   onChunk(seq: number, b64: string): void;
   onDetail(detail: string): void;
+  onMediaEnded(): void;
   onStopped(
     detail: string,
     target: HTMLVideoElement | null,
@@ -208,6 +209,10 @@ export class AudioTap {
       audioTrack.addEventListener(
         "ended",
         this.handleTrackEnded,
+      );
+      video.addEventListener(
+        "ended",
+        this.handleMediaEnded,
       );
       video.addEventListener(
         "emptied",
@@ -422,6 +427,16 @@ export class AudioTap {
     }
   }
 
+  private readonly handleMediaEnded =
+    (): void => {
+      if (!this.active) {
+        return;
+      }
+
+      this.flushPendingChunk();
+      this.callbacks.onMediaEnded();
+    };
+
   private readonly handleTrackEnded =
     (): void => {
       void this.endFromSource("track-ended");
@@ -607,6 +622,10 @@ export class AudioTap {
     audioTrack?.removeEventListener(
       "ended",
       this.handleTrackEnded,
+    );
+    video?.removeEventListener(
+      "ended",
+      this.handleMediaEnded,
     );
     video?.removeEventListener(
       "emptied",

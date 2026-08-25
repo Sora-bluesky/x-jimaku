@@ -377,6 +377,14 @@ function handleTargetPlaybackEvent(
     return;
   }
 
+  if (
+    event.type === "playing" &&
+    activeTap?.getRequestId() ===
+      lastEosRequestId
+  ) {
+    lastEosRequestId = null;
+  }
+
   targetPlaybackPaused =
     event.type === "pause";
   captionOverlay?.setPlaybackPaused(
@@ -1244,6 +1252,14 @@ async function startTap(
           detail,
         );
       }
+    },
+
+    onMediaEnded() {
+      if (activeTap !== tap) {
+        return;
+      }
+
+      postEndOfStream(requestId);
     },
 
     onStopped(detail, target) {
