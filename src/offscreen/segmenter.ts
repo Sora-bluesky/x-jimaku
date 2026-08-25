@@ -1593,11 +1593,14 @@ function replaceTokenCore(
     return null;
   }
 
-  // A possessive on the recognized token ("OpenAI's") is not part of the
-  // dictionary surface; keep it attached to the replacement.
+  // A possessive on the recognized token ("OpenAI's") survives the
+  // replacement — unless the dictionary surface already carries one
+  // ("OpenAI's" + "'s" would double up).
   const possessive =
-    (match[2] ?? "").match(/['’]s$/iu)?.[0] ??
-    "";
+    /['’]s$/iu.test(replacement)
+      ? ""
+      : (match[2] ?? "").match(/['’]s$/iu)?.[0] ??
+        "";
 
   return (
     (match[1] ?? "") +
