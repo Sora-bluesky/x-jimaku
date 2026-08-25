@@ -59,6 +59,7 @@ const COMMON_ENGLISH_WORDS =
     "from",
     "going",
     "great",
+    "grow",
     "have",
     "having",
     "here",
@@ -147,7 +148,7 @@ interface HypothesisToken {
 interface ProperNounEntry {
   surface: string;
   key: string;
-  capitalized: boolean;
+  mention: boolean;
   maximumDistance: number;
 }
 
@@ -302,6 +303,15 @@ export class WhisperSegmenter {
       return;
     }
 
+    if (this.hasPendingRecognitionText()) {
+      this.forceAdoptLatest(
+        "stop",
+        true,
+        true,
+        false,
+      );
+    }
+
     this.started = false;
     this.busy = false;
     this.inFlight = null;
@@ -321,7 +331,13 @@ export class WhisperSegmenter {
   }
 
   tick(): void {
-    if (!this.started || this.busy) {
+    if (!this.started) {
+      return;
+    }
+
+    this.forceAgreementIfTimedOut();
+
+    if (this.busy) {
       return;
     }
 
@@ -547,20 +563,32 @@ export class WhisperSegmenter {
       shouldCommitForSilence ||
       shouldForceAudioBoundary
     ) {
-      this.forceAdoptLatest(
-        shouldForceAudioBoundary
-          ? "maximum-length-empty"
-          : "trailing-silence-empty",
-        true,
-        true,
-        lowAudioAtCommit,
-      );
-      this.commitSegment(
-        segment,
-        shouldForceAudioBoundary
-          ? "maximum-length-empty"
-          : "trailing-silence-empty",
-      );
+      const wholePendingWindowSilent =
+        segment.maxRms <
+        SILENCE_RMS_THRESHOLD;
+
+      if (wholePendingWindowSilent) {
+        this.forceAdoptLatest(
+          shouldForceAudioBoundary
+            ? "maximum-length-empty"
+            : "trailing-silence-empty",
+          true,
+          true,
+          true,
+        );
+        this.commitSegment(
+          segment,
+          shouldForceAudioBoundary
+            ? "maximum-length-empty"
+            : "trailing-silence-empty",
+        );
+      } else {
+        this.forceAgreementIfTimedOut();
+        this.emitTentative();
+      }
+    } else {
+      this.forceAgreementIfTimedOut();
+      this.emitTentative();
     }
 
     queueMicrotask(() => {
@@ -617,11 +645,20 @@ export class WhisperSegmenter {
   }
 
   private forceAgreementIfTimedOut(): void {
+    const timeoutStartedAt =
+      this.lastAgreementProgressAt ??
+      this.agreementSeriesStartedAt;
+    const hasUnflushedText =
+      this.latestHypothesis.length >
+        this.promotedWordCount ||
+      this.clauseBuffer.length > 0 ||
+      this.heldShortClause.length > 0;
+    const observedAt = this.nowMs();
+
     if (
-      this.latestHypothesis.length === 0 ||
-      this.lastAgreementProgressAt === null ||
-      this.nowMs() -
-        this.lastAgreementProgressAt <
+      !hasUnflushedText ||
+      timeoutStartedAt === null ||
+      observedAt - timeoutStartedAt <
         AGREEMENT_TIMEOUT_MS
     ) {
       return;
@@ -630,11 +667,11 @@ export class WhisperSegmenter {
     this.forceAdoptLatest(
       "agreement-timeout",
       true,
-      false,
+      true,
       false,
     );
     this.lastAgreementProgressAt =
-      this.nowMs();
+      observedAt;
   }
 
   private forceAdoptLatest(
@@ -988,6 +1025,7 @@ export class WhisperSegmenter {
       { requestId, message },
     );
     this.onError(message);
+    this.forceAgreementIfTimedOut();
 
     queueMicrotask(() => {
       this.tick();
@@ -1377,7 +1415,13 @@ function buildProperNounDictionary(
       continue;
     }
 
-    const key = normalizeTokenKey(surface);
+    const mention = surface.startsWith("@");
+    const comparisonSurface = mention
+      ? surface.slice(1)
+      : surface;
+    const key = normalizeTokenKey(
+      comparisonSurface,
+    );
 
     if (
       key.length === 0 ||
@@ -1391,12 +1435,9 @@ function buildProperNounDictionary(
     entries.push({
       surface,
       key,
-      capitalized:
-        isCapitalizedDictionaryTerm(
-          surface,
-        ),
+      mention,
       maximumDistance:
-        key.length <= 5 ? 1 : 2,
+        mention || key.length <= 5 ? 1 : 2,
     });
   }
 
@@ -1421,8 +1462,7 @@ function correctProperNouns(
   for (const token of tokens) {
     if (
       token.protected ||
-      token.key.length < 4 ||
-      COMMON_ENGLISH_WORDS.has(token.key)
+      token.key.length < 4
     ) {
       continue;
     }
@@ -1441,10 +1481,9 @@ function correctProperNouns(
 
     for (const entry of dictionary) {
       if (
-        token.key === entry.key ||
         (
           !hypothesisCapitalized &&
-          !entry.capitalized
+          !entry.mention
         ) ||
         Math.abs(
           token.key.length -
@@ -1483,7 +1522,8 @@ function correctProperNouns(
 
     if (
       bestEntry === null ||
-      ambiguous
+      ambiguous ||
+      COMMON_ENGLISH_WORDS.has(token.key)
     ) {
       continue;
     }
@@ -1531,10 +1571,13 @@ function isCapitalizedTokenSurface(
     /^[^\p{L}\p{N}@]+/u,
     "",
   );
+  const comparisonSurface =
+    core.startsWith("@")
+      ? core.slice(1)
+      : core;
 
-  return (
-    core.startsWith("@") ||
-    /^\p{Lu}/u.test(core)
+  return /^\p{Lu}/u.test(
+    comparisonSurface,
   );
 }
 

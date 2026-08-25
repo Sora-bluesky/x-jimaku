@@ -18,6 +18,8 @@ import { startBenchServer } from "./serve.mjs";
 
 const BENCH_DIRECTORY = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.dirname(BENCH_DIRECTORY);
+const TRACE_ENABLED = process.argv.includes("--trace");
+const traceLines = [];
 const DIST_DIRECTORY = path.join(PROJECT_ROOT, "dist");
 const RESULTS_DIRECTORY = path.join(BENCH_DIRECTORY, "results");
 const WORK_DIRECTORY = path.join(BENCH_DIRECTORY, "work");
@@ -61,6 +63,10 @@ function parseArguments(argv) {
 
     if (argument === "--help" || argument === "-h") {
       options.help = true;
+      continue;
+    }
+
+    if (argument === "--trace") {
       continue;
     }
 
@@ -1093,6 +1099,30 @@ async function runBench(options, caseDefinition) {
       ],
     });
 
+    if (TRACE_ENABLED) {
+      const attachConsole = async (target) => {
+        try {
+          if (target.type() === "service_worker" || target.type() === "page") {
+            return;
+          }
+          const session = await target.createCDPSession();
+          await session.send("Runtime.enable");
+          session.on("Runtime.consoleAPICalled", (event) => {
+            const parts = event.args.map((a) => (
+              a.value !== undefined ? String(a.value) : (a.description ?? "")
+            ));
+            traceLines.push(`[${target.type()}] ${parts.join(" ")}`);
+          });
+        } catch {
+          // best-effort tracing only
+        }
+      };
+      browser.on("targetcreated", (t) => { void attachConsole(t); });
+      for (const t of browser.targets()) {
+        void attachConsole(t);
+      }
+    }
+
     const serviceWorkerTarget = await browser.waitForTarget(
       (target) => (
         target.type() === "service_worker"
@@ -1174,6 +1204,32 @@ async function runBench(options, caseDefinition) {
       optionsReady: optionsView.ready,
       worker,
     });
+
+    // Model-load time varies run to run, so a fixed duration can land before
+    // the clip finishes playing. Stopping mid-playback truncates the tail:
+    // wait for playback to end, then give the segmenter's 6s agreement
+    // timeout room to flush the final clause while still "running".
+    try {
+      await casePage.waitForFunction(
+        () => document.getElementById("bench-media").ended,
+        { timeout: 120_000, polling: 500 },
+      );
+      await delay(10_000);
+    } catch {
+      console.error(
+        "[bench] media did not reach ended before timeout; "
+          + "stopping anyway (tail may be truncated)",
+      );
+    }
+
+    {
+      const storage = await readSessionStorage(worker);
+      collector.ingestSession(extractFinalClausesFromSession(storage));
+
+      if (optionsView.ready) {
+        collector.ingestOptions(await scrapeOptionsRows(optionsView.page));
+      }
+    }
 
     await casePage.bringToFront();
     await delay(100);
@@ -1269,6 +1325,13 @@ async function runBench(options, caseDefinition) {
     console.error(
       `[bench] result: ${path.relative(PROJECT_ROOT, resultFile)}`,
     );
+    if (TRACE_ENABLED) {
+      const tracePath = resultFile.replace(/\.json$/u, ".trace.log");
+      writeFileSync(tracePath, traceLines.join("\n"), "utf8");
+      console.error(
+        `[bench] trace: ${path.relative(PROJECT_ROOT, tracePath)}`,
+      );
+    }
   } finally {
     if (captureStarted && worker && typeof caseTabId === "number") {
       try {
