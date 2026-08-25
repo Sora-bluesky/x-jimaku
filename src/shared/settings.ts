@@ -13,11 +13,20 @@ export const SOURCE_LANGUAGES = [
   "en",
 ] as const;
 
+export const TRANSLATION_BACKENDS = [
+  "auto",
+  "translator",
+  "prompt-api",
+] as const;
+
 export type WhisperModel =
   (typeof WHISPER_MODELS)[number];
 
 export type SourceLanguage =
   (typeof SOURCE_LANGUAGES)[number];
+
+export type TranslationBackend =
+  (typeof TRANSLATION_BACKENDS)[number];
 
 export type WhisperDevice =
   | "webgpu"
@@ -26,6 +35,8 @@ export type WhisperDevice =
 export interface Settings {
   model: WhisperModel;
   sourceLang: SourceLanguage;
+  translationBackend:
+    TranslationBackend;
   showOriginal: boolean;
   showTentative: boolean;
 }
@@ -33,6 +44,7 @@ export interface Settings {
 export const DEFAULT_SETTINGS: Readonly<Settings> = {
   model: "base",
   sourceLang: "en",
+  translationBackend: "auto",
   showOriginal: false,
   showTentative: false,
 };
@@ -56,6 +68,13 @@ export async function readSettings(): Promise<Settings> {
     )
       ? stored.sourceLang
       : DEFAULT_SETTINGS.sourceLang,
+    translationBackend:
+      isTranslationBackend(
+        stored.translationBackend,
+      )
+        ? stored.translationBackend
+        : DEFAULT_SETTINGS
+            .translationBackend,
     showOriginal:
       typeof stored.showOriginal === "boolean"
         ? stored.showOriginal
@@ -88,6 +107,9 @@ export function isSettings(
     isRecord(value) &&
     isWhisperModel(value.model) &&
     isSourceLanguage(value.sourceLang) &&
+    isTranslationBackend(
+      value.translationBackend,
+    ) &&
     typeof value.showOriginal === "boolean" &&
     typeof value.showTentative === "boolean"
   );
@@ -108,6 +130,16 @@ export function isSourceLanguage(
   value: unknown,
 ): value is SourceLanguage {
   return value === "auto" || value === "en";
+}
+
+export function isTranslationBackend(
+  value: unknown,
+): value is TranslationBackend {
+  return (
+    value === "auto" ||
+    value === "translator" ||
+    value === "prompt-api"
+  );
 }
 
 export function isWhisperDevice(
