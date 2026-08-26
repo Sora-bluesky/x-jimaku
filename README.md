@@ -66,6 +66,12 @@ For fast-talking videos, lowering the X player's playback speed (e.g. to 0.75x) 
 - Captions run a few seconds behind live playback.
 - Intended for one video open and captioned at a time.
 
+## Scope of use
+
+x-jimaku is built for personal, local use. It only post-processes what your own browser is already displaying, entirely on your machine: no audio, transcript, or translation ever leaves your device, nothing is stored, and the extension makes no requests of its own to x.com (no X APIs, no crawling, no downloads). We reviewed this design against X's Terms of Service (effective April 10, 2026) and Japanese copyright law's private-use provisions before publishing.
+
+Please keep it that way when using or forking this project. Features such as saving or sharing transcripts, downloading media, or automated browsing are out of scope here — they would put the project on the wrong side of those terms.
+
 ## License
 
 MIT
