@@ -9,7 +9,9 @@
   "scripts": {
     "build": "vite build && vite build -c vite.config.iife.ts",
     "dev": "concurrently \"vite build --watch\" \"vite build -c vite.config.iife.ts --watch\"",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "bench:smoke": "node bench/run-bench.mjs --case tts --model tiny --duration 30",
+    "bench:quality": "node bench/run-bench.mjs --case tts --model base --duration 90"
   },
   "repository": {
     "type": "git",
