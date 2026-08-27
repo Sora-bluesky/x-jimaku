@@ -34,7 +34,7 @@ This runs `vite build` (main bundle) then `vite build -c vite.config.iife.ts` (c
 Read-only, run before any drive:
 
 - `dist/manifest.json` exists (build actually ran and produced output).
-- `~/.cache/puppeteer/chrome/` contains at least one `chrome/win64-*` (or platform-equivalent) directory — the bench's default Chrome auto-discovery source.
+- A Chrome for the bench is resolvable through any of the three supported sources: a `--chrome <path>` you will pass, a set `BENCH_CHROME` env var, or `~/.cache/puppeteer/chrome/` containing at least one `chrome/win64-*` (or platform-equivalent) directory. Any one of them satisfies this check — an explicit `--chrome`/`BENCH_CHROME` does not need the cache to exist.
 - Port 8123 is not already `LISTEN`ing (the bench server binds it fixed; a stale process from a prior killed run blocks the next one).
 - `bench/refs/tts-speech.wav` exists (the `tts` case is self-contained on this file plus `tts-ja-ref.txt`/`tts-script.txt`; without it the `tts` case cannot run at all).
 

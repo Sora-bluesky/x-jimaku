@@ -24,9 +24,9 @@ Preconditions:
 - `bench/refs/tts-speech.wav` (and its paired `tts-ja-ref.txt`/`tts-script.txt`) exist.
 - `~/.cache/puppeteer/chrome/` has a usable Chrome (or pass `--chrome <path>` / set `BENCH_CHROME` if not).
 
-- **Smoke run.** Run `node bench/run-bench.mjs --case tts --model tiny --duration 30`. Exit code `0`; stdout ends with a `[bench] result: bench/results/tts-tiny-<timestamp>.json` line.
+- **Smoke run.** Run `node bench/run-bench.mjs --case tts --model tiny --duration 30`. Exit code `0`; **stderr** carries the `[bench] result: bench/results/tts-tiny-<timestamp>.json` line (the metrics table is what goes to stdout) — capture both streams, or merge them, when scripting the proof check.
 - **Quality run.** Run `node bench/run-bench.mjs --case tts --model base --duration 90`. Same shape as above, plus a markdown table on stdout with `wer`, `werFiltered`, `pnRecall`, `fragmentRate`, `clauses` columns.
-- **Debug run.** Add `--trace` to either command above. Offscreen-document console lines appear inline in stdout, interleaved with the harness's own log lines.
+- **Debug run.** Add `--trace` to either command above. Offscreen-document console lines are written to a `.trace.log` file next to the result JSON, and its path is echoed on stderr as `[bench] trace: <path>` — nothing appears inline. The trace file is only written after a successful result, so a run that dies before producing the JSON leaves no trace file; for those failures, the error output on stderr is the only evidence.
 - **Argument error.** Run with an unrecognized flag, e.g. `node bench/run-bench.mjs --bogus`. Exit code `2` (distinct from a run failure, which is exit `1`).
 - **Proof.** Open the JSON path from the `[bench] result:` line. Confirm it parses and its `metrics` object has numeric `wer`, `werFiltered`, `fragmentRate`, and `clauseStats.count >= 1`. `metrics.properNounRecall` is `null` (with `properNounTotal: 0`) whenever the reference text has no proper nouns to score — that is expected for `tts`, not a failure. Record the observed numbers — there is no pass/fail threshold on them.
 

@@ -19,7 +19,7 @@ This directory is the maintained source for verifying x-jimaku's user-facing beh
 
 ## Proof and skip reporting
 
-- Bench proof = exit code, the `[bench] result:` stdout line, and the resulting JSON file's parsed numeric metrics (see the skill's Evidence section — no thresholds exist, record observed values).
+- Bench proof = exit code, the `[bench] result:` line on stderr, and the resulting JSON file's parsed numeric metrics (see the skill's Evidence section — no thresholds exist, record observed values).
 - Manual proof = a screenshot or recording showing the actual chip/badge text against a real x.com video, not a mocked DOM.
 - Record which feature ID and entry point were used with every artifact.
 - Report an unreachable path with the attempted command/action and the unmet precondition (e.g. "CfT cannot download the Translator pack, so options-page Translator diagnostics could not be exercised in the scripted profile").
