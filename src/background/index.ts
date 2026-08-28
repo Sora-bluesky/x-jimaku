@@ -1431,6 +1431,12 @@ function cancelContentReconnectGraceEpisode(
   globalThis.clearTimeout(
     episode.timerId,
   );
+  failDeferredTranslationRequests(
+    episode,
+    new Error(
+      "Capture session ended during reconnect grace",
+    ),
+  );
 }
 
 function clearRecoveryContentResumeAcknowledgement(
