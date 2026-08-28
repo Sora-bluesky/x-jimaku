@@ -234,6 +234,17 @@ export interface OffLevelMessage {
   at: string;
 }
 
+export interface OffDiagnosticMessage {
+  t: "OFF_DIAGNOSTIC";
+  kind:
+    | "unhandled-error"
+    | "unhandled-rejection";
+  at: string;
+  context: "offscreen";
+  message: string;
+  stack?: string;
+}
+
 export interface CsStartTapMessage {
   t: "CS_START_TAP";
   requestId: string;
@@ -416,6 +427,7 @@ export type CapturePortMessage =
   | OffStatusMessage
   | OffStateMessage
   | OffLevelMessage
+  | OffDiagnosticMessage
   | OffRecognitionMessage
   | OffTranslationStateMessage
   | CsPcmMessage
@@ -653,6 +665,22 @@ export function isM1Message(
         typeof value.at === "string"
       );
 
+    case "OFF_DIAGNOSTIC":
+      return (
+        (
+          value.kind === "unhandled-error" ||
+          value.kind ===
+            "unhandled-rejection"
+        ) &&
+        typeof value.at === "string" &&
+        value.context === "offscreen" &&
+        typeof value.message === "string" &&
+        (
+          value.stack === undefined ||
+          typeof value.stack === "string"
+        )
+      );
+
     case "CS_START_TAP":
       return (
         typeof value.requestId === "string" &&
@@ -753,6 +781,10 @@ export function isCapturePortMessage(
     isMessageOfType(value, "OFF_STATUS") ||
     isMessageOfType(value, "OFF_STATE") ||
     isMessageOfType(value, "OFF_LEVEL") ||
+    isMessageOfType(
+      value,
+      "OFF_DIAGNOSTIC",
+    ) ||
     isMessageOfType(value, "OFF_RECOG") ||
     isMessageOfType(
       value,

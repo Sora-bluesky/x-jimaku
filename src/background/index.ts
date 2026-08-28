@@ -20,6 +20,7 @@ import {
   type CsTranslateResultMessage,
   type DiagnosticsResultMessage,
   type M1Message,
+  type OffDiagnosticMessage,
   type OffLevelMessage,
   type OffQueryMessage,
   type OffRecognitionMessage,
@@ -65,11 +66,17 @@ const CONTENT_PORT_NAME = "content";
 const OPTIONS_PORT_NAME = "options";
 const CAPTURE_SESSION_STORAGE_KEY =
   "capture.session" as const;
+const LAST_UNHANDLED_ERROR_STORAGE_KEY =
+  "lastUnhandledError" as const;
 const PORT_WAIT_MS = 2_000;
 const TRANSIENT_ERROR_MS = 2_500;
 const MAX_RECOGNITION_LINES = 50;
 const SILENT_INPUT_RMS_THRESHOLD = 0.001;
 const SILENT_INPUT_HINT_DELAY_MS = 10_000;
+const LAST_UNHANDLED_ERROR_STACK_LIMIT =
+  500;
+const PCM_RELAY_DROP_WARNING_INTERVAL_MS =
+  5_000;
 
 type SnapshotPatch = Partial<
   Omit<ProbeSnapshot, "updatedAt">
@@ -94,6 +101,22 @@ interface PersistedCaptureSession {
   settings: Settings;
 }
 
+interface LastUnhandledErrorRecord {
+  at: string;
+  context: "background" | "offscreen";
+  message: string;
+  stack?: string;
+}
+
+interface PcmRelayDropCounts {
+  captureStateMismatch: number;
+  offscreenPortMissing: number;
+  postMessageException: number;
+}
+
+type PcmRelayDropReason =
+  keyof PcmRelayDropCounts;
+
 const optionsPorts =
   new Set<chrome.runtime.Port>();
 const contentPorts =
@@ -112,6 +135,12 @@ const expectedContentDisconnectPorts =
   new WeakSet<chrome.runtime.Port>();
 const recognitionLines =
   new Map<number, SwRecognitionMessage>();
+const pcmRelayDropCounts:
+  PcmRelayDropCounts = {
+    captureStateMismatch: 0,
+    offscreenPortMissing: 0,
+    postMessageException: 0,
+  };
 
 let offscreenPort:
   | chrome.runtime.Port
@@ -166,6 +195,53 @@ let recoveryOperation:
 let transientErrorTimerId:
   | number
   | null = null;
+let offscreenUnhandledErrorRecorded =
+  false;
+let lastPcmRelayDropWarningAtMs = 0;
+
+self.addEventListener(
+  "error",
+  (event: ErrorEvent) => {
+    try {
+      void persistLastUnhandledError({
+        at: nowIso(),
+        context: "background",
+        message:
+          event.message.length > 0
+            ? event.message
+            : toUnhandledErrorMessage(
+                event.error,
+              ),
+        ...toUnhandledErrorStack(
+          event.error,
+        ),
+      });
+    } catch {
+      return;
+    }
+  },
+);
+
+self.addEventListener(
+  "unhandledrejection",
+  (event: PromiseRejectionEvent) => {
+    try {
+      void persistLastUnhandledError({
+        at: nowIso(),
+        context: "background",
+        message:
+          toUnhandledErrorMessage(
+            event.reason,
+          ),
+        ...toUnhandledErrorStack(
+          event.reason,
+        ),
+      });
+    } catch {
+      return;
+    }
+  },
+);
 
 const stateInitialization =
   hydrateCaptureState();
@@ -487,11 +563,35 @@ async function hydrateCaptureState(): Promise<void> {
       await chrome.storage.session.get([
         CAPTURE_STATE_STORAGE_KEY,
         CAPTURE_SESSION_STORAGE_KEY,
+        LAST_UNHANDLED_ERROR_STORAGE_KEY,
       ]);
     const storedState =
       values[CAPTURE_STATE_STORAGE_KEY];
     const storedSession =
       values[CAPTURE_SESSION_STORAGE_KEY];
+    const storedUnhandledError =
+      values[
+        LAST_UNHANDLED_ERROR_STORAGE_KEY
+      ];
+
+    if (storedUnhandledError !== undefined) {
+      console.warn(
+        "[bg] last unhandled error before this start:",
+        storedUnhandledError,
+      );
+
+      try {
+        await chrome.storage.session.remove(
+          LAST_UNHANDLED_ERROR_STORAGE_KEY,
+        );
+      } catch (error) {
+        console.warn(
+          "[bg]",
+          "could not remove last unhandled error record",
+          error,
+        );
+      }
+    }
 
     captureState = isCaptureState(storedState)
       ? storedState
@@ -642,6 +742,8 @@ function beginCaptureStart(
     return;
   }
 
+  resetPcmRelayDropCounts();
+  offscreenUnhandledErrorRecorded = false;
   recognitionLines.clear();
   activeTranslationState = null;
   latestRms = 0;
@@ -1081,24 +1183,93 @@ function relayContentPcm(
       message.requestId ||
     !isCaptureActive(captureState.status)
   ) {
+    if (
+      captureState.status !== "stopping" &&
+      captureState.status !== "idle" &&
+      captureState.status !== "error"
+    ) {
+      incrementPcmRelayDrop(
+        "captureStateMismatch",
+      );
+    }
+
     return;
   }
 
   const port = offscreenPort;
 
   if (port === null) {
+    incrementPcmRelayDrop(
+      "offscreenPortMissing",
+    );
     return;
   }
 
   try {
     port.postMessage(message);
-  } catch (error) {
-    console.warn(
-      "[bg]",
-      "could not relay PCM to offscreen",
-      error,
+  } catch {
+    incrementPcmRelayDrop(
+      "postMessageException",
     );
   }
+}
+
+function incrementPcmRelayDrop(
+  reason: PcmRelayDropReason,
+): void {
+  pcmRelayDropCounts[reason] += 1;
+
+  const currentTimeMs = Date.now();
+
+  if (
+    currentTimeMs -
+      lastPcmRelayDropWarningAtMs <
+    PCM_RELAY_DROP_WARNING_INTERVAL_MS
+  ) {
+    return;
+  }
+
+  lastPcmRelayDropWarningAtMs =
+    currentTimeMs;
+  logPcmRelayDropCounts();
+}
+
+function logPcmRelayDropCounts(): void {
+  console.warn(
+    "[bg] pcm relay drops since capture start",
+    {
+      ...pcmRelayDropCounts,
+    },
+  );
+}
+
+function flushPcmRelayDropCounts(): void {
+  if (hasPcmRelayDrops()) {
+    logPcmRelayDropCounts();
+  }
+
+  resetPcmRelayDropCounts();
+}
+
+function hasPcmRelayDrops(): boolean {
+  return (
+    pcmRelayDropCounts
+      .captureStateMismatch > 0 ||
+    pcmRelayDropCounts
+      .offscreenPortMissing > 0 ||
+    pcmRelayDropCounts
+      .postMessageException > 0
+  );
+}
+
+function resetPcmRelayDropCounts(): void {
+  pcmRelayDropCounts
+    .captureStateMismatch = 0;
+  pcmRelayDropCounts
+    .offscreenPortMissing = 0;
+  pcmRelayDropCounts
+    .postMessageException = 0;
+  lastPcmRelayDropWarningAtMs = 0;
 }
 
 function relayContentEndOfStream(
@@ -1267,6 +1438,16 @@ function handleOffscreenPortConnected(
       if (
         isMessageOfType(
           message,
+          "OFF_DIAGNOSTIC",
+        )
+      ) {
+        handleOffscreenDiagnostic(message);
+        return;
+      }
+
+      if (
+        isMessageOfType(
+          message,
           "OFF_STATUS",
         )
       ) {
@@ -1399,6 +1580,26 @@ function handleOffscreenPortConnected(
         "offscreen-port-reconnected",
       );
     }
+  });
+}
+
+function handleOffscreenDiagnostic(
+  message: OffDiagnosticMessage,
+): void {
+  offscreenUnhandledErrorRecorded = true;
+
+  void persistLastUnhandledError({
+    at: message.at,
+    context: "offscreen",
+    message: message.message,
+    ...(message.stack === undefined
+      ? {}
+      : {
+          stack: message.stack.slice(
+            0,
+            LAST_UNHANDLED_ERROR_STACK_LIMIT,
+          ),
+        }),
   });
 }
 
@@ -1574,6 +1775,18 @@ async function inspectUnexpectedOffscreenDisconnect(
       return;
     }
 
+    if (!offscreenUnhandledErrorRecorded) {
+      offscreenUnhandledErrorRecorded =
+        true;
+
+      void persistLastUnhandledError({
+        at: nowIso(),
+        context: "offscreen",
+        message:
+          "offscreen disappeared without a recorded error",
+      });
+    }
+
     failActiveCaptureUnexpectedly(
       "字幕処理が予期せず終了しました。もう一度開始してください",
     );
@@ -1628,6 +1841,7 @@ function failActiveCaptureUnexpectedly(
   recognitionLines.clear();
   resetSilentInputTracking();
   broadcastLevel();
+  flushPcmRelayDropCounts();
 
   moveCaptureState("error", {
     ...(requestId === undefined
@@ -2568,6 +2782,14 @@ function replaceCaptureState(
   const previousState = captureState;
 
   captureState = nextState;
+
+  if (
+    previousState.status === "stopping" &&
+    nextState.status === "idle"
+  ) {
+    flushPcmRelayDropCounts();
+  }
+
   synchronizeSilentInputForCaptureState(
     previousState,
     nextState,
@@ -2789,6 +3011,82 @@ function isPersistedCaptureSession(
     record.tabId >= 0 &&
     isSettings(record.settings)
   );
+}
+
+async function persistLastUnhandledError(
+  record: LastUnhandledErrorRecord,
+): Promise<boolean> {
+  try {
+    await chrome.storage.session.set({
+      [LAST_UNHANDLED_ERROR_STORAGE_KEY]:
+        record,
+    });
+    return true;
+  } catch (error) {
+    console.warn(
+      "[bg]",
+      "could not persist last unhandled error",
+      error,
+    );
+    return false;
+  }
+}
+
+function toUnhandledErrorMessage(
+  value: unknown,
+): string {
+  try {
+    if (value instanceof Error) {
+      return (
+        value.message ||
+        value.name ||
+        "Unknown unhandled error"
+      );
+    }
+
+    if (typeof value === "string") {
+      return value;
+    }
+
+    const serialized = JSON.stringify(value);
+
+    if (
+      typeof serialized === "string" &&
+      serialized.length > 0
+    ) {
+      return serialized;
+    }
+
+    return String(value);
+  } catch {
+    return "Unknown unhandled error";
+  }
+}
+
+function toUnhandledErrorStack(
+  value: unknown,
+): Pick<
+  LastUnhandledErrorRecord,
+  "stack"
+> | {} {
+  try {
+    if (
+      !(value instanceof Error) ||
+      typeof value.stack !== "string" ||
+      value.stack.length === 0
+    ) {
+      return {};
+    }
+
+    return {
+      stack: value.stack.slice(
+        0,
+        LAST_UNHANDLED_ERROR_STACK_LIMIT,
+      ),
+    };
+  } catch {
+    return {};
+  }
 }
 
 function queueBadgeUpdate(
