@@ -9,6 +9,25 @@ import {
   type BufferedSendItem,
 } from "./send-buffer";
 
+type BufferedContentPayload =
+  | {
+      t: "CS_PCM";
+      requestId: string;
+      seq: number;
+      b64: string;
+    }
+  | {
+      t: "CS_EOS";
+      requestId: string;
+    }
+  | {
+      t: "CS_TRANSLATE_RESULT";
+      requestId: string;
+      id: number;
+      ja: string;
+      available: boolean;
+    };
+
 describe("OrderedSendBuffer", () => {
   it("keeps sixteen entries and drops the oldest", () => {
     const buffer =
@@ -47,6 +66,123 @@ describe("OrderedSendBuffer", () => {
         (_, index) => index + 1,
       ),
     );
+
+    buffer.endFlush();
+  });
+
+  it("preserves mixed payload order through flush", () => {
+    const buffer =
+      new OrderedSendBuffer<
+        BufferedContentPayload
+      >();
+    const payloads:
+      BufferedContentPayload[] = [
+        {
+          t: "CS_PCM",
+          requestId: "request-1",
+          seq: 1,
+          b64: "pcm-1",
+        },
+        {
+          t: "CS_EOS",
+          requestId: "request-1",
+        },
+        {
+          t: "CS_TRANSLATE_RESULT",
+          requestId: "request-1",
+          id: 7,
+          ja: "翻訳",
+          available: true,
+        },
+        {
+          t: "CS_PCM",
+          requestId: "request-1",
+          seq: 2,
+          b64: "pcm-2",
+        },
+      ];
+
+    for (const payload of payloads) {
+      buffer.enqueue(payload);
+    }
+
+    const batch = buffer.beginFlush();
+
+    expect(
+      batch?.map(
+        (item) => item.payload,
+      ),
+    ).toEqual(payloads);
+
+    for (const item of batch ?? []) {
+      expect(
+        buffer.markSent(item),
+      ).toBe(true);
+    }
+
+    buffer.endFlush();
+
+    expect(buffer.pendingCount).toBe(0);
+  });
+
+  it("drops the oldest payload when a mixed queue overflows", () => {
+    const buffer =
+      new OrderedSendBuffer<
+        BufferedContentPayload
+      >();
+    const oldest:
+      BufferedContentPayload = {
+        t: "CS_PCM",
+        requestId: "request-1",
+        seq: 0,
+        b64: "oldest",
+      };
+
+    buffer.enqueue(oldest);
+
+    for (
+      let seq = 1;
+      seq < PCM_SEND_BUFFER_CAPACITY;
+      seq += 1
+    ) {
+      buffer.enqueue({
+        t: "CS_PCM",
+        requestId: "request-1",
+        seq,
+        b64: `pcm-${seq}`,
+      });
+    }
+
+    const result = buffer.enqueue({
+      t: "CS_TRANSLATE_RESULT",
+      requestId: "request-1",
+      id: 9,
+      ja: "翻訳",
+      available: true,
+    });
+
+    expect(result.dropped?.payload).toEqual(
+      oldest,
+    );
+    expect(buffer.pendingCount).toBe(
+      PCM_SEND_BUFFER_CAPACITY,
+    );
+
+    const batch = buffer.beginFlush();
+
+    expect(batch?.[0]?.payload).toEqual({
+      t: "CS_PCM",
+      requestId: "request-1",
+      seq: 1,
+      b64: "pcm-1",
+    });
+    expect(batch?.at(-1)?.payload).toEqual({
+      t: "CS_TRANSLATE_RESULT",
+      requestId: "request-1",
+      id: 9,
+      ja: "翻訳",
+      available: true,
+    });
 
     buffer.endFlush();
   });

@@ -74,6 +74,8 @@ const LAST_UNHANDLED_ERROR_STORAGE_KEY =
   "lastUnhandledError" as const;
 const PORT_WAIT_MS = 2_000;
 const CONTENT_RECONNECT_GRACE_MS = 3_000;
+const MAX_DEFERRED_TRANSLATION_REQUESTS =
+  4;
 const TRANSIENT_ERROR_MS = 2_500;
 const MAX_RECOGNITION_LINES = 50;
 const SILENT_INPUT_RMS_THRESHOLD = 0.001;
@@ -125,6 +127,8 @@ interface ContentReconnectGraceEpisode {
   portGeneration: number;
   deadlineAt: number;
   timerId: number;
+  deferredTranslationRequests:
+    CsTranslateMessage[];
 }
 
 interface ContentResumeAcknowledgement {
@@ -1292,6 +1296,7 @@ function beginContentReconnectGraceEpisode(
         disconnectedPortGeneration + 1,
       deadlineAt,
       timerId: 0,
+      deferredTranslationRequests: [],
     };
 
   episode.timerId = self.setTimeout(() => {
@@ -1385,6 +1390,12 @@ function expireContentReconnectGraceEpisode(
   }
 
   contentReconnectGraceEpisode = null;
+  failDeferredTranslationRequests(
+    expected,
+    new Error(
+      "Capture-tab content script is unavailable",
+    ),
+  );
 
   if (
     captureState.requestId !==
@@ -1624,6 +1635,13 @@ function handleContentTapState(
     );
 
   if (message.state === "tapping") {
+    if (
+      contentEosCompleteRequestId ===
+      message.requestId
+    ) {
+      contentEosCompleteRequestId = null;
+    }
+
     return;
   }
 
@@ -1724,6 +1742,9 @@ function handleContentResumeAcknowledgement(
     replayCapturedLinesToContent(
       tabId,
       message.requestId,
+    );
+    flushDeferredTranslationRequests(
+      graceEpisode,
     );
     postFlushRecognitionToOffscreen(
       message.requestId,
@@ -2219,7 +2240,6 @@ function failActiveCaptureUnexpectedly(
   recognitionLines.clear();
   resetSilentInputTracking();
   broadcastLevel();
-  flushPcmRelayDropCounts();
 
   moveCaptureState("error", {
     ...(requestId === undefined
@@ -2539,6 +2559,16 @@ function relayOffscreenTranslationRequest(
       : contentPorts.get(tabId);
 
   if (content === undefined) {
+    if (
+      tabId !== undefined &&
+      deferOffscreenTranslationRequest(
+        tabId,
+        message,
+      )
+    ) {
+      return;
+    }
+
     postTranslationFailureToOffscreen(
       message,
       new Error(
@@ -2553,6 +2583,110 @@ function relayOffscreenTranslationRequest(
   } catch (error) {
     postTranslationFailureToOffscreen(
       message,
+      error,
+    );
+  }
+}
+
+function deferOffscreenTranslationRequest(
+  tabId: number,
+  message: CsTranslateMessage,
+): boolean {
+  const episode =
+    contentReconnectGraceEpisode;
+
+  if (
+    episode === null ||
+    episode.requestId !==
+      message.requestId ||
+    episode.tabId !== tabId
+  ) {
+    return false;
+  }
+
+  if (Date.now() >= episode.deadlineAt) {
+    expireContentReconnectGraceEpisode(
+      episode,
+    );
+    return false;
+  }
+
+  if (
+    episode.deferredTranslationRequests
+      .length >=
+    MAX_DEFERRED_TRANSLATION_REQUESTS
+  ) {
+    const oldest =
+      episode.deferredTranslationRequests
+        .shift();
+
+    if (oldest !== undefined) {
+      postTranslationFailureToOffscreen(
+        oldest,
+        new Error(
+          "Capture-tab content script is unavailable",
+        ),
+      );
+    }
+  }
+
+  episode.deferredTranslationRequests.push(
+    message,
+  );
+  return true;
+}
+
+function flushDeferredTranslationRequests(
+  episode: ContentReconnectGraceEpisode,
+): void {
+  const requests =
+    episode.deferredTranslationRequests.splice(
+      0,
+      episode.deferredTranslationRequests
+        .length,
+    );
+  const port =
+    contentPorts.get(episode.tabId);
+
+  if (port === undefined) {
+    for (const request of requests) {
+      postTranslationFailureToOffscreen(
+        request,
+        new Error(
+          "Capture-tab content script is unavailable",
+        ),
+      );
+    }
+
+    return;
+  }
+
+  for (const request of requests) {
+    try {
+      port.postMessage(request);
+    } catch (error) {
+      postTranslationFailureToOffscreen(
+        request,
+        error,
+      );
+    }
+  }
+}
+
+function failDeferredTranslationRequests(
+  episode: ContentReconnectGraceEpisode,
+  error: unknown,
+): void {
+  const requests =
+    episode.deferredTranslationRequests.splice(
+      0,
+      episode.deferredTranslationRequests
+        .length,
+    );
+
+  for (const request of requests) {
+    postTranslationFailureToOffscreen(
+      request,
       error,
     );
   }
@@ -3242,8 +3376,16 @@ function replaceCaptureState(
   }
 
   if (
-    previousState.status === "stopping" &&
-    nextState.status === "idle"
+    (
+      isCaptureActive(
+        previousState.status,
+      ) ||
+      previousState.status === "stopping"
+    ) &&
+    (
+      nextState.status === "idle" ||
+      nextState.status === "error"
+    )
   ) {
     flushPcmRelayDropCounts();
   }

@@ -73,6 +73,7 @@ interface WhisperSessionCallbacks {
 
 interface PendingContentTranslation {
   requestId: string;
+  timeoutId: number;
   resolve(
     response: ContentTranslationResponse,
   ): void;
@@ -83,6 +84,8 @@ const OFFSCREEN_PORT_NAME = "offscreen";
 const INITIAL_RECONNECT_DELAY_MS = 100;
 const MAX_RECONNECT_DELAY_MS = 1_000;
 const PCM_GAP_LOG_INTERVAL_MS = 5_000;
+const CONTENT_TRANSLATION_TIMEOUT_MS =
+  15_000;
 const FINAL_RECOGNITION_BUFFER_CAPACITY = 32;
 
 const audioCapture = new AudioCapture();
@@ -612,6 +615,25 @@ function recordRejectedPcmChunk(
   );
 }
 
+function flushRejectedPcmChunks(
+  requestId: string,
+): void {
+  if (rejectedPcmChunkCount > 0) {
+    console.warn(
+      "[offscreen]",
+      "ignored invalid PCM chunks",
+      {
+        requestId,
+        rejected: rejectedPcmChunkCount,
+      },
+    );
+  }
+
+  rejectedPcmChunkCount = 0;
+  lastRejectedPcmLogAt =
+    Number.NEGATIVE_INFINITY;
+}
+
 function handleEndOfStream(
   message: CsEosMessage,
 ): void {
@@ -660,6 +682,9 @@ function handleContentTranslationResult(
 
   pendingContentTranslations.delete(
     message.id,
+  );
+  globalThis.clearTimeout(
+    pending.timeoutId,
   );
 
   if (message.error !== undefined) {
@@ -1088,6 +1113,7 @@ async function handleCaptureStart(
       );
     }
 
+    flushRejectedPcmChunks(requestId);
     latestRms = 0;
     postLevel();
 
@@ -1151,6 +1177,7 @@ async function handleCaptureStop(
       }),
     );
   } finally {
+    flushRejectedPcmChunks(requestId);
     requestedStopIds.delete(requestId);
   }
 }
@@ -1188,6 +1215,7 @@ async function handleRecognitionFatal(
       );
     }
 
+    flushRejectedPcmChunks(requestId);
     latestRms = 0;
     postLevel();
 
@@ -1461,8 +1489,33 @@ function requestContentTranslation(
   return new Promise<
     ContentTranslationResponse
   >((resolve, reject) => {
+    const timeoutId = self.setTimeout(
+      () => {
+        const pending =
+          pendingContentTranslations.get(
+            id,
+          );
+
+        if (pending === undefined) {
+          return;
+        }
+
+        pendingContentTranslations.delete(
+          id,
+        );
+
+        const error = new Error(
+          `Content translation timed out after ${CONTENT_TRANSLATION_TIMEOUT_MS} ms`,
+        );
+        error.name = "TimeoutError";
+        pending.reject(error);
+      },
+      CONTENT_TRANSLATION_TIMEOUT_MS,
+    );
+
     pendingContentTranslations.set(id, {
       requestId,
+      timeoutId,
       resolve,
       reject,
     });
@@ -1480,6 +1533,7 @@ function requestContentTranslation(
       pendingContentTranslations.delete(
         id,
       );
+      globalThis.clearTimeout(timeoutId);
       reject(errorToError(error));
     }
   });
@@ -1501,6 +1555,9 @@ function rejectPendingContentTranslations(
     }
 
     pendingContentTranslations.delete(id);
+    globalThis.clearTimeout(
+      pending.timeoutId,
+    );
     pending.reject(error);
   }
 }
