@@ -57,6 +57,16 @@ const TRANSLATOR_OPTIONS: TranslatorOptions = {
   targetLanguage: "ja",
 };
 
+const LANGUAGE_MODEL_EXPECTED_OUTPUTS:
+  readonly LanguageModelExpected[] = [
+    {
+      type: "text",
+      languages: [
+        TRANSLATOR_OPTIONS.targetLanguage,
+      ],
+    },
+  ];
+
 const TRANSLATION_SYSTEM_PROMPT =
   "あなたは英語動画の日本語字幕翻訳者。与えられた英語の節を、直前の文脈と固有名詞リストに整合する自然な日本語に訳す。出力は当該節の訳だけ。説明・引用符・前後の節の再訳は出力しない";
 
@@ -910,7 +920,10 @@ export class TranslationEngine {
 
     try {
       const availability =
-        await factory.availability();
+        await factory.availability({
+          expectedOutputs:
+            LANGUAGE_MODEL_EXPECTED_OUTPUTS,
+        });
 
       if (
         this.destroyed ||
@@ -930,14 +943,8 @@ export class TranslationEngine {
                 TRANSLATION_SYSTEM_PROMPT,
             },
           ],
-          expectedOutputs: [
-            {
-              type: "text",
-              languages: [
-                TRANSLATOR_OPTIONS.targetLanguage,
-              ],
-            },
-          ],
+          expectedOutputs:
+            LANGUAGE_MODEL_EXPECTED_OUTPUTS,
         });
 
       if (this.destroyed) {

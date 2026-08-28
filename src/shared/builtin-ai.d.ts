@@ -90,8 +90,15 @@ declare global {
     destroy(): void;
   }
 
+  interface LanguageModelAvailabilityOptions {
+    expectedOutputs?: readonly LanguageModelExpected[];
+  }
+
   interface LanguageModelFactory {
-    availability(): Promise<BuiltinLanguageModelAvailability>;
+    availability(
+      options?:
+        LanguageModelAvailabilityOptions,
+    ): Promise<BuiltinLanguageModelAvailability>;
 
     create(
       options?: LanguageModelCreateOptions,
