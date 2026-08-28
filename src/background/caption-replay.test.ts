@@ -134,10 +134,7 @@ describe("createCaptionReplay", () => {
     },
   ])("$name", ({ input, expected }) => {
     expect(
-      createCaptionReplay(
-        input,
-        "request-1",
-      ),
+      createCaptionReplay(input),
     ).toEqual(expected);
   });
 });

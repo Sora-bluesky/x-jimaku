@@ -3101,7 +3101,6 @@ function replayCapturedLinesToContent(
 
   const messages = createCaptionReplay(
     [...recognitionLines.values()],
-    requestId,
   );
 
   for (const message of messages) {

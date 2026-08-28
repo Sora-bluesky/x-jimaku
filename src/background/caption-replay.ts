@@ -17,7 +17,6 @@ export interface CaptionReplayPayload {
 
 export function createCaptionReplay(
   lines: readonly CaptionReplayLine[],
-  _requestId: string,
 ): CaptionReplayPayload[] {
   return lines
     .filter((line) => line.final)
