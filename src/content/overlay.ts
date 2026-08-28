@@ -1,6 +1,9 @@
 import type {
   TranslationPath,
 } from "../shared/messages";
+import type {
+  SilentInputHintVariant,
+} from "./silent-hint";
 
 const HOST_ID = "xjsub-host";
 const CAPTION_VISIBLE_MS = 5_000;
@@ -178,7 +181,9 @@ export class CaptionOverlay {
   private acceleratedUntilDrained = false;
   private captionRevision = 0;
   private captionBarEnabled = true;
-  private silentInputHint = false;
+  private silentInputHint:
+    | SilentInputHintVariant
+    | null = null;
   private playbackPaused = false;
   private playbackPausedAt:
     | number
@@ -453,17 +458,17 @@ export class CaptionOverlay {
   }
 
   setSilentInputHint(
-    showHint: boolean,
+    variant: SilentInputHintVariant | null,
   ): void {
     if (this.destroyed) {
       return;
     }
 
-    if (this.silentInputHint === showHint) {
+    if (this.silentInputHint === variant) {
       return;
     }
 
-    this.silentInputHint = showHint;
+    this.silentInputHint = variant;
     this.updateTargetChip();
     this.updateLayout();
     this.startFrameLoop();
@@ -1806,13 +1811,27 @@ export class CaptionOverlay {
       }
 
       case "running":
-        if (this.silentInputHint) {
+        if (this.silentInputHint !== null) {
           this.targetChip.classList.add(
             "status-silent",
           );
-          this.targetText.textContent =
-            "▶ 音声がありません — 動画を再生してください";
-          return;
+
+          switch (this.silentInputHint) {
+            case "paused":
+              this.targetText.textContent =
+                "▶ 音声がありません — 動画を再生してください";
+              return;
+
+            case "gesture":
+              this.targetText.textContent =
+                "▶ 音声を取得できません — ページ内を一度クリックしてください";
+              return;
+
+            case "unknown":
+              this.targetText.textContent =
+                "▶ 音声がありません — タブを開き直すと直ることがあります";
+              return;
+          }
         }
 
         this.targetChip.classList.add(

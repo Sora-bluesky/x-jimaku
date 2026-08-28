@@ -19,6 +19,12 @@ let currentAudioTapTarget:
 export interface AudioTapCallbacks {
   onChunk(seq: number, b64: string): void;
   onDetail(detail: string): void;
+  onContextStateChange(
+    state: AudioContextState,
+  ): void;
+  onTargetChanged(
+    target: HTMLVideoElement | null,
+  ): void;
   onMediaEnded(): void;
   onStopped(
     detail: string,
@@ -105,6 +111,7 @@ export class AudioTap {
 
     this.video = video;
     currentAudioTapTarget = video;
+    this.callbacks.onTargetChanged(video);
     this.initialUrl = location.href;
     this.chunkBuffer =
       new Float32Array(PCM_CHUNK_SAMPLES);
@@ -144,6 +151,10 @@ export class AudioTap {
       this.stream = stream;
       this.audioTrack = audioTrack;
       this.context = context;
+      context.addEventListener(
+        "statechange",
+        this.handleContextStateChange,
+      );
 
       if (
         context.sampleRate !==
@@ -271,7 +282,7 @@ export class AudioTap {
       try {
         await context.resume();
       } catch (error) {
-        console.warn(
+        console.info(
           "[tap]",
           "immediate AudioContext resume was rejected",
           error,
@@ -331,6 +342,25 @@ export class AudioTap {
       true,
     );
   }
+
+  private readonly handleContextStateChange =
+    (): void => {
+      const context = this.context;
+
+      if (context === null) {
+        return;
+      }
+
+      if (context.state === "suspended") {
+        this.installResumeListeners();
+      } else {
+        this.removeResumeListeners();
+      }
+
+      this.callbacks.onContextStateChange(
+        context.state,
+      );
+    };
 
   private readonly handleResumeGesture =
     (): void => {
@@ -598,6 +628,7 @@ export class AudioTap {
 
     if (currentAudioTapTarget === video) {
       currentAudioTapTarget = null;
+      this.callbacks.onTargetChanged(null);
     }
 
     this.stream = null;
@@ -612,6 +643,11 @@ export class AudioTap {
     this.downsampler = null;
 
     this.removeResumeListeners();
+
+    context?.removeEventListener(
+      "statechange",
+      this.handleContextStateChange,
+    );
 
     if (sanityTimerId !== null) {
       globalThis.clearInterval(
