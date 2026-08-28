@@ -68,7 +68,8 @@ type CsStartTapMessage = Extract<
 
 type BufferedContentMessage =
   | CsPcmMessage
-  | CsEosMessage;
+  | CsEosMessage
+  | CsTranslateResultMessage;
 
 type OutboundContentMessage =
   | BufferedContentMessage
@@ -2508,7 +2509,8 @@ function isBufferedContentMessage(
 ): message is BufferedContentMessage {
   return (
     message.t === "CS_PCM" ||
-    message.t === "CS_EOS"
+    message.t === "CS_EOS" ||
+    message.t === "CS_TRANSLATE_RESULT"
   );
 }
 

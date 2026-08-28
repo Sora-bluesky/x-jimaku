@@ -18,6 +18,7 @@ export const CUE_ACCELERATED_DISPLAY_MS = 1_000;
 export const CUE_ACCELERATION_THRESHOLD = 2;
 export const MAX_WAITING_CUES = 6;
 export const MAX_CUE_UNITS = 28;
+const CUE_DROP_WARNING_INTERVAL_MS = 5_000;
 const MAX_LINE_UNITS = 14;
 const MIN_CUE_SEGMENT_CHARACTERS = 5;
 const MIN_LINE_SEGMENT_CHARACTERS = 2;
@@ -184,6 +185,10 @@ export class CaptionOverlay {
     | null = null;
   private cueMutationCount = 0;
   private droppedCueCount = 0;
+  private droppedCuesSinceLastReport = 0;
+  private lastCueDropWarningAt:
+    | number
+    | null = null;
   private acceleratedUntilDrained = false;
   private captionRevision = 0;
   private captionBarEnabled = true;
@@ -1166,16 +1171,30 @@ export class CaptionOverlay {
       this.droppedCueCount += 1;
       this.host.dataset.cueDrops =
         String(this.droppedCueCount);
+      this.droppedCuesSinceLastReport += 1;
 
-      console.warn(
-        "[overlay]",
-        "dropped oldest waiting cue",
-        {
-          cueId: dropped.cueId,
-          droppedCueCount:
-            this.droppedCueCount,
-        },
-      );
+      const now = performance.now();
+
+      if (
+        this.lastCueDropWarningAt ===
+          null ||
+        now - this.lastCueDropWarningAt >=
+          CUE_DROP_WARNING_INTERVAL_MS
+      ) {
+        console.warn(
+          "[overlay]",
+          `dropped ${
+            this.droppedCuesSinceLastReport
+          } waiting cues since last report`,
+          {
+            droppedCueCount:
+              this.droppedCueCount,
+          },
+        );
+
+        this.droppedCuesSinceLastReport = 0;
+        this.lastCueDropWarningAt = now;
+      }
     }
 
     if (decision.shouldReschedule) {
