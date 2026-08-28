@@ -21,6 +21,7 @@ import {
   type DiagnosticsResultMessage,
   type M1Message,
   type OffDiagnosticMessage,
+  type OffFlushRecogMessage,
   type OffLevelMessage,
   type OffQueryMessage,
   type OffRecognitionMessage,
@@ -55,6 +56,9 @@ import {
   type CaptureStateError,
   type CaptureStatus,
 } from "../shared/state";
+import {
+  createCaptionReplay,
+} from "./caption-replay";
 
 const OFFSCREEN_DOCUMENT_PATH =
   "offscreen.html";
@@ -69,6 +73,7 @@ const CAPTURE_SESSION_STORAGE_KEY =
 const LAST_UNHANDLED_ERROR_STORAGE_KEY =
   "lastUnhandledError" as const;
 const PORT_WAIT_MS = 2_000;
+const CONTENT_RECONNECT_GRACE_MS = 3_000;
 const TRANSIENT_ERROR_MS = 2_500;
 const MAX_RECOGNITION_LINES = 50;
 const SILENT_INPUT_RMS_THRESHOLD = 0.001;
@@ -114,6 +119,20 @@ interface PcmRelayDropCounts {
   postMessageException: number;
 }
 
+interface ContentReconnectGraceEpisode {
+  requestId: string;
+  tabId: number;
+  portGeneration: number;
+  deadlineAt: number;
+  timerId: number;
+}
+
+interface ContentResumeAcknowledgement {
+  requestId: string;
+  tabId: number;
+  portGeneration: number;
+}
+
 type PcmRelayDropReason =
   keyof PcmRelayDropCounts;
 
@@ -125,6 +144,10 @@ const contentPortWaiters =
   new Map<number, PortWaiter[]>();
 const contentInjectionOperations =
   new Map<number, Promise<void>>();
+const contentPortGenerations =
+  new Map<number, number>();
+const contentPortGenerationByPort =
+  new WeakMap<chrome.runtime.Port, number>();
 const offscreenPortWaiters: PortWaiter[] =
   [];
 const offscreenStatusWaiters =
@@ -191,6 +214,15 @@ let persistedCaptureSession:
 let recoveryPending = false;
 let recoveryOperation:
   | Promise<void>
+  | null = null;
+let contentReconnectGraceEpisode:
+  | ContentReconnectGraceEpisode
+  | null = null;
+let recoveryContentResumeAcknowledgement:
+  | ContentResumeAcknowledgement
+  | null = null;
+let contentEosCompleteRequestId:
+  | string
   | null = null;
 let transientErrorTimerId:
   | number
@@ -291,6 +323,13 @@ chrome.action.onClicked.addListener((tab) => {
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
+  cancelContentReconnectGraceEpisode(
+    tabId,
+  );
+  clearRecoveryContentResumeAcknowledgement(
+    tabId,
+  );
+  contentPortGenerations.delete(tabId);
   contentPorts.delete(tabId);
   rejectContentPortWaiters(
     tabId,
@@ -732,6 +771,10 @@ function beginCaptureStart(
   requestId: string,
 ): void {
   clearTransientErrorTimer();
+  cancelContentReconnectGraceEpisode();
+  recoveryContentResumeAcknowledgement =
+    null;
+  contentEosCompleteRequestId = null;
   recoveryPending = false;
 
   if (captureState.status === "error") {
@@ -878,6 +921,9 @@ function requestCaptureStop(
     return;
   }
 
+  cancelContentReconnectGraceEpisode();
+  recoveryContentResumeAcknowledgement =
+    null;
   recoveryPending = false;
 
   const requestId =
@@ -992,6 +1038,18 @@ function handleContentPortConnected(
     return;
   }
 
+  const portGeneration =
+    (contentPortGenerations.get(tabId) ??
+      0) + 1;
+  contentPortGenerations.set(
+    tabId,
+    portGeneration,
+  );
+  contentPortGenerationByPort.set(
+    port,
+    portGeneration,
+  );
+
   const previous = contentPorts.get(tabId);
 
   if (
@@ -1060,6 +1118,7 @@ function handleContentPortConnected(
         void stateInitialization.then(() => {
           handleContentTapState(
             tabId,
+            portGeneration,
             message,
           );
         });
@@ -1104,8 +1163,9 @@ function handleContentPortConnected(
           captureState.status,
         )
       ) {
-        requestCaptureStop(
-          "content-port-disconnected",
+        beginContentReconnectGraceEpisode(
+          tabId,
+          portGeneration,
         );
       }
     });
@@ -1163,6 +1223,16 @@ function handleContentPortConnected(
     }
 
     if (
+      resumeContentReconnectGraceEpisode(
+        port,
+        tabId,
+        portGeneration,
+      )
+    ) {
+      return;
+    }
+
+    if (
       recoveryPending &&
       isCaptureActive(captureState.status)
     ) {
@@ -1171,6 +1241,205 @@ function handleContentPortConnected(
       );
     }
   });
+}
+
+function beginContentReconnectGraceEpisode(
+  tabId: number,
+  disconnectedPortGeneration: number,
+): void {
+  const requestId = captureState.requestId;
+
+  if (
+    requestId === undefined ||
+    captureState.tabId !== tabId ||
+    !isCaptureActive(captureState.status)
+  ) {
+    return;
+  }
+
+  const current =
+    contentReconnectGraceEpisode;
+
+  if (
+    current !== null &&
+    current.requestId === requestId &&
+    current.tabId === tabId
+  ) {
+    if (Date.now() >= current.deadlineAt) {
+      expireContentReconnectGraceEpisode(
+        current,
+      );
+      return;
+    }
+
+    current.portGeneration =
+      disconnectedPortGeneration + 1;
+    recoveryContentResumeAcknowledgement =
+      null;
+    return;
+  }
+
+  cancelContentReconnectGraceEpisode();
+
+  const deadlineAt =
+    Date.now() +
+    CONTENT_RECONNECT_GRACE_MS;
+  const episode:
+    ContentReconnectGraceEpisode = {
+      requestId,
+      tabId,
+      portGeneration:
+        disconnectedPortGeneration + 1,
+      deadlineAt,
+      timerId: 0,
+    };
+
+  episode.timerId = self.setTimeout(() => {
+    expireContentReconnectGraceEpisode(
+      episode,
+    );
+  }, CONTENT_RECONNECT_GRACE_MS);
+
+  contentReconnectGraceEpisode = episode;
+  recoveryContentResumeAcknowledgement =
+    null;
+}
+
+function resumeContentReconnectGraceEpisode(
+  port: chrome.runtime.Port,
+  tabId: number,
+  portGeneration: number,
+): boolean {
+  const episode =
+    contentReconnectGraceEpisode;
+
+  if (
+    episode === null ||
+    episode.tabId !== tabId
+  ) {
+    return false;
+  }
+
+  if (Date.now() >= episode.deadlineAt) {
+    expireContentReconnectGraceEpisode(
+      episode,
+    );
+    return true;
+  }
+
+  const session = persistedCaptureSession;
+
+  if (
+    captureState.requestId !==
+      episode.requestId ||
+    captureState.tabId !== episode.tabId ||
+    !isCaptureActive(captureState.status) ||
+    session === null ||
+    session.requestId !==
+      episode.requestId ||
+    session.tabId !== episode.tabId
+  ) {
+    return false;
+  }
+
+  episode.portGeneration =
+    portGeneration;
+
+  const message: CsStartTapMessage = {
+    t: "CS_START_TAP",
+    requestId: episode.requestId,
+    settings: session.settings,
+  };
+
+  try {
+    port.postMessage(message);
+    contentStartRequestId =
+      episode.requestId;
+  } catch (error) {
+    console.warn(
+      "[bg]",
+      "could not resume content audio tap",
+      error,
+    );
+  }
+
+  return true;
+}
+
+function expireContentReconnectGraceEpisode(
+  expected: ContentReconnectGraceEpisode,
+): void {
+  const current =
+    contentReconnectGraceEpisode;
+
+  if (
+    current === null ||
+    current.requestId !== expected.requestId ||
+    current.tabId !== expected.tabId ||
+    current.portGeneration !==
+      expected.portGeneration ||
+    current.deadlineAt !==
+      expected.deadlineAt
+  ) {
+    return;
+  }
+
+  contentReconnectGraceEpisode = null;
+
+  if (
+    captureState.requestId !==
+      expected.requestId ||
+    captureState.tabId !== expected.tabId ||
+    !isCaptureActive(captureState.status)
+  ) {
+    return;
+  }
+
+  requestCaptureStop(
+    "content-port-disconnected",
+  );
+}
+
+function cancelContentReconnectGraceEpisode(
+  tabId?: number,
+): void {
+  const episode =
+    contentReconnectGraceEpisode;
+
+  if (
+    episode === null ||
+    (
+      tabId !== undefined &&
+      episode.tabId !== tabId
+    )
+  ) {
+    return;
+  }
+
+  contentReconnectGraceEpisode = null;
+  globalThis.clearTimeout(
+    episode.timerId,
+  );
+}
+
+function clearRecoveryContentResumeAcknowledgement(
+  tabId?: number,
+): void {
+  const acknowledgement =
+    recoveryContentResumeAcknowledgement;
+
+  if (
+    acknowledgement === null ||
+    (
+      tabId !== undefined &&
+      acknowledgement.tabId !== tabId
+    )
+  ) {
+    return;
+  }
+
+  recoveryContentResumeAcknowledgement =
+    null;
 }
 
 function relayContentPcm(
@@ -1334,6 +1603,7 @@ function relayContentTranslationResult(
 
 function handleContentTapState(
   tabId: number,
+  portGeneration: number,
   message: CsTapStateMessage,
 ): void {
   broadcastTapState(message);
@@ -1346,11 +1616,34 @@ function handleContentTapState(
     return;
   }
 
+  const resumed =
+    handleContentResumeAcknowledgement(
+      tabId,
+      portGeneration,
+      message,
+    );
+
   if (message.state === "tapping") {
     return;
   }
 
+  if (
+    resumed &&
+    message.state === "stopped" &&
+    message.detail ===
+      "ended-awaiting-resume"
+  ) {
+    return;
+  }
+
   if (message.state === "stopped") {
+    if (
+      contentEosCompleteRequestId ===
+      message.requestId
+    ) {
+      return;
+    }
+
     if (isCaptureActive(captureState.status)) {
       requestCaptureStop(
         message.detail ??
@@ -1387,6 +1680,88 @@ function handleContentTapState(
       },
     });
   }
+}
+
+function handleContentResumeAcknowledgement(
+  tabId: number,
+  portGeneration: number,
+  message: CsTapStateMessage,
+): boolean {
+  const isTapping =
+    message.state === "tapping";
+  const isEndedAwaitingResume =
+    message.state === "stopped" &&
+    message.detail ===
+      "ended-awaiting-resume";
+
+  if (
+    !isTapping &&
+    !isEndedAwaitingResume
+  ) {
+    return false;
+  }
+
+  const graceEpisode =
+    contentReconnectGraceEpisode;
+
+  if (
+    graceEpisode !== null &&
+    graceEpisode.requestId ===
+      message.requestId &&
+    graceEpisode.tabId === tabId &&
+    graceEpisode.portGeneration ===
+      portGeneration
+  ) {
+    cancelContentReconnectGraceEpisode(
+      tabId,
+    );
+
+    if (isEndedAwaitingResume) {
+      contentEosCompleteRequestId =
+        message.requestId;
+    }
+
+    replayCapturedLinesToContent(
+      tabId,
+      message.requestId,
+    );
+    postFlushRecognitionToOffscreen(
+      message.requestId,
+    );
+    return true;
+  }
+
+  const recoveryAcknowledgement =
+    recoveryContentResumeAcknowledgement;
+
+  if (
+    recoveryAcknowledgement !== null &&
+    recoveryAcknowledgement.requestId ===
+      message.requestId &&
+    recoveryAcknowledgement.tabId ===
+      tabId &&
+    recoveryAcknowledgement
+      .portGeneration === portGeneration
+  ) {
+    recoveryContentResumeAcknowledgement =
+      null;
+
+    if (isEndedAwaitingResume) {
+      contentEosCompleteRequestId =
+        message.requestId;
+    }
+
+    replayCapturedLinesToContent(
+      tabId,
+      message.requestId,
+    );
+    postFlushRecognitionToOffscreen(
+      message.requestId,
+    );
+    return true;
+  }
+
+  return false;
 }
 
 function handleOffscreenPortConnected(
@@ -1809,6 +2184,9 @@ function failActiveCaptureUnexpectedly(
     return;
   }
 
+  cancelContentReconnectGraceEpisode();
+  recoveryContentResumeAcknowledgement =
+    null;
   recoveryPending = false;
 
   const requestId = captureState.requestId;
@@ -1978,13 +2356,37 @@ async function performRecoveredCaptureReconciliation(
     return;
   }
 
+  const portGeneration =
+    contentPortGenerationByPort.get(
+      content,
+    );
+
+  if (portGeneration === undefined) {
+    throw new Error(
+      "Content port generation is unavailable",
+    );
+  }
+
   const startMessage: CsStartTapMessage = {
     t: "CS_START_TAP",
     requestId,
     settings: session.settings,
   };
 
-  content.postMessage(startMessage);
+  recoveryContentResumeAcknowledgement = {
+    requestId,
+    tabId,
+    portGeneration,
+  };
+
+  try {
+    content.postMessage(startMessage);
+  } catch (error) {
+    recoveryContentResumeAcknowledgement =
+      null;
+    throw error;
+  }
+
   contentStartRequestId = requestId;
   offscreenStartRequestId = requestId;
   localStartRequestId = null;
@@ -2687,6 +3089,50 @@ function postStopToOffscreen(
   }
 }
 
+function replayCapturedLinesToContent(
+  tabId: number,
+  requestId: string,
+): void {
+  const port = contentPorts.get(tabId);
+
+  if (port === undefined) {
+    return;
+  }
+
+  const messages = createCaptionReplay(
+    [...recognitionLines.values()],
+  );
+
+  for (const message of messages) {
+    postCaption(port, message);
+  }
+}
+
+function postFlushRecognitionToOffscreen(
+  requestId: string,
+): void {
+  const port = offscreenPort;
+
+  if (port === null) {
+    return;
+  }
+
+  const message: OffFlushRecogMessage = {
+    t: "OFF_FLUSH_RECOG",
+    requestId,
+  };
+
+  try {
+    port.postMessage(message);
+  } catch (error) {
+    console.warn(
+      "[bg]",
+      "could not request recognition flush from offscreen",
+      error,
+    );
+  }
+}
+
 function postStopToContent(
   port: chrome.runtime.Port,
   requestId: string,
@@ -2758,6 +3204,10 @@ function clearTransientErrorTimer(): void {
 }
 
 function clearSessionTracking(): void {
+  cancelContentReconnectGraceEpisode();
+  recoveryContentResumeAcknowledgement =
+    null;
+  contentEosCompleteRequestId = null;
   localStartRequestId = null;
   offscreenStartRequestId = null;
   contentStartRequestId = null;
@@ -2784,6 +3234,14 @@ function replaceCaptureState(
   captureState = nextState;
 
   if (
+    !isCaptureActive(nextState.status)
+  ) {
+    cancelContentReconnectGraceEpisode();
+    recoveryContentResumeAcknowledgement =
+      null;
+  }
+
+  if (
     previousState.status === "stopping" &&
     nextState.status === "idle"
   ) {
@@ -2799,6 +3257,7 @@ function replaceCaptureState(
     nextState.status === "idle" ||
     nextState.status === "error"
   ) {
+    contentEosCompleteRequestId = null;
     recoveryPending = false;
     persistedCaptureSession = null;
     void queueCaptureSessionWrite(null);

@@ -211,6 +211,11 @@ export interface OffStopMessage {
   requestId: string;
 }
 
+export interface OffFlushRecogMessage {
+  t: "OFF_FLUSH_RECOG";
+  requestId: string;
+}
+
 export interface OffQueryMessage {
   t: "OFF_QUERY";
   queryId: string;
@@ -423,6 +428,7 @@ export type ContentPortMessage =
 export type CapturePortMessage =
   | OffStartMessage
   | OffStopMessage
+  | OffFlushRecogMessage
   | OffQueryMessage
   | OffStatusMessage
   | OffStateMessage
@@ -639,6 +645,7 @@ export function isM1Message(
       );
 
     case "OFF_STOP":
+    case "OFF_FLUSH_RECOG":
     case "CS_STOP_TAP":
     case "CS_EOS":
       return typeof value.requestId === "string";
@@ -777,6 +784,10 @@ export function isCapturePortMessage(
   return (
     isMessageOfType(value, "OFF_START") ||
     isMessageOfType(value, "OFF_STOP") ||
+    isMessageOfType(
+      value,
+      "OFF_FLUSH_RECOG",
+    ) ||
     isMessageOfType(value, "OFF_QUERY") ||
     isMessageOfType(value, "OFF_STATUS") ||
     isMessageOfType(value, "OFF_STATE") ||

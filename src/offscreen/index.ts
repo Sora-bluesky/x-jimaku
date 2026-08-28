@@ -12,6 +12,7 @@ import {
   type CsTranslateResultMessage,
   type M1Message,
   type OffDiagnosticMessage,
+  type OffRecognitionMessage,
   type OffscreenProbeResult,
   type OffscreenProbeResultMessage,
   type OffStatusMessage,
@@ -82,6 +83,7 @@ const OFFSCREEN_PORT_NAME = "offscreen";
 const INITIAL_RECONNECT_DELAY_MS = 100;
 const MAX_RECONNECT_DELAY_MS = 1_000;
 const PCM_GAP_LOG_INTERVAL_MS = 5_000;
+const FINAL_RECOGNITION_BUFFER_CAPACITY = 32;
 
 const audioCapture = new AudioCapture();
 
@@ -117,6 +119,9 @@ let activeTranslationPath:
 let activeRecognitionRequestId:
   | string
   | null = null;
+let bufferedRecognitionRequestId:
+  | string
+  | null = null;
 let activePcmRequestId:
   | string
   | null = null;
@@ -133,6 +138,8 @@ let lastRejectedPcmLogAt =
 let lastModelProgress = 0;
 let contentTranslationSequence = 0;
 
+const bufferedFinalRecognitions:
+  OffRecognitionMessage[] = [];
 const requestedStopIds = new Set<string>();
 const pendingContentTranslations =
   new Map<
@@ -256,6 +263,18 @@ function connectBackgroundPort(): void {
         }
 
         if (
+          isMessageOfType(
+            message,
+            "OFF_FLUSH_RECOG",
+          )
+        ) {
+          flushBufferedRecognitions(
+            message.requestId,
+          );
+          return;
+        }
+
+        if (
           isMessageOfType(message, "CS_PCM")
         ) {
           handlePcm(message);
@@ -309,6 +328,7 @@ function connectBackgroundPort(): void {
           requestedStopIds.add(
             message.requestId,
           );
+          clearRecognitionBuffer();
           terminateRecognition(
             message.requestId,
           );
@@ -729,6 +749,7 @@ async function handleCaptureStart(
     return;
   }
 
+  prepareRecognitionBuffer(requestId);
   pendingEosRequestId = null;
   activeContextTerms = [];
 
@@ -806,14 +827,17 @@ async function handleCaptureStart(
             return;
           }
 
-          postToBackground({
-            t: "OFF_RECOG",
-            id: line.id,
-            text: line.text,
-            final: true,
-            at: line.at,
-            ja,
-          });
+          postFinalRecognition(
+            requestId,
+            {
+              t: "OFF_RECOG",
+              id: line.id,
+              text: line.text,
+              final: true,
+              at: line.at,
+              ja,
+            },
+          );
         },
 
         onPathChanged(path) {
@@ -1014,6 +1038,7 @@ async function handleCaptureStart(
           settings.showTentative,
         onLine(line) {
           postRecognition(
+            requestId,
             line,
             settings.showTentative,
           );
@@ -1266,6 +1291,7 @@ function decodeFloat32Base64(
 }
 
 function postRecognition(
+  requestId: string,
   line: RecognitionLine,
   showTentative: boolean,
 ): void {
@@ -1295,13 +1321,16 @@ function postRecognition(
     return;
   }
 
-  postToBackground({
-    t: "OFF_RECOG",
-    id: line.id,
-    text,
-    final: true,
-    at: line.at,
-  });
+  postFinalRecognition(
+    requestId,
+    {
+      t: "OFF_RECOG",
+      id: line.id,
+      text,
+      final: true,
+      at: line.at,
+    },
+  );
 
   activeTranslationEngine?.enqueue({
     id: line.id,
@@ -1310,6 +1339,104 @@ function postRecognition(
     at: line.at,
     skipTranslation,
   });
+}
+
+function prepareRecognitionBuffer(
+  requestId: string,
+): void {
+  if (
+    bufferedRecognitionRequestId ===
+    requestId
+  ) {
+    return;
+  }
+
+  bufferedRecognitionRequestId =
+    requestId;
+  bufferedFinalRecognitions.length = 0;
+}
+
+function clearRecognitionBuffer(): void {
+  bufferedRecognitionRequestId = null;
+  bufferedFinalRecognitions.length = 0;
+}
+
+function bufferFinalRecognition(
+  requestId: string,
+  message: OffRecognitionMessage,
+): void {
+  if (
+    bufferedRecognitionRequestId !==
+    requestId
+  ) {
+    bufferedRecognitionRequestId =
+      requestId;
+    bufferedFinalRecognitions.length = 0;
+  }
+
+  if (
+    bufferedFinalRecognitions.length >=
+    FINAL_RECOGNITION_BUFFER_CAPACITY
+  ) {
+    bufferedFinalRecognitions.shift();
+  }
+
+  bufferedFinalRecognitions.push(message);
+}
+
+function postFinalRecognition(
+  requestId: string,
+  message: OffRecognitionMessage,
+): void {
+  if (postToBackground(message)) {
+    return;
+  }
+
+  bufferFinalRecognition(
+    requestId,
+    message,
+  );
+}
+
+function flushBufferedRecognitions(
+  requestId: string,
+): void {
+  if (
+    bufferedRecognitionRequestId !== null &&
+    bufferedRecognitionRequestId !==
+      requestId
+  ) {
+    clearRecognitionBuffer();
+    return;
+  }
+
+  if (
+    activeRecognitionRequestId !==
+      requestId &&
+    bufferedRecognitionRequestId !==
+      requestId
+  ) {
+    clearRecognitionBuffer();
+    return;
+  }
+
+  while (
+    bufferedFinalRecognitions.length > 0
+  ) {
+    const message =
+      bufferedFinalRecognitions[0];
+
+    if (
+      message === undefined ||
+      !postToBackground(message)
+    ) {
+      return;
+    }
+
+    bufferedFinalRecognitions.shift();
+  }
+
+  clearRecognitionBuffer();
 }
 
 function requestContentTranslation(
@@ -1418,20 +1545,22 @@ function postTranslationState(): void {
 
 function postToBackground(
   message: M1Message,
-): void {
+): boolean {
   if (backgroundPort === null) {
     scheduleReconnect();
-    return;
+    return false;
   }
 
   try {
     backgroundPort.postMessage(message);
+    return true;
   } catch (error) {
     console.warn(
       "[offscreen]",
       "could not post background message",
       error,
     );
+    return false;
   }
 }
 

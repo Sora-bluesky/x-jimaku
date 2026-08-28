@@ -10,13 +10,16 @@ import {
   type CueQueueDecision,
   type CueQueueEntry,
 } from "./cue-queue";
+import {
+  CUE_ACCELERATED_DISPLAY_MS,
+  CUE_ACCELERATION_THRESHOLD as
+    ACCELERATION_THRESHOLD,
+  CUE_MINIMUM_DISPLAY_MS,
+  MAX_CUE_UNITS,
+  MAX_WAITING_CUES,
+} from "./overlay";
 
-const MAX_WAITING_CUES = 6;
-const MAX_CUE_UNITS = 28;
-const ACCELERATION_THRESHOLD = 2;
 const MERGE_SEPARATOR_UNITS = 0.5;
-const CUE_MINIMUM_DISPLAY_MS = 1_500;
-const CUE_ACCELERATED_DISPLAY_MS = 1_000;
 
 const QUEUE_CONSTANTS = {
   maxWaitingCues: MAX_WAITING_CUES,

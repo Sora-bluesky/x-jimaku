@@ -14,6 +14,7 @@ import {
   type CsTapStateMessage,
   type CsTranslateMessage,
   type CsTranslateResultMessage,
+  type M1Message,
   type ProbeFailureMessage,
   type SwCaptionMessage,
   type TranslationPath,
@@ -32,8 +33,18 @@ import {
   getCurrentAudioTapTarget,
 } from "./audio-tap";
 import {
+  ContentGraceEpisode,
+  type GraceEpisodeCloseReason,
+  type GraceEpisodeIdentity,
+  type GraceEpisodeTransition,
+} from "./grace-episode";
+import {
   CaptionOverlay,
 } from "./overlay";
+import {
+  OrderedSendBuffer,
+  type BufferedSendItem,
+} from "./send-buffer";
 import {
   resolveSilentInputHint,
   type SilentHintTapState,
@@ -49,6 +60,20 @@ type ContentInstanceWindow = Window & {
   __xJimakuContentScriptVersion__?:
     string;
 };
+
+type CsStartTapMessage = Extract<
+  M1Message,
+  { t: "CS_START_TAP" }
+>;
+
+type BufferedContentMessage =
+  | CsPcmMessage
+  | CsEosMessage;
+
+type OutboundContentMessage =
+  | BufferedContentMessage
+  | CsTapStateMessage
+  | CsTranslateResultMessage;
 
 const CONTENT_PORT_NAME = "content";
 const DEV_ORIGIN =
@@ -151,17 +176,26 @@ const CONTEXT_TERM_STOPLIST =
     "your",
   ]);
 
+const graceEpisode =
+  new ContentGraceEpisode();
+const contentSendBuffer =
+  new OrderedSendBuffer<
+    BufferedContentMessage
+  >();
+
 let backgroundPort:
   | chrome.runtime.Port
   | null = null;
 let reconnectTimerId: number | null = null;
 let reconnectDelayMs =
   INITIAL_RECONNECT_DELAY_MS;
+let graceEpisodeTimerId:
+  | number
+  | null = null;
 let pcmSendDropRequestId:
   | string
   | null = null;
-let pcmSendDropPortNullCount = 0;
-let pcmSendDropPostFailedCount = 0;
+let pcmSendDropBufferOverflowCount = 0;
 let lastPcmSendDropWarnAt:
   | number
   | null = null;
@@ -448,6 +482,7 @@ function handleTargetPlaybackEvent(
 }
 
 function handleVisibilityChange(): void {
+  expireGraceEpisodeAt(Date.now());
   refreshSilentInputHint();
 }
 
@@ -498,6 +533,8 @@ function connectBackgroundPort(): void {
 
     port.onMessage.addListener(
       (message: unknown) => {
+        expireGraceEpisodeAt(Date.now());
+
         if (
           isMessageOfType(
             message,
@@ -514,6 +551,12 @@ function connectBackgroundPort(): void {
             "CS_STOP_TAP",
           )
         ) {
+          closeGraceEpisodeForRequest(
+            message.requestId,
+            "explicit-stop",
+          );
+          contentSendBuffer.clear();
+
           clearPendingContextTerms(
             message.requestId,
           );
@@ -644,6 +687,10 @@ function connectBackgroundPort(): void {
         chrome.runtime.lastError?.message;
 
       if (!isExtensionContextAlive()) {
+        closeCurrentGraceEpisode(
+          "context-dead",
+        );
+        contentSendBuffer.clear();
         finishCurrentPcmSendDropSession();
         console.info(
           "[cs]",
@@ -657,6 +704,15 @@ function connectBackgroundPort(): void {
         return;
       }
 
+      if (
+        expireGraceEpisodeAt(
+          Date.now(),
+        ) !== null
+      ) {
+        scheduleReconnect();
+        return;
+      }
+
       const disconnectDuringCapture =
         contentSessionRequestId !== null ||
         activeTap !== null;
@@ -667,14 +723,19 @@ function connectBackgroundPort(): void {
           "background port disconnected during capture",
           disconnectError ?? "",
         );
-      } else {
-        console.info(
-          "[cs]",
-          "background port disconnected (routine service-worker suspend)",
-          disconnectError ?? "",
-        );
+
+        openGraceEpisode(Date.now());
+        scheduleReconnect();
+        return;
       }
 
+      console.info(
+        "[cs]",
+        "background port disconnected (routine service-worker suspend)",
+        disconnectError ?? "",
+      );
+
+      contentSendBuffer.clear();
       lastCaptureStatus = "idle";
       activeCaptureRequestId = null;
       activeTranslationPath = null;
@@ -720,6 +781,10 @@ function connectBackgroundPort(): void {
         "Extension context invalidated",
       )
     ) {
+      closeCurrentGraceEpisode(
+        "context-dead",
+      );
+      contentSendBuffer.clear();
       console.info(
         "[cs]",
         "extension was updated; this page's script is retiring (reload the page to refresh)",
@@ -744,12 +809,394 @@ function isExtensionContextAlive(): boolean {
   }
 }
 
-function handleStartTapMessage(
-  message: Extract<
-    import("../shared/messages").M1Message,
-    { t: "CS_START_TAP" }
-  >,
+function openGraceEpisode(
+  now: number,
 ): void {
+  const requestId =
+    contentSessionRequestId ??
+    activeTap?.getRequestId() ??
+    lastEosRequestId;
+
+  if (requestId === null) {
+    return;
+  }
+
+  const flavor =
+    activeTap?.getRequestId() === requestId
+      ? "held-tap"
+      : (
+          lastEosRequestId === requestId
+            ? "ended-awaiting-resume"
+            : "held-tap"
+        );
+
+  const episode = graceEpisode.open(
+    requestId,
+    now,
+    flavor,
+  );
+
+  scheduleGraceEpisodeExpiry(
+    episode,
+    now,
+  );
+}
+
+function scheduleGraceEpisodeExpiry(
+  identity: GraceEpisodeIdentity,
+  now: number,
+): void {
+  clearGraceEpisodeTimer();
+
+  graceEpisodeTimerId =
+    window.setTimeout(
+      () => {
+        graceEpisodeTimerId = null;
+
+        const transition =
+          graceEpisode.expire(
+            identity,
+            Date.now(),
+          );
+
+        if (transition !== null) {
+          beginFullGraceTeardown(
+            transition.episode.requestId,
+            "grace period expired",
+          );
+        }
+      },
+      Math.max(
+        0,
+        identity.deadlineAt - now,
+      ),
+    );
+}
+
+function clearGraceEpisodeTimer(): void {
+  if (graceEpisodeTimerId === null) {
+    return;
+  }
+
+  globalThis.clearTimeout(
+    graceEpisodeTimerId,
+  );
+  graceEpisodeTimerId = null;
+}
+
+function expireGraceEpisodeAt(
+  now: number,
+): GraceEpisodeTransition | null {
+  const current =
+    graceEpisode.getCurrent();
+
+  if (
+    current === null ||
+    !graceEpisode.isExpired(now)
+  ) {
+    return null;
+  }
+
+  const transition =
+    graceEpisode.expire(
+      current,
+      now,
+    );
+
+  if (transition === null) {
+    return null;
+  }
+
+  clearGraceEpisodeTimer();
+  beginFullGraceTeardown(
+    transition.episode.requestId,
+    "grace period expired",
+  );
+  return transition;
+}
+
+function closeGraceEpisodeForRequest(
+  requestId: string,
+  reason: GraceEpisodeCloseReason,
+): GraceEpisodeTransition | null {
+  const current =
+    graceEpisode.getCurrent();
+
+  if (
+    current === null ||
+    current.requestId !== requestId
+  ) {
+    return null;
+  }
+
+  const transition =
+    graceEpisode.close(
+      reason,
+      current,
+    );
+
+  if (transition !== null) {
+    clearGraceEpisodeTimer();
+  }
+
+  return transition;
+}
+
+function closeCurrentGraceEpisode(
+  reason: GraceEpisodeCloseReason,
+): GraceEpisodeTransition | null {
+  const current =
+    graceEpisode.getCurrent();
+
+  if (current === null) {
+    return null;
+  }
+
+  const transition =
+    graceEpisode.close(
+      reason,
+      current,
+    );
+
+  if (transition !== null) {
+    clearGraceEpisodeTimer();
+  }
+
+  return transition;
+}
+
+function completeGraceResume(
+  identity: GraceEpisodeIdentity,
+): void {
+  const transition =
+    graceEpisode.close(
+      "resumed",
+      identity,
+    );
+
+  if (transition === null) {
+    return;
+  }
+
+  clearGraceEpisodeTimer();
+  flushBufferedContentMessages();
+
+  if (
+    transition.episode.flavor ===
+      "ended-awaiting-resume"
+  ) {
+    finishPcmSendDropSession(
+      transition.episode.requestId,
+    );
+  }
+}
+
+function beginFullGraceTeardown(
+  requestId: string,
+  failureContext: string,
+): void {
+  contentSendBuffer.clear();
+  finishCurrentPcmSendDropSession();
+  lastCaptureStatus = "idle";
+  activeCaptureRequestId = null;
+  activeTranslationPath = null;
+  activeSilentInputShowHint = false;
+  endedAudioTapTarget = null;
+  lastEosRequestId = null;
+  activeShowOriginal =
+    DEFAULT_SETTINGS.showOriginal;
+  contentSessionRequestId = null;
+  clearPendingContextTerms();
+  resetContentTranslator();
+  destroyOverlay();
+
+  void enqueueTapOperation(() =>
+    stopHeldTapAfterGrace(
+      requestId,
+      failureContext,
+    ),
+  );
+}
+
+async function stopHeldTapAfterGrace(
+  requestId: string,
+  failureContext: string,
+): Promise<void> {
+  const tap = activeTap;
+
+  if (
+    tap === null ||
+    tap.getRequestId() !== requestId
+  ) {
+    return;
+  }
+
+  beginActiveTapTeardown(tap);
+
+  try {
+    await tap.stop();
+  } catch (error) {
+    console.error(
+      "[cs]",
+      `${failureContext}: tap cleanup failed`,
+      error,
+    );
+  } finally {
+    clearActiveTap(tap);
+  }
+}
+
+function handleStartTapMessage(
+  message: CsStartTapMessage,
+): void {
+  const currentGrace =
+    graceEpisode.getCurrent();
+
+  if (
+    currentGrace !== null &&
+    currentGrace.requestId !==
+      message.requestId
+  ) {
+    closeGraceEpisodeForRequest(
+      currentGrace.requestId,
+      "different-request",
+    );
+    beginFullGraceTeardown(
+      currentGrace.requestId,
+      "different request started",
+    );
+    enqueueFreshTap(
+      message,
+      false,
+    );
+    return;
+  }
+
+  if (
+    currentGrace !== null &&
+    currentGrace.requestId ===
+      message.requestId
+  ) {
+    if (
+      activeTap?.getRequestId() ===
+        message.requestId
+    ) {
+      const identity =
+        graceEpisode.resumeRequested(
+          message.requestId,
+          Date.now(),
+        );
+
+      if (identity === null) {
+        expireGraceEpisodeAt(
+          Date.now(),
+        );
+        enqueueFreshTap(
+          message,
+          false,
+        );
+        return;
+      }
+
+      graceEpisode.setFlavor(
+        message.requestId,
+        "held-tap",
+      );
+      activeShowOriginal =
+        message.settings?.showOriginal ??
+        DEFAULT_SETTINGS.showOriginal;
+      beginPcmSendDropSession(
+        message.requestId,
+      );
+      lastCaptureStatus = "starting";
+      activeCaptureRequestId =
+        message.requestId;
+      cancelOverlayDestroy();
+
+      const overlay = ensureOverlay();
+      overlay.setTranslationPath(
+        activeTranslationPath,
+      );
+      refreshSilentInputHint(overlay);
+      overlay.setStatus("loadingModel");
+
+      const posted = postTapState(
+        message.requestId,
+        "tapping",
+        activeTap.isSuspended()
+          ? "audio-context-suspended"
+          : "already-tapping",
+      );
+
+      if (posted) {
+        completeGraceResume(identity);
+      }
+
+      return;
+    }
+
+    if (
+      lastEosRequestId ===
+        message.requestId
+    ) {
+      graceEpisode.setFlavor(
+        message.requestId,
+        "ended-awaiting-resume",
+      );
+
+      const identity =
+        graceEpisode.resumeRequested(
+          message.requestId,
+          Date.now(),
+        );
+
+      if (identity === null) {
+        expireGraceEpisodeAt(
+          Date.now(),
+        );
+        enqueueFreshTap(
+          message,
+          false,
+        );
+        return;
+      }
+
+      activeShowOriginal =
+        message.settings?.showOriginal ??
+        DEFAULT_SETTINGS.showOriginal;
+      activeCaptureRequestId =
+        message.requestId;
+      cancelOverlayDestroy();
+      refreshSilentInputHint();
+
+      const posted = postTapState(
+        message.requestId,
+        "stopped",
+        "ended-awaiting-resume",
+      );
+
+      if (posted) {
+        completeGraceResume(identity);
+      }
+
+      return;
+    }
+
+    closeGraceEpisodeForRequest(
+      message.requestId,
+      "explicit-stop",
+    );
+    beginFullGraceTeardown(
+      message.requestId,
+      "held tap was unavailable",
+    );
+    enqueueFreshTap(
+      message,
+      false,
+    );
+    return;
+  }
+
   activeShowOriginal =
     message.settings?.showOriginal ??
     DEFAULT_SETTINGS.showOriginal;
@@ -776,13 +1223,21 @@ function handleStartTapMessage(
     refreshSilentInputHint(overlay);
     overlay.setStatus("loadingModel");
 
-    postTapState(
+    const posted = postTapState(
       message.requestId,
       "tapping",
       activeTap.isSuspended()
         ? "audio-context-suspended"
         : "already-tapping",
     );
+
+    if (
+      posted &&
+      contentSendBuffer.pendingCount > 0
+    ) {
+      flushBufferedContentMessages();
+    }
+
     return;
   }
 
@@ -790,6 +1245,35 @@ function handleStartTapMessage(
     activeCaptureRequestId ===
     message.requestId;
 
+  enqueueFreshTap(
+    message,
+    preservePresentation,
+  );
+}
+
+function enqueueFreshTap(
+  message: CsStartTapMessage,
+  preservePresentation: boolean,
+): void {
+  void enqueueTapOperation(async () => {
+    prepareFreshTapSession(
+      message,
+      preservePresentation,
+    );
+    await startTap(message.requestId);
+  });
+}
+
+function prepareFreshTapSession(
+  message: CsStartTapMessage,
+  preservePresentation: boolean,
+): void {
+  activeShowOriginal =
+    message.settings?.showOriginal ??
+    DEFAULT_SETTINGS.showOriginal;
+  beginPcmSendDropSession(
+    message.requestId,
+  );
   endedAudioTapTarget = null;
   lastEosRequestId = null;
   contentSessionRequestId =
@@ -798,8 +1282,6 @@ function handleStartTapMessage(
     message.requestId;
   pendingContextTermsRequestId =
     message.requestId;
-  // Extraction must run AFTER the tap target is selected (closest("article")
-  // needs the target element); defer to first-PCM attach time.
   pendingContextTerms = null;
   resetContentTranslator();
 
@@ -818,10 +1300,6 @@ function handleStartTapMessage(
   );
   refreshSilentInputHint(overlay);
   overlay.setStatus("loadingModel");
-
-  void enqueueTapOperation(() =>
-    startTap(message.requestId),
-  );
 }
 
 function scheduleReconnect(): void {
@@ -1256,6 +1734,11 @@ async function startTap(
         lastEosRequestId = null;
       }
 
+      graceEpisode.setFlavor(
+        requestId,
+        "held-tap",
+      );
+
       const attachContextTerms =
         pendingContextTermsRequestId ===
         requestId;
@@ -1349,11 +1832,20 @@ async function startTap(
           target?.isConnected === true
             ? target
             : null;
+        graceEpisode.setFlavor(
+          requestId,
+          "ended-awaiting-resume",
+        );
         clearActiveTap(tap);
         postEndOfStream(requestId);
         return;
       }
 
+      closeGraceEpisodeForRequest(
+        requestId,
+        "explicit-stop",
+      );
+      contentSendBuffer.clear();
       endedAudioTapTarget = null;
       lastEosRequestId = null;
       clearPendingContextTerms(requestId);
@@ -1381,6 +1873,11 @@ async function startTap(
     },
 
     onError(error) {
+      closeGraceEpisodeForRequest(
+        requestId,
+        "explicit-stop",
+      );
+      contentSendBuffer.clear();
       endedAudioTapTarget = null;
       lastEosRequestId = null;
       clearPendingContextTerms(requestId);
@@ -1409,6 +1906,10 @@ async function startTap(
 
   activeTap = tap;
   activeTapLifecycleState = "starting";
+  graceEpisode.setFlavor(
+    requestId,
+    "held-tap",
+  );
   refreshSilentInputHint();
 
   try {
@@ -1429,6 +1930,11 @@ async function startTap(
       detail,
     );
   } catch (error) {
+    closeGraceEpisodeForRequest(
+      requestId,
+      "explicit-stop",
+    );
+    contentSendBuffer.clear();
     endedAudioTapTarget = null;
     lastEosRequestId = null;
     clearPendingContextTerms(requestId);
@@ -1521,9 +2027,17 @@ function clearActiveTap(
     return;
   }
 
-  finishPcmSendDropSession(
-    tap.getRequestId(),
-  );
+  const requestId = tap.getRequestId();
+  const currentGrace =
+    graceEpisode.getCurrent();
+
+  if (
+    currentGrace?.requestId !== requestId
+  ) {
+    finishPcmSendDropSession(
+      requestId,
+    );
+  }
 
   activeTapLifecycleState = "closed";
   refreshSilentInputHint();
@@ -1593,6 +2107,10 @@ function handleCaptureState(
       return;
 
     case "error":
+      closeCurrentGraceEpisode(
+        "explicit-stop",
+      );
+      contentSendBuffer.clear();
       finishCurrentPcmSendDropSession();
       activeCaptureRequestId = null;
       activeTranslationPath = null;
@@ -1607,6 +2125,10 @@ function handleCaptureState(
 
     case "stopping":
     case "idle":
+      closeCurrentGraceEpisode(
+        "explicit-stop",
+      );
+      contentSendBuffer.clear();
       finishCurrentPcmSendDropSession();
       activeCaptureRequestId = null;
       activeTranslationPath = null;
@@ -1834,7 +2356,7 @@ function postTapState(
   requestId: string,
   state: CsTapStateMessage["state"],
   detail?: string,
-): void {
+): boolean {
   const message: CsTapStateMessage = {
     t: "CS_TAP_STATE",
     requestId,
@@ -1844,7 +2366,7 @@ function postTapState(
       : { detail }),
   };
 
-  postContentMessage(message);
+  return postContentMessage(message);
 }
 
 function beginPcmSendDropSession(
@@ -1859,16 +2381,13 @@ function beginPcmSendDropSession(
   finishCurrentPcmSendDropSession();
 
   pcmSendDropRequestId = requestId;
-  pcmSendDropPortNullCount = 0;
-  pcmSendDropPostFailedCount = 0;
+  pcmSendDropBufferOverflowCount = 0;
   lastPcmSendDropWarnAt = null;
 }
 
 function recordPcmSendDrop(
   requestId: string,
-  reason:
-    | "port-null"
-    | "post-failed",
+  reason: "buffer-overflow",
 ): void {
   if (
     pcmSendDropRequestId !== requestId
@@ -1876,10 +2395,8 @@ function recordPcmSendDrop(
     return;
   }
 
-  if (reason === "port-null") {
-    pcmSendDropPortNullCount += 1;
-  } else {
-    pcmSendDropPostFailedCount += 1;
+  if (reason === "buffer-overflow") {
+    pcmSendDropBufferOverflowCount += 1;
   }
 
   const now = Date.now();
@@ -1900,10 +2417,8 @@ function emitPcmSendDropSummary(): void {
   console.warn(
     "[cs] pcm sends dropped since tap start",
     {
-      portNull:
-        pcmSendDropPortNullCount,
-      postFailed:
-        pcmSendDropPostFailedCount,
+      bufferOverflow:
+        pcmSendDropBufferOverflowCount,
     },
   );
 }
@@ -1927,47 +2442,56 @@ function finishCurrentPcmSendDropSession():
   }
 
   if (
-    pcmSendDropPortNullCount !== 0 ||
-    pcmSendDropPostFailedCount !== 0
+    pcmSendDropBufferOverflowCount !== 0
   ) {
     emitPcmSendDropSummary();
   }
 
   pcmSendDropRequestId = null;
-  pcmSendDropPortNullCount = 0;
-  pcmSendDropPostFailedCount = 0;
+  pcmSendDropBufferOverflowCount = 0;
   lastPcmSendDropWarnAt = null;
 }
 
 function postContentMessage(
-  message:
-    | CsPcmMessage
-    | CsEosMessage
-    | CsTapStateMessage
-    | CsTranslateResultMessage,
-): void {
+  message: OutboundContentMessage,
+): boolean {
+  if (
+    isBufferedContentMessage(message) &&
+    (
+      backgroundPort === null ||
+      graceEpisode.getCurrent() !== null ||
+      contentSendBuffer.pendingCount > 0 ||
+      contentSendBuffer.isFlushing
+    )
+  ) {
+    enqueueBufferedContentMessage(message);
+
+    if (
+      backgroundPort !== null &&
+      graceEpisode.getCurrent() === null &&
+      !contentSendBuffer.isFlushing
+    ) {
+      flushBufferedContentMessages();
+    }
+
+    return false;
+  }
+
   const port = backgroundPort;
 
   if (port === null) {
-    if (message.t === "CS_PCM") {
-      recordPcmSendDrop(
-        message.requestId,
-        "port-null",
-      );
-    }
-
-    return;
+    return false;
   }
 
   try {
     port.postMessage(message);
+    return true;
   } catch (error) {
-    if (message.t === "CS_PCM") {
-      recordPcmSendDrop(
-        message.requestId,
-        "post-failed",
+    if (isBufferedContentMessage(message)) {
+      enqueueBufferedContentMessage(
+        message,
       );
-      return;
+      return false;
     }
 
     console.warn(
@@ -1975,6 +2499,84 @@ function postContentMessage(
       "could not post content-port message",
       error,
     );
+    return false;
+  }
+}
+
+function isBufferedContentMessage(
+  message: OutboundContentMessage,
+): message is BufferedContentMessage {
+  return (
+    message.t === "CS_PCM" ||
+    message.t === "CS_EOS"
+  );
+}
+
+function enqueueBufferedContentMessage(
+  message: BufferedContentMessage,
+): void {
+  const result =
+    contentSendBuffer.enqueue(message);
+
+  if (result.dropped !== null) {
+    recordPcmSendDrop(
+      result.dropped.payload.requestId,
+      "buffer-overflow",
+    );
+  }
+}
+
+function flushBufferedContentMessages():
+  void {
+  if (contentSendBuffer.isFlushing) {
+    return;
+  }
+
+  while (
+    backgroundPort !== null &&
+    graceEpisode.getCurrent() === null
+  ) {
+    const batch =
+      contentSendBuffer.beginFlush();
+
+    if (batch === null) {
+      return;
+    }
+
+    let completed = true;
+
+    try {
+      for (const item of batch) {
+        const port = backgroundPort;
+
+        if (port === null) {
+          completed = false;
+          break;
+        }
+
+        try {
+          port.postMessage(item.payload);
+        } catch {
+          completed = false;
+          break;
+        }
+
+        if (
+          !contentSendBuffer.markSent(
+            item,
+          )
+        ) {
+          completed = false;
+          break;
+        }
+      }
+    } finally {
+      contentSendBuffer.endFlush();
+    }
+
+    if (!completed) {
+      return;
+    }
   }
 }
 
@@ -2020,10 +2622,8 @@ function extractPostContextTerms(): string[] {
       const term = match
         .normalize("NFKC")
         .trim();
-
-      // The wire guard (isContextTerms) rejects terms over 128 characters;
-      // a single oversized term must not invalidate the whole message.
-      const termLength = Array.from(term).length;
+      const termLength =
+        Array.from(term).length;
 
       if (
         termLength < 4 ||
@@ -2128,7 +2728,8 @@ async function runInitialProbe(): Promise<void> {
   }
 }
 
-async function probeTranslator(): Promise<TranslatorProbeResult> {
+async function probeTranslator():
+  Promise<TranslatorProbeResult> {
   const startedAt = nowIso();
   const scope = globalThis as TranslatorScope;
   const exposed = "Translator" in scope;
