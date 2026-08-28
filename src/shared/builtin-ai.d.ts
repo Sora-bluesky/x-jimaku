@@ -61,8 +61,14 @@ declare global {
     content: string;
   }
 
+  interface LanguageModelExpected {
+    type: "text";
+    languages?: readonly string[];
+  }
+
   interface LanguageModelCreateOptions {
     initialPrompts?: readonly LanguageModelPrompt[];
+    expectedOutputs?: readonly LanguageModelExpected[];
   }
 
   interface LanguageModelSessionOperationOptions {
@@ -84,8 +90,15 @@ declare global {
     destroy(): void;
   }
 
+  interface LanguageModelAvailabilityOptions {
+    expectedOutputs?: readonly LanguageModelExpected[];
+  }
+
   interface LanguageModelFactory {
-    availability(): Promise<BuiltinLanguageModelAvailability>;
+    availability(
+      options?:
+        LanguageModelAvailabilityOptions,
+    ): Promise<BuiltinLanguageModelAvailability>;
 
     create(
       options?: LanguageModelCreateOptions,
