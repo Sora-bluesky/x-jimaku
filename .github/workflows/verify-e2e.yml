@@ -51,22 +51,21 @@ jobs:
 
           run_bench() {
             local attempt="$1"
-            local stdout_log="$RUNNER_TEMP/bench-${attempt}.stdout.log"
-            local stderr_log="$RUNNER_TEMP/bench-${attempt}.stderr.log"
+            # xvfb-run merges the child's stderr into stdout on this runner,
+            # so capture one combined log and grep that.
+            local combined_log="$RUNNER_TEMP/bench-${attempt}.log"
 
             set +e
             xvfb-run --auto-servernum npm run bench:smoke \
-              > "$stdout_log" \
-              2> "$stderr_log"
+              > "$combined_log" 2>&1
             BENCH_STATUS=$?
             set -e
-            cat "$stdout_log"
-            cat "$stderr_log" >&2
-            BENCH_STDERR="$stderr_log"
+            cat "$combined_log"
+            BENCH_LOG="$combined_log"
           }
 
           require_result_line() {
-            if ! grep -Fq '[bench] result:' "$BENCH_STDERR"; then
+            if ! grep -Fq '[bench] result:' "$BENCH_LOG"; then
               echo "Bench exited successfully without a result line." >&2
               exit 1
             fi
@@ -78,7 +77,7 @@ jobs:
             require_result_line
           elif grep -Fq \
             'Execution context is not available in detached frame or worker' \
-            "$BENCH_STDERR"; then
+            "$BENCH_LOG"; then
             echo "Known detached-frame transient detected; retrying once." >&2
             run_bench 2
             if [[ "$BENCH_STATUS" -ne 0 ]]; then
@@ -137,8 +136,7 @@ jobs:
           before_results="$RUNNER_TEMP/verify-fail-detection-before.txt"
           after_results="$RUNNER_TEMP/verify-fail-detection-after.txt"
           new_results="$RUNNER_TEMP/verify-fail-detection-new.txt"
-          stdout_log="$RUNNER_TEMP/verify-fail-detection.stdout.log"
-          stderr_log="$RUNNER_TEMP/verify-fail-detection.stderr.log"
+          combined_log="$RUNNER_TEMP/verify-fail-detection.log"
 
           list_results() {
             if [[ -d bench/results ]]; then
@@ -151,13 +149,11 @@ jobs:
 
           set +e
           xvfb-run --auto-servernum npm run bench:smoke \
-            > "$stdout_log" \
-            2> "$stderr_log"
+            > "$combined_log" 2>&1
           bench_status=$?
           set -e
 
-          cat "$stdout_log"
-          cat "$stderr_log" >&2
+          cat "$combined_log"
 
           list_results > "$after_results"
           comm -13 "$before_results" "$after_results" > "$new_results"
@@ -166,7 +162,7 @@ jobs:
           if [[ "$bench_status" -eq 0 ]]; then
             fail_open_detected=true
           fi
-          if grep -Fq '[bench] result:' "$stderr_log"; then
+          if grep -Fq '[bench] result:' "$combined_log"; then
             fail_open_detected=true
           fi
           if [[ -s "$new_results" ]]; then
