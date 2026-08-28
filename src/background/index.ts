@@ -1736,6 +1736,9 @@ function handleContentResumeAcknowledgement(
     graceEpisode.portGeneration ===
       portGeneration
   ) {
+    flushDeferredTranslationRequests(
+      graceEpisode,
+    );
     cancelContentReconnectGraceEpisode(
       tabId,
     );
@@ -1748,9 +1751,6 @@ function handleContentResumeAcknowledgement(
     replayCapturedLinesToContent(
       tabId,
       message.requestId,
-    );
-    flushDeferredTranslationRequests(
-      graceEpisode,
     );
     postFlushRecognitionToOffscreen(
       message.requestId,
