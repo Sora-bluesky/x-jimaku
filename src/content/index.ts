@@ -55,6 +55,8 @@ const DEV_ORIGIN =
   "http://127.0.0.1:8123";
 const INITIAL_RECONNECT_DELAY_MS = 100;
 const MAX_RECONNECT_DELAY_MS = 1_000;
+const PCM_SEND_DROP_WARN_INTERVAL_MS =
+  5_000;
 const ERROR_CHIP_VISIBLE_MS = 2_500;
 const TRANSLATOR_CREATE_WAIT_MS = 8_000;
 const CONTENT_INSTANCE_VERSION =
@@ -155,6 +157,14 @@ let backgroundPort:
 let reconnectTimerId: number | null = null;
 let reconnectDelayMs =
   INITIAL_RECONNECT_DELAY_MS;
+let pcmSendDropRequestId:
+  | string
+  | null = null;
+let pcmSendDropPortNullCount = 0;
+let pcmSendDropPostFailedCount = 0;
+let lastPcmSendDropWarnAt:
+  | number
+  | null = null;
 let activeTap: AudioTap | null = null;
 let activeTapLifecycleState:
   | "missing"
@@ -634,6 +644,7 @@ function connectBackgroundPort(): void {
         chrome.runtime.lastError?.message;
 
       if (!isExtensionContextAlive()) {
+        finishCurrentPcmSendDropSession();
         console.info(
           "[cs]",
           "extension was updated; this page's script is retiring (reload the page to refresh)",
@@ -681,6 +692,7 @@ function connectBackgroundPort(): void {
         const tap = activeTap;
 
         if (tap === null) {
+          finishCurrentPcmSendDropSession();
           return;
         }
 
@@ -741,6 +753,10 @@ function handleStartTapMessage(
   activeShowOriginal =
     message.settings?.showOriginal ??
     DEFAULT_SETTINGS.showOriginal;
+
+  beginPcmSendDropSession(
+    message.requestId,
+  );
 
   if (
     contentSessionRequestId ===
@@ -1226,6 +1242,8 @@ async function startTap(
     return;
   }
 
+  beginPcmSendDropSession(requestId);
+
   const tap = new AudioTap(requestId, {
     onChunk(seq, b64) {
       if (activeTap !== tap) {
@@ -1450,6 +1468,7 @@ async function stopTap(
     tap === null ||
     tap.getRequestId() !== requestId
   ) {
+    finishPcmSendDropSession(requestId);
     postTapState(
       requestId,
       "stopped",
@@ -1501,6 +1520,10 @@ function clearActiveTap(
   if (activeTap !== tap) {
     return;
   }
+
+  finishPcmSendDropSession(
+    tap.getRequestId(),
+  );
 
   activeTapLifecycleState = "closed";
   refreshSilentInputHint();
@@ -1570,6 +1593,7 @@ function handleCaptureState(
       return;
 
     case "error":
+      finishCurrentPcmSendDropSession();
       activeCaptureRequestId = null;
       activeTranslationPath = null;
       endedAudioTapTarget = null;
@@ -1583,6 +1607,7 @@ function handleCaptureState(
 
     case "stopping":
     case "idle":
+      finishCurrentPcmSendDropSession();
       activeCaptureRequestId = null;
       activeTranslationPath = null;
       endedAudioTapTarget = null;
@@ -1822,6 +1847,98 @@ function postTapState(
   postContentMessage(message);
 }
 
+function beginPcmSendDropSession(
+  requestId: string,
+): void {
+  if (
+    pcmSendDropRequestId === requestId
+  ) {
+    return;
+  }
+
+  finishCurrentPcmSendDropSession();
+
+  pcmSendDropRequestId = requestId;
+  pcmSendDropPortNullCount = 0;
+  pcmSendDropPostFailedCount = 0;
+  lastPcmSendDropWarnAt = null;
+}
+
+function recordPcmSendDrop(
+  requestId: string,
+  reason:
+    | "port-null"
+    | "post-failed",
+): void {
+  if (
+    pcmSendDropRequestId !== requestId
+  ) {
+    return;
+  }
+
+  if (reason === "port-null") {
+    pcmSendDropPortNullCount += 1;
+  } else {
+    pcmSendDropPostFailedCount += 1;
+  }
+
+  const now = Date.now();
+
+  if (
+    lastPcmSendDropWarnAt !== null &&
+    now - lastPcmSendDropWarnAt <
+      PCM_SEND_DROP_WARN_INTERVAL_MS
+  ) {
+    return;
+  }
+
+  emitPcmSendDropSummary();
+  lastPcmSendDropWarnAt = now;
+}
+
+function emitPcmSendDropSummary(): void {
+  console.warn(
+    "[cs] pcm sends dropped since tap start",
+    {
+      portNull:
+        pcmSendDropPortNullCount,
+      postFailed:
+        pcmSendDropPostFailedCount,
+    },
+  );
+}
+
+function finishPcmSendDropSession(
+  requestId: string,
+): void {
+  if (
+    pcmSendDropRequestId !== requestId
+  ) {
+    return;
+  }
+
+  finishCurrentPcmSendDropSession();
+}
+
+function finishCurrentPcmSendDropSession():
+  void {
+  if (pcmSendDropRequestId === null) {
+    return;
+  }
+
+  if (
+    pcmSendDropPortNullCount !== 0 ||
+    pcmSendDropPostFailedCount !== 0
+  ) {
+    emitPcmSendDropSummary();
+  }
+
+  pcmSendDropRequestId = null;
+  pcmSendDropPortNullCount = 0;
+  pcmSendDropPostFailedCount = 0;
+  lastPcmSendDropWarnAt = null;
+}
+
 function postContentMessage(
   message:
     | CsPcmMessage
@@ -1832,12 +1949,27 @@ function postContentMessage(
   const port = backgroundPort;
 
   if (port === null) {
+    if (message.t === "CS_PCM") {
+      recordPcmSendDrop(
+        message.requestId,
+        "port-null",
+      );
+    }
+
     return;
   }
 
   try {
     port.postMessage(message);
   } catch (error) {
+    if (message.t === "CS_PCM") {
+      recordPcmSendDrop(
+        message.requestId,
+        "post-failed",
+      );
+      return;
+    }
+
     console.warn(
       "[cs]",
       "could not post content-port message",

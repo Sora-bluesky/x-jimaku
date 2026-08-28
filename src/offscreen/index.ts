@@ -11,6 +11,7 @@ import {
   type CsTranslateMessage,
   type CsTranslateResultMessage,
   type M1Message,
+  type OffDiagnosticMessage,
   type OffscreenProbeResult,
   type OffscreenProbeResultMessage,
   type OffStatusMessage,
@@ -87,6 +88,9 @@ const audioCapture = new AudioCapture();
 let backgroundPort:
   | chrome.runtime.Port
   | null = null;
+let bufferedOffDiagnostic:
+  | OffDiagnosticMessage
+  | null = null;
 let reconnectTimerId: number | null = null;
 let reconnectDelayMs =
   INITIAL_RECONNECT_DELAY_MS;
@@ -123,6 +127,9 @@ let activeContextTerms: string[] = [];
 let expectedPcmSequence = 0;
 let lastPcmGapLogAt =
   Number.NEGATIVE_INFINITY;
+let rejectedPcmChunkCount = 0;
+let lastRejectedPcmLogAt =
+  Number.NEGATIVE_INFINITY;
 let lastModelProgress = 0;
 let contentTranslationSequence = 0;
 
@@ -132,6 +139,37 @@ const pendingContentTranslations =
     string,
     PendingContentTranslation
   >();
+
+self.addEventListener(
+  "error",
+  (event: ErrorEvent) => {
+    try {
+      reportOffscreenDiagnostic(
+        "unhandled-error",
+        event.error,
+        event.message ||
+          "Unhandled offscreen error",
+      );
+    } catch {
+      return;
+    }
+  },
+);
+
+self.addEventListener(
+  "unhandledrejection",
+  (event: PromiseRejectionEvent) => {
+    try {
+      reportOffscreenDiagnostic(
+        "unhandled-rejection",
+        event.reason,
+        "Unhandled offscreen promise rejection",
+      );
+    } catch {
+      return;
+    }
+  },
+);
 
 console.log("[offscreen]", "document ready");
 
@@ -302,6 +340,7 @@ function connectBackgroundPort(): void {
       scheduleReconnect();
     });
 
+    flushBufferedOffDiagnostic(port);
     postState();
     postLevel();
     postTranslationState();
@@ -311,6 +350,84 @@ function connectBackgroundPort(): void {
       "could not connect background port",
       error,
     );
+    scheduleReconnect();
+  }
+}
+
+function reportOffscreenDiagnostic(
+  kind: OffDiagnosticMessage["kind"],
+  error: unknown,
+  fallbackMessage: string,
+): void {
+  const normalized =
+    error === undefined || error === null
+      ? {
+          name: "Error",
+          message: fallbackMessage,
+        }
+      : toProbeError(error);
+  const message =
+    normalized.message === ""
+      ? fallbackMessage
+      : normalized.message;
+  const stack =
+    normalized.stack?.slice(0, 500);
+
+  const diagnostic: OffDiagnosticMessage = {
+    t: "OFF_DIAGNOSTIC",
+    kind,
+    at: new Date().toISOString(),
+    context: "offscreen",
+    message,
+    ...(stack === undefined
+      ? {}
+      : { stack }),
+  };
+
+  postOffDiagnostic(diagnostic);
+}
+
+function postOffDiagnostic(
+  message: OffDiagnosticMessage,
+): void {
+  const port = backgroundPort;
+
+  if (port === null) {
+    bufferedOffDiagnostic = message;
+    scheduleReconnect();
+    return;
+  }
+
+  try {
+    port.postMessage(message);
+  } catch {
+    bufferedOffDiagnostic = message;
+
+    if (backgroundPort === port) {
+      backgroundPort = null;
+    }
+
+    scheduleReconnect();
+  }
+}
+
+function flushBufferedOffDiagnostic(
+  port: chrome.runtime.Port,
+): void {
+  const message = bufferedOffDiagnostic;
+
+  if (message === null) {
+    return;
+  }
+
+  try {
+    port.postMessage(message);
+    bufferedOffDiagnostic = null;
+  } catch {
+    if (backgroundPort === port) {
+      backgroundPort = null;
+    }
+
     scheduleReconnect();
   }
 }
@@ -439,16 +556,40 @@ function handlePcm(
       samples,
     );
   } catch (error) {
-    console.warn(
-      "[offscreen]",
-      "ignored invalid PCM chunk",
-      {
-        requestId: message.requestId,
-        seq: message.seq,
-        error,
-      },
+    recordRejectedPcmChunk(
+      message,
+      error,
     );
   }
+}
+
+function recordRejectedPcmChunk(
+  message: CsPcmMessage,
+  error: unknown,
+): void {
+  rejectedPcmChunkCount += 1;
+
+  const now = performance.now();
+
+  if (
+    now - lastRejectedPcmLogAt <
+    PCM_GAP_LOG_INTERVAL_MS
+  ) {
+    return;
+  }
+
+  lastRejectedPcmLogAt = now;
+
+  console.warn(
+    "[offscreen]",
+    "ignored invalid PCM chunks",
+    {
+      requestId: message.requestId,
+      seq: message.seq,
+      rejected: rejectedPcmChunkCount,
+      error,
+    },
+  );
 }
 
 function handleEndOfStream(
@@ -519,9 +660,9 @@ function handleContentTranslationResult(
 function detectPcmSequenceGap(
   receivedSequence: number,
 ): void {
-  if (
-    receivedSequence !== expectedPcmSequence
-  ) {
+  const expected = expectedPcmSequence;
+
+  if (receivedSequence !== expected) {
     const now = performance.now();
 
     if (
@@ -530,14 +671,27 @@ function detectPcmSequenceGap(
     ) {
       lastPcmGapLogAt = now;
 
-      console.warn(
-        "[offscreen]",
-        "PCM sequence gap detected",
-        {
-          expected: expectedPcmSequence,
-          received: receivedSequence,
-        },
-      );
+      if (receivedSequence < expected) {
+        console.warn(
+          "[offscreen] pcm sequence restarted after recovery; audio during the disconnect was not captured",
+          {
+            expected,
+            received: receivedSequence,
+          },
+        );
+      } else {
+        const lost =
+          receivedSequence - expected;
+
+        console.warn(
+          `[offscreen] lost ${lost} pcm chunks in transit`,
+          {
+            expected,
+            received: receivedSequence,
+            lost,
+          },
+        );
+      }
     }
   }
 

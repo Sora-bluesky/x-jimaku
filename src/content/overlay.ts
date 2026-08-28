@@ -1,6 +1,11 @@
 import type {
   TranslationPath,
 } from "../shared/messages";
+import {
+  cueDisplayDurationMs,
+  decideCueQueueDiscipline,
+  retainAccelerationUntilDrained,
+} from "./cue-queue";
 import type {
   SilentInputHintVariant,
 } from "./silent-hint";
@@ -10,7 +15,8 @@ const CAPTION_VISIBLE_MS = 5_000;
 const CAPTION_FADE_MS = 350;
 const CUE_MINIMUM_DISPLAY_MS = 1_500;
 const CUE_ACCELERATED_DISPLAY_MS = 1_000;
-const MAX_WAITING_CUES = 2;
+const CUE_ACCELERATION_THRESHOLD = 2;
+const MAX_WAITING_CUES = 6;
 const MAX_CUE_UNITS = 28;
 const MAX_LINE_UNITS = 14;
 const MIN_CUE_SEGMENT_CHARACTERS = 5;
@@ -1069,95 +1075,86 @@ export class CaptionOverlay {
   }
 
   private enforceQueueDiscipline(): void {
-    while (
-      this.waitingCues.length >
-      MAX_WAITING_CUES
-    ) {
-      let merged = false;
-
-      for (
-        let index = 0;
-        index <
-        this.waitingCues.length - 1;
-        index += 1
-      ) {
-        const left =
-          this.waitingCues[index];
-        const right =
-          this.waitingCues[index + 1];
-
-        if (
-          left === undefined ||
-          right === undefined
-        ) {
-          continue;
-        }
-
-        const combinedPrimary =
-          `${left.primaryText} ${right.primaryText}`
-            .replace(/\s+/gu, " ")
-            .trim();
-
-        if (
-          displayUnits(combinedPrimary) >
-          MAX_CUE_UNITS
-        ) {
-          continue;
-        }
-
-        const combinedOriginal =
-          [left.originalText, right.originalText]
-            .filter(
-              (value) => value !== "",
-            )
-            .join(" ")
-            .trim();
-
-        this.waitingCues.splice(
-          index,
-          2,
-          {
-            cueId:
-              `${left.cueId}+${right.cueId}`,
-            sourceIds: [
-              ...left.sourceIds,
-              ...right.sourceIds,
-            ],
-            primaryText: combinedPrimary,
-            originalText: clampTail(
-              combinedOriginal,
-              MAX_ORIGINAL_CHARS,
+    const decision =
+      decideCueQueueDiscipline(
+        this.waitingCues.map(
+          (cue) => ({
+            cueId: cue.cueId,
+            units: displayUnits(
+              cue.primaryText,
             ),
-            formattedPrimary:
-              wrapCueText(
-                combinedPrimary,
-                MAX_LINE_UNITS,
-              ),
-          },
-        );
-        merged = true;
-        break;
+          }),
+        ),
+        this.acceleratedUntilDrained,
+        {
+          maxWaitingCues:
+            MAX_WAITING_CUES,
+          maxCueUnits: MAX_CUE_UNITS,
+          accelerationThreshold:
+            CUE_ACCELERATION_THRESHOLD,
+          mergeSeparatorUnits:
+            displayUnits(" "),
+        },
+      );
+
+    this.acceleratedUntilDrained =
+      decision.acceleratedUntilDrained;
+
+    for (
+      const index of decision.mergeIndices
+    ) {
+      const left =
+        this.waitingCues[index];
+      const right =
+        this.waitingCues[index + 1];
+
+      if (
+        left === undefined ||
+        right === undefined
+      ) {
+        continue;
       }
 
-      if (!merged) {
-        break;
-      }
+      const combinedPrimary =
+        `${left.primaryText} ${right.primaryText}`
+          .replace(/\s+/gu, " ")
+          .trim();
+      const combinedOriginal =
+        [left.originalText, right.originalText]
+          .filter(
+            (value) => value !== "",
+          )
+          .join(" ")
+          .trim();
+
+      this.waitingCues.splice(
+        index,
+        2,
+        {
+          cueId:
+            `${left.cueId}+${right.cueId}`,
+          sourceIds: [
+            ...left.sourceIds,
+            ...right.sourceIds,
+          ],
+          primaryText: combinedPrimary,
+          originalText: clampTail(
+            combinedOriginal,
+            MAX_ORIGINAL_CHARS,
+          ),
+          formattedPrimary:
+            wrapCueText(
+              combinedPrimary,
+              MAX_LINE_UNITS,
+            ),
+        },
+      );
     }
 
-    if (
-      this.waitingCues.length <=
-      MAX_WAITING_CUES
-    ) {
-      return;
-    }
+    let remainingDrops =
+      decision.dropCount;
 
-    this.acceleratedUntilDrained = true;
-    this.rescheduleCueAdvance();
-
-    while (
-      this.waitingCues.length >
-      MAX_WAITING_CUES
-    ) {
+    while (remainingDrops > 0) {
       const dropped =
         this.waitingCues.shift();
 
@@ -1165,6 +1162,7 @@ export class CaptionOverlay {
         break;
       }
 
+      remainingDrops -= 1;
       this.droppedCueCount += 1;
       this.host.dataset.cueDrops =
         String(this.droppedCueCount);
@@ -1178,6 +1176,10 @@ export class CaptionOverlay {
             this.droppedCueCount,
         },
       );
+    }
+
+    if (decision.shouldReschedule) {
+      this.rescheduleCueAdvance();
     }
   }
 
@@ -1200,21 +1202,27 @@ export class CaptionOverlay {
     }
 
     if (this.waitingCues.length === 0) {
-      this.acceleratedUntilDrained = false;
+      this.acceleratedUntilDrained =
+        retainAccelerationUntilDrained(
+          this.acceleratedUntilDrained,
+          this.waitingCues.length,
+        );
       this.cancelCueAdvance();
       this.scheduleCaptionFade();
       return;
     }
 
-    const minimumDisplayMs =
-      this.acceleratedUntilDrained
-        ? CUE_ACCELERATED_DISPLAY_MS
-        : CUE_MINIMUM_DISPLAY_MS;
+    const displayDurationMs =
+      cueDisplayDurationMs(
+        this.acceleratedUntilDrained,
+        CUE_MINIMUM_DISPLAY_MS,
+        CUE_ACCELERATED_DISPLAY_MS,
+      );
     const elapsed =
       performance.now() -
       this.activeCue.shownAt;
     const remaining =
-      minimumDisplayMs - elapsed;
+      displayDurationMs - elapsed;
 
     if (remaining > 0) {
       if (this.cueAdvanceTimerId === null) {
@@ -1262,7 +1270,11 @@ export class CaptionOverlay {
     if (this.waitingCues.length > 0) {
       this.tryAdvanceCue();
     } else {
-      this.acceleratedUntilDrained = false;
+      this.acceleratedUntilDrained =
+        retainAccelerationUntilDrained(
+          this.acceleratedUntilDrained,
+          this.waitingCues.length,
+        );
       this.scheduleCaptionFade();
     }
   }
@@ -1601,7 +1613,6 @@ export class CaptionOverlay {
     try {
       this.host.showPopover();
     } catch {
-      // Retry after document/fullscreen state settles.
     }
   }
 
@@ -1613,7 +1624,6 @@ export class CaptionOverlay {
     try {
       this.host.hidePopover();
     } catch {
-      // The browser may already have closed it.
     }
   }
 
@@ -2411,8 +2421,6 @@ export function wrapCueText(
       0,
       displayUnits(normalized) / 2,
     );
-  // Both lines must fit the slot: the first line caps the boundary from
-  // above, the second line (total minus first) caps it from below.
   const maximumLineBoundary =
     findMaximumUnitBoundary(
       characters,
@@ -2553,9 +2561,6 @@ function findNaturalTextBoundary(
   let bestDistance =
     Number.POSITIVE_INFINITY;
 
-  // The window keeps both sides within their slot capacity: a boundary past
-  // the limit overflows this segment, one before the minimum overflows the
-  // remainder.
   const maximumBoundary = Math.min(
     maximumBoundaryLimit,
     characters.length - 1,
