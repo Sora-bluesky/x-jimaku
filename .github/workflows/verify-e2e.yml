@@ -1,0 +1,176 @@
+name: verify-e2e
+
+on:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify-e2e:
+    name: verify-e2e
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run build
+
+      - name: Install Chrome
+        run: |
+          npx --yes @puppeteer/browsers install chrome@stable \
+            --path "$HOME/.cache/puppeteer"
+          chrome_path="$(
+            find "$HOME/.cache/puppeteer/chrome" \
+              -type f -name chrome -perm -111 -print -quit
+          )"
+          if [[ -z "$chrome_path" ]]; then
+            echo "Installed Chrome executable was not found." >&2
+            exit 1
+          fi
+          echo "BENCH_CHROME=$chrome_path" >> "$GITHUB_ENV"
+
+      - name: Run bench smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          run_bench() {
+            local attempt="$1"
+            local stdout_log="$RUNNER_TEMP/bench-${attempt}.stdout.log"
+            local stderr_log="$RUNNER_TEMP/bench-${attempt}.stderr.log"
+
+            set +e
+            xvfb-run --auto-servernum npm run bench:smoke \
+              > "$stdout_log" \
+              2> "$stderr_log"
+            BENCH_STATUS=$?
+            set -e
+            cat "$stdout_log"
+            cat "$stderr_log" >&2
+            BENCH_STDERR="$stderr_log"
+          }
+
+          require_result_line() {
+            if ! grep -Fq '[bench] result:' "$BENCH_STDERR"; then
+              echo "Bench exited successfully without a result line." >&2
+              exit 1
+            fi
+          }
+
+          run_bench 1
+
+          if [[ "$BENCH_STATUS" -eq 0 ]]; then
+            require_result_line
+          elif grep -Fq \
+            'Execution context is not available in detached frame or worker' \
+            "$BENCH_STDERR"; then
+            echo "Known detached-frame transient detected; retrying once." >&2
+            run_bench 2
+            if [[ "$BENCH_STATUS" -ne 0 ]]; then
+              exit "$BENCH_STATUS"
+            fi
+            require_result_line
+          else
+            exit "$BENCH_STATUS"
+          fi
+
+      - name: Assert smoke result
+        run: node bench/assert-smoke.mjs
+
+  verify-fail-detection:
+    name: verify-fail-detection
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run build
+
+      - name: Install Chrome
+        run: |
+          npx --yes @puppeteer/browsers install chrome@stable \
+            --path "$HOME/.cache/puppeteer"
+          chrome_path="$(
+            find "$HOME/.cache/puppeteer/chrome" \
+              -type f -name chrome -perm -111 -print -quit
+          )"
+          if [[ -z "$chrome_path" ]]; then
+            echo "Installed Chrome executable was not found." >&2
+            exit 1
+          fi
+          echo "BENCH_CHROME=$chrome_path" >> "$GITHUB_ENV"
+
+      - name: Intentionally break built extension
+        run: echo "// intentionally broken by verify-fail-detection" > dist/content.js
+
+      - name: Verify fail detection
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          before_results="$RUNNER_TEMP/verify-fail-detection-before.txt"
+          after_results="$RUNNER_TEMP/verify-fail-detection-after.txt"
+          new_results="$RUNNER_TEMP/verify-fail-detection-new.txt"
+          stdout_log="$RUNNER_TEMP/verify-fail-detection.stdout.log"
+          stderr_log="$RUNNER_TEMP/verify-fail-detection.stderr.log"
+
+          list_results() {
+            if [[ -d bench/results ]]; then
+              find bench/results -type f -name '*.json' -printf '%P\n' |
+                LC_ALL=C sort
+            fi
+          }
+
+          list_results > "$before_results"
+
+          set +e
+          xvfb-run --auto-servernum npm run bench:smoke \
+            > "$stdout_log" \
+            2> "$stderr_log"
+          bench_status=$?
+          set -e
+
+          cat "$stdout_log"
+          cat "$stderr_log" >&2
+
+          list_results > "$after_results"
+          comm -13 "$before_results" "$after_results" > "$new_results"
+
+          fail_open_detected=false
+          if [[ "$bench_status" -eq 0 ]]; then
+            fail_open_detected=true
+          fi
+          if grep -Fq '[bench] result:' "$stderr_log"; then
+            fail_open_detected=true
+          fi
+          if [[ -s "$new_results" ]]; then
+            fail_open_detected=true
+          fi
+
+          if [[ "$fail_open_detected" == true ]]; then
+            echo "verify-fail-detection: fail-open detected" >> "$GITHUB_STEP_SUMMARY"
+            echo "FAIL-OPEN DETECTED: broken extension passed verification" >&2
+            exit 1
+          fi
+
+          echo "verify-fail-detection: fail-open not detected" >> "$GITHUB_STEP_SUMMARY"
