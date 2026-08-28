@@ -56,6 +56,9 @@ import {
   type CaptureStateError,
   type CaptureStatus,
 } from "../shared/state";
+import {
+  createCaptionReplay,
+} from "./caption-replay";
 
 const OFFSCREEN_DOCUMENT_PATH =
   "offscreen.html";
@@ -1718,6 +1721,10 @@ function handleContentResumeAcknowledgement(
         message.requestId;
     }
 
+    replayCapturedLinesToContent(
+      tabId,
+      message.requestId,
+    );
     postFlushRecognitionToOffscreen(
       message.requestId,
     );
@@ -1744,6 +1751,10 @@ function handleContentResumeAcknowledgement(
         message.requestId;
     }
 
+    replayCapturedLinesToContent(
+      tabId,
+      message.requestId,
+    );
     postFlushRecognitionToOffscreen(
       message.requestId,
     );
@@ -3075,6 +3086,26 @@ function postStopToOffscreen(
       "could not send stop to offscreen",
       error,
     );
+  }
+}
+
+function replayCapturedLinesToContent(
+  tabId: number,
+  requestId: string,
+): void {
+  const port = contentPorts.get(tabId);
+
+  if (port === undefined) {
+    return;
+  }
+
+  const messages = createCaptionReplay(
+    [...recognitionLines.values()],
+    requestId,
+  );
+
+  for (const message of messages) {
+    postCaption(port, message);
   }
 }
 
