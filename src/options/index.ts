@@ -21,11 +21,15 @@ import {
   readSettings,
   SETTINGS_STORAGE_KEY,
   writeSettings,
+  type WhisperModel,
 } from "../shared/settings";
 import type {
   CaptureState,
   CaptureStatus,
 } from "../shared/state";
+import {
+  recommendModel,
+} from "./model-recommendation";
 
 interface GpuLike {
   requestAdapter(): Promise<GpuAdapterLike | null>;
@@ -124,6 +128,10 @@ const modelSelect =
   requireElement<HTMLSelectElement>(
     "model-select",
   );
+const modelRecommendationElement =
+  requireElement<HTMLElement>(
+    "model-recommendation",
+  );
 const sourceLanguageSelect =
   requireElement<HTMLSelectElement>(
     "source-language-select",
@@ -200,6 +208,10 @@ let renderedCaptureRequestId:
 let currentCaptureRequestId:
   | string
   | null = null;
+let modelRecommendation:
+  | WhisperModel
+  | null = null;
+let settingsInitialized = false;
 
 console.log(
   "[options]",
@@ -243,6 +255,14 @@ void optionsWebGpuPromise.then((result) => {
     result,
   );
   renderWebGpu(result);
+
+  modelRecommendation = recommendModel(
+    result.adapterInfo,
+    result.adapterAvailable
+      ? "webgpu"
+      : "wasm",
+  );
+  renderModelRecommendation();
 });
 
 runDiagnosticsButton.addEventListener(
@@ -270,6 +290,13 @@ prepareTranslationButton.addEventListener(
   "click",
   () => {
     prepareTranslationModel();
+  },
+);
+
+modelSelect.addEventListener(
+  "change",
+  () => {
+    renderModelRecommendation();
   },
 );
 
@@ -468,6 +495,23 @@ function applySettingsToControls(
     settings.showOriginal;
   showTentativeInput.checked =
     settings.showTentative;
+  settingsInitialized = true;
+  renderModelRecommendation();
+}
+
+function renderModelRecommendation(): void {
+  const visible =
+    settingsInitialized &&
+    modelRecommendation !== null &&
+    modelSelect.value !==
+      modelRecommendation;
+
+  modelRecommendationElement.hidden =
+    !visible;
+  modelRecommendationElement.textContent =
+    visible
+      ? `この環境では ${modelRecommendation} を推奨`
+      : "";
 }
 
 async function saveSelectedSettings(): Promise<void> {

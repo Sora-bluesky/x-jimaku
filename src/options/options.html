@@ -216,6 +216,12 @@
         margin-block-start: 18px;
       }
 
+      .settings-control {
+        display: flex;
+        flex-direction: column;
+        align-items: flex-start;
+      }
+
       .checkbox-label {
         display: inline-flex;
         align-items: center;
@@ -398,12 +404,21 @@
           <label for="model-select">
             次回使用するモデル
           </label>
-          <select id="model-select">
-            <option value="tiny">tiny</option>
-            <option value="base">base</option>
-            <option value="small">small</option>
-            <option value="turbo">turbo</option>
-          </select>
+          <div class="settings-control">
+            <select id="model-select">
+              <option value="tiny">tiny</option>
+              <option value="base">base</option>
+              <option value="small">small</option>
+              <option value="turbo">turbo</option>
+            </select>
+            <p
+              id="model-recommendation"
+              class="settings-help"
+              role="status"
+              aria-live="polite"
+              hidden
+            ></p>
+          </div>
         </div>
 
         <div class="settings-row">
