@@ -136,8 +136,6 @@ jobs:
           before_results="$RUNNER_TEMP/verify-fail-detection-before.txt"
           after_results="$RUNNER_TEMP/verify-fail-detection-after.txt"
           new_results="$RUNNER_TEMP/verify-fail-detection-new.txt"
-          combined_log="$RUNNER_TEMP/verify-fail-detection.log"
-
           list_results() {
             if [[ -d bench/results ]]; then
               find bench/results -type f -name '*.json' -printf '%P\n' |
@@ -145,15 +143,31 @@ jobs:
             fi
           }
 
+          run_negative_bench() {
+            local attempt="$1"
+            combined_log="$RUNNER_TEMP/verify-fail-detection-${attempt}.log"
+            set +e
+            xvfb-run --auto-servernum npm run bench:smoke \
+              > "$combined_log" 2>&1
+            bench_status=$?
+            set -e
+            cat "$combined_log"
+          }
+
           list_results > "$before_results"
 
-          set +e
-          xvfb-run --auto-servernum npm run bench:smoke \
-            > "$combined_log" 2>&1
-          bench_status=$?
-          set -e
+          run_negative_bench 1
 
-          cat "$combined_log"
+          # The negative test gets the same one-shot retry on the known
+          # SW-detach transient as the positive job, so an infra flake
+          # cannot masquerade as a successful fail-detection.
+          if [[ "$bench_status" -ne 0 ]] \
+            && grep -Fq \
+              'Execution context is not available in detached frame or worker' \
+              "$combined_log"; then
+            echo "Known detached-frame transient detected; retrying once." >&2
+            run_negative_bench 2
+          fi
 
           list_results > "$after_results"
           comm -13 "$before_results" "$after_results" > "$new_results"
@@ -172,6 +186,19 @@ jobs:
           if [[ "$fail_open_detected" == true ]]; then
             echo "verify-fail-detection: fail-open detected" >> "$GITHUB_STEP_SUMMARY"
             echo "FAIL-OPEN DETECTED: broken extension passed verification" >&2
+            exit 1
+          fi
+
+          # The failure must be the one this test provokes. A generic infra
+          # failure (Chrome launch, npm, model download) also exits non-zero
+          # but proves nothing about fail detection, so require the signature
+          # specific to a missing content script (observed live in run
+          # 33138458295): the capture stage was reached and Chrome reported
+          # the extension could not access the page.
+          if ! grep -Fq 'Capture did not reach' "$combined_log" \
+            || ! grep -Fq 'Cannot access contents of the page' "$combined_log"; then
+            echo "verify-fail-detection: path not exercised" >> "$GITHUB_STEP_SUMMARY"
+            echo "FAIL-DETECTION PATH NOT EXERCISED: bench failed without the broken-content-script signature." >&2
             exit 1
           fi
 
