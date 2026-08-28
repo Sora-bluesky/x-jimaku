@@ -930,6 +930,14 @@ export class TranslationEngine {
                 TRANSLATION_SYSTEM_PROMPT,
             },
           ],
+          expectedOutputs: [
+            {
+              type: "text",
+              languages: [
+                TRANSLATOR_OPTIONS.targetLanguage,
+              ],
+            },
+          ],
         });
 
       if (this.destroyed) {

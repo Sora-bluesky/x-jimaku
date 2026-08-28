@@ -61,8 +61,14 @@ declare global {
     content: string;
   }
 
+  interface LanguageModelExpected {
+    type: "text";
+    languages?: readonly string[];
+  }
+
   interface LanguageModelCreateOptions {
     initialPrompts?: readonly LanguageModelPrompt[];
+    expectedOutputs?: readonly LanguageModelExpected[];
   }
 
   interface LanguageModelSessionOperationOptions {
