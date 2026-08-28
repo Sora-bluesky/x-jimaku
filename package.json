@@ -10,6 +10,7 @@
     "build": "vite build && vite build -c vite.config.iife.ts",
     "dev": "concurrently \"vite build --watch\" \"vite build -c vite.config.iife.ts --watch\"",
     "typecheck": "tsc --noEmit",
+    "test": "vitest run",
     "bench:smoke": "node bench/run-bench.mjs --case tts --model tiny --duration 30",
     "bench:quality": "node bench/run-bench.mjs --case tts --model base --duration 90"
   },
@@ -26,10 +27,11 @@
   "devDependencies": {
     "@types/chrome": "^0.2.7",
     "concurrently": "^10.0.5",
-    "puppeteer-core": "24.10.0",
+    "puppeteer-core": "^24.10.0",
     "typescript": "^7.0.2",
     "vite": "^8.2.2",
-    "vite-plugin-static-copy": "^4.1.1"
+    "vite-plugin-static-copy": "^4.1.1",
+    "vitest": "^4.0.18"
   },
   "dependencies": {
     "@huggingface/transformers": "^4.2.0"

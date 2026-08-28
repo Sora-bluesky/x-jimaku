@@ -16,6 +16,24 @@ import type {
 env.allowLocalModels = false;
 env.useBrowserCache = true;
 
+type OnnxWebGpuEnvironment = {
+  powerPreference?: GPUPowerPreference;
+};
+
+if (
+  navigator.userAgent.includes("Windows")
+) {
+  const webGpuEnvironment =
+    env.backends?.onnx?.webgpu as
+      | OnnxWebGpuEnvironment
+      | undefined;
+
+  if (webGpuEnvironment !== undefined) {
+    webGpuEnvironment.powerPreference =
+      undefined;
+  }
+}
+
 const INITIALIZATION_PROGRESS_CEILING = 99;
 
 const MODELS = {
@@ -83,13 +101,18 @@ interface WhisperAsr {
 interface WorkerScope {
   addEventListener(
     type: "message",
-    listener: (event: MessageEvent<unknown>) => void,
+    listener: (
+      event: MessageEvent<unknown>,
+    ) => void,
   ): void;
-  postMessage(message: WhisperWorkerOutputMessage): void;
+  postMessage(
+    message: WhisperWorkerOutputMessage,
+  ): void;
 }
 
 interface GpuLike {
-  requestAdapter?(): Promise<unknown | null>;
+  requestAdapter?():
+    Promise<unknown | null>;
 }
 
 interface RawProgress {
@@ -118,9 +141,13 @@ const workerScope =
   globalThis as unknown as WorkerScope;
 
 let asr: WhisperAsr | null = null;
-let initializedDevice: WhisperDevice | null = null;
+let initializedDevice:
+  | WhisperDevice
+  | null = null;
 let forcedEnglish = true;
-let initializationPromise: Promise<void> | null = null;
+let initializationPromise:
+  | Promise<void>
+  | null = null;
 
 console.log("[whisper]", "worker ready");
 
@@ -255,7 +282,10 @@ async function resolveInitializationDevice(
     const adapter =
       await gpu?.requestAdapter?.();
 
-    if (adapter === null || adapter === undefined) {
+    if (
+      adapter === null ||
+      adapter === undefined
+    ) {
       console.log(
         "[whisper]",
         "WebGPU adapter unavailable; using WASM",
@@ -275,7 +305,8 @@ async function resolveInitializationDevice(
 }
 
 async function createPipeline(
-  configuration: (typeof MODELS)[WhisperModel],
+  configuration:
+    (typeof MODELS)[WhisperModel],
   device: WhisperDevice,
 ): Promise<WhisperAsr> {
   const progressAggregator =
@@ -287,9 +318,13 @@ async function createPipeline(
     {
       device,
       dtype: configuration.dtype,
-      progress_callback(progress: unknown) {
+      progress_callback(
+        progress: unknown,
+      ) {
         postProgress(
-          progressAggregator.update(progress),
+          progressAggregator.update(
+            progress,
+          ),
         );
       },
     },
@@ -302,7 +337,10 @@ async function transcribe(
   requestId: string,
   audio: Float32Array,
 ): Promise<void> {
-  if (asr === null || initializedDevice === null) {
+  if (
+    asr === null ||
+    initializedDevice === null
+  ) {
     postError(
       "Whisper is not initialized",
       false,
@@ -344,9 +382,14 @@ async function transcribe(
 
 class ModelDownloadProgressAggregator {
   private readonly files =
-    new Map<string, FileProgressState>();
+    new Map<
+      string,
+      FileProgressState
+    >();
 
-  update(value: unknown): AggregatedProgress {
+  update(
+    value: unknown,
+  ): AggregatedProgress {
     const raw = isRecord(value)
       ? value as RawProgress
       : {};
@@ -383,8 +426,10 @@ class ModelDownloadProgressAggregator {
     }
 
     if (this.files.size === 0) {
-      const standaloneLoaded = loaded ?? 0;
-      const standaloneTotal = total ?? 0;
+      const standaloneLoaded =
+        loaded ?? 0;
+      const standaloneTotal =
+        total ?? 0;
       const standaloneProgress =
         standaloneTotal > 0
           ? standaloneLoaded /
@@ -434,7 +479,8 @@ class ModelDownloadProgressAggregator {
     const aggregateFraction =
       allTotalsKnown &&
       aggregateTotal > 0
-        ? aggregateLoaded / aggregateTotal
+        ? aggregateLoaded /
+          aggregateTotal
         : states.reduce(
             (sum, state) =>
               sum + state.fraction,
@@ -459,7 +505,9 @@ class ModelDownloadProgressAggregator {
     file: string,
     loaded: number | undefined,
     total: number | undefined,
-    reportedProgress: number | undefined,
+    reportedProgress:
+      | number
+      | undefined,
     completed: boolean,
   ): void {
     const previous =
@@ -471,7 +519,8 @@ class ModelDownloadProgressAggregator {
       };
 
     const nextTotal =
-      total !== undefined && total > 0
+      total !== undefined &&
+      total > 0
         ? Math.max(
             previous.total,
             total,
@@ -535,13 +584,14 @@ class ModelDownloadProgressAggregator {
 function postProgress(
   value: AggregatedProgress,
 ): void {
-  const message: WhisperProgressMessage = {
-    t: "WHISPER_PROGRESS",
-    file: value.file,
-    progress: value.progress,
-    loaded: value.loaded,
-    total: value.total,
-  };
+  const message:
+    WhisperProgressMessage = {
+      t: "WHISPER_PROGRESS",
+      file: value.file,
+      progress: value.progress,
+      loaded: value.loaded,
+      total: value.total,
+    };
 
   workerScope.postMessage(message);
 }
@@ -600,7 +650,10 @@ function finiteNonNegativeOrUndefined(
 function clampPercentage(
   value: number,
 ): number {
-  return Math.max(0, Math.min(100, value));
+  return Math.max(
+    0,
+    Math.min(100, value),
+  );
 }
 
 function isCompletionStatus(
@@ -615,5 +668,8 @@ function isCompletionStatus(
 function isRecord(
   value: unknown,
 ): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
+  return (
+    typeof value === "object" &&
+    value !== null
+  );
 }

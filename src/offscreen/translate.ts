@@ -452,7 +452,7 @@ export class TranslationEngine {
         context.properNouns,
       )
     ) {
-      console.warn(
+      console.info(
         "[translate]",
         "LanguageModel returned an invalid translation; using line rescue",
         {

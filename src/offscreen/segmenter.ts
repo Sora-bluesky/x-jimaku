@@ -574,7 +574,7 @@ export class WhisperSegmenter {
         segment.endOffset,
       )
     ) {
-      console.warn(
+      console.info(
         "[seg]",
         "discarded repetition growth without corresponding audio growth",
         {
@@ -676,7 +676,7 @@ export class WhisperSegmenter {
         segment.endOffset,
       )
     ) {
-      console.warn(
+      console.info(
         "[seg]",
         "discarded repetition growth during end-of-stream flush",
         {

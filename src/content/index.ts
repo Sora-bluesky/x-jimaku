@@ -34,6 +34,12 @@ import {
 import {
   CaptionOverlay,
 } from "./overlay";
+import {
+  resolveSilentInputHint,
+  type SilentHintTapState,
+  type SilentHintVideoState,
+  type SilentInputHintVariant,
+} from "./silent-hint";
 
 type TranslatorScope = typeof globalThis & {
   Translator?: TranslatorFactory;
@@ -150,6 +156,12 @@ let reconnectTimerId: number | null = null;
 let reconnectDelayMs =
   INITIAL_RECONNECT_DELAY_MS;
 let activeTap: AudioTap | null = null;
+let activeTapLifecycleState:
+  | "missing"
+  | "starting"
+  | "running"
+  | "stopping"
+  | "closed" = "missing";
 let endedAudioTapTarget:
   | HTMLVideoElement
   | null = null;
@@ -194,7 +206,7 @@ let lastCaptureStatus: CaptureStatus =
 let activeTranslationPath:
   | TranslationPath
   | null = null;
-let activeSilentInputHint = false;
+let activeSilentInputShowHint = false;
 let activeShowOriginal =
   DEFAULT_SETTINGS.showOriginal;
 let playbackEventTarget:
@@ -229,6 +241,11 @@ function initializeContentScript(): void {
   });
 
   installTargetPlaybackListeners();
+
+  document.addEventListener(
+    "visibilitychange",
+    handleVisibilityChange,
+  );
 
   if (location.origin === DEV_ORIGIN) {
     window.addEventListener(
@@ -348,6 +365,11 @@ function installTargetPlaybackListeners():
     handleTargetPlaybackEvent,
     true,
   );
+  document.addEventListener(
+    "ended",
+    handleTargetPlaybackEvent,
+    true,
+  );
 }
 
 function handleTargetPlaybackEvent(
@@ -377,6 +399,11 @@ function handleTargetPlaybackEvent(
     return;
   }
 
+  if (event.type === "ended") {
+    refreshSilentInputHint();
+    return;
+  }
+
   if (
     event.type === "playing" &&
     activeTap?.getRequestId() ===
@@ -390,6 +417,7 @@ function handleTargetPlaybackEvent(
   captionOverlay?.setPlaybackPaused(
     targetPlaybackPaused,
   );
+  refreshSilentInputHint();
 
   if (
     (
@@ -407,6 +435,10 @@ function handleTargetPlaybackEvent(
       startTap(requestId),
     );
   }
+}
+
+function handleVisibilityChange(): void {
+  refreshSilentInputHint();
 }
 
 function syncOverlayPlaybackGate(
@@ -550,10 +582,10 @@ function connectBackgroundPort(): void {
             return;
           }
 
-          activeSilentInputHint =
+          activeSilentInputShowHint =
             message.showHint;
-          ensureOverlay().setSilentInputHint(
-            message.showHint,
+          refreshSilentInputHint(
+            ensureOverlay(),
           );
           return;
         }
@@ -635,7 +667,7 @@ function connectBackgroundPort(): void {
       lastCaptureStatus = "idle";
       activeCaptureRequestId = null;
       activeTranslationPath = null;
-      activeSilentInputHint = false;
+      activeSilentInputShowHint = false;
       endedAudioTapTarget = null;
       lastEosRequestId = null;
       activeShowOriginal =
@@ -652,7 +684,7 @@ function connectBackgroundPort(): void {
           return;
         }
 
-        activeTap = null;
+        beginActiveTapTeardown(tap);
 
         try {
           await tap.stop();
@@ -662,6 +694,8 @@ function connectBackgroundPort(): void {
             "tap cleanup after background disconnect failed",
             error,
           );
+        } finally {
+          clearActiveTap(tap);
         }
       });
 
@@ -723,9 +757,7 @@ function handleStartTapMessage(
     overlay.setTranslationPath(
       activeTranslationPath,
     );
-    overlay.setSilentInputHint(
-      activeSilentInputHint,
-    );
+    refreshSilentInputHint(overlay);
     overlay.setStatus("loadingModel");
 
     postTapState(
@@ -757,7 +789,7 @@ function handleStartTapMessage(
 
   if (!preservePresentation) {
     activeTranslationPath = null;
-    activeSilentInputHint = false;
+    activeSilentInputShowHint = false;
   }
 
   lastCaptureStatus = "starting";
@@ -768,9 +800,7 @@ function handleStartTapMessage(
   overlay.setTranslationPath(
     activeTranslationPath,
   );
-  overlay.setSilentInputHint(
-    activeSilentInputHint,
-  );
+  refreshSilentInputHint(overlay);
   overlay.setStatus("loadingModel");
 
   void enqueueTapOperation(() =>
@@ -1251,7 +1281,40 @@ async function startTap(
           "tapping",
           detail,
         );
+
+        if (
+          detail ===
+          "audio-context-running"
+        ) {
+          refreshSilentInputHint();
+        }
       }
+    },
+
+    onContextStateChange(state) {
+      if (activeTap !== tap) {
+        return;
+      }
+
+      if (state === "closed") {
+        activeTapLifecycleState =
+          "closed";
+      }
+
+      refreshSilentInputHint();
+    },
+
+    onTargetChanged(target) {
+      if (activeTap !== tap) {
+        return;
+      }
+
+      if (target === null) {
+        beginActiveTapTeardown(tap);
+        return;
+      }
+
+      refreshSilentInputHint();
     },
 
     onMediaEnded() {
@@ -1263,15 +1326,12 @@ async function startTap(
     },
 
     onStopped(detail, target) {
-      if (activeTap === tap) {
-        activeTap = null;
-      }
-
       if (detail === "track-ended") {
         endedAudioTapTarget =
           target?.isConnected === true
             ? target
             : null;
+        clearActiveTap(tap);
         postEndOfStream(requestId);
         return;
       }
@@ -1291,7 +1351,8 @@ async function startTap(
       lastCaptureStatus = "stopping";
       activeCaptureRequestId = null;
       activeTranslationPath = null;
-      activeSilentInputHint = false;
+      activeSilentInputShowHint = false;
+      clearActiveTap(tap);
       destroyOverlay();
 
       postTapState(
@@ -1302,10 +1363,6 @@ async function startTap(
     },
 
     onError(error) {
-      if (activeTap === tap) {
-        activeTap = null;
-      }
-
       endedAudioTapTarget = null;
       lastEosRequestId = null;
       clearPendingContextTerms(requestId);
@@ -1320,7 +1377,8 @@ async function startTap(
 
       activeCaptureRequestId = null;
       activeTranslationPath = null;
-      activeSilentInputHint = false;
+      activeSilentInputShowHint = false;
+      clearActiveTap(tap);
       showOverlayError();
 
       postTapState(
@@ -1332,14 +1390,20 @@ async function startTap(
   });
 
   activeTap = tap;
+  activeTapLifecycleState = "starting";
+  refreshSilentInputHint();
 
   try {
     const detail = await tap.start();
 
     if (activeTap !== tap) {
       await tap.stop();
+      refreshSilentInputHint();
       return;
     }
+
+    activeTapLifecycleState = "running";
+    refreshSilentInputHint();
 
     postTapState(
       requestId,
@@ -1347,10 +1411,6 @@ async function startTap(
       detail,
     );
   } catch (error) {
-    if (activeTap === tap) {
-      activeTap = null;
-    }
-
     endedAudioTapTarget = null;
     lastEosRequestId = null;
     clearPendingContextTerms(requestId);
@@ -1364,7 +1424,8 @@ async function startTap(
 
     activeCaptureRequestId = null;
     activeTranslationPath = null;
-    activeSilentInputHint = false;
+    activeSilentInputShowHint = false;
+    clearActiveTap(tap);
     showOverlayError();
 
     postTapState(
@@ -1397,10 +1458,11 @@ async function stopTap(
     return;
   }
 
-  activeTap = null;
+  beginActiveTapTeardown(tap);
 
   try {
     await tap.stop();
+    clearActiveTap(tap);
 
     postTapState(
       requestId,
@@ -1408,6 +1470,7 @@ async function stopTap(
       detail,
     );
   } catch (error) {
+    clearActiveTap(tap);
     showOverlayError();
 
     postTapState(
@@ -1416,6 +1479,35 @@ async function stopTap(
       getAudioTapErrorDetail(error),
     );
   }
+}
+
+function beginActiveTapTeardown(
+  tap: AudioTap,
+): void {
+  if (activeTap !== tap) {
+    return;
+  }
+
+  if (activeTapLifecycleState !== "closed") {
+    activeTapLifecycleState = "stopping";
+  }
+
+  refreshSilentInputHint();
+}
+
+function clearActiveTap(
+  tap: AudioTap,
+): void {
+  if (activeTap !== tap) {
+    return;
+  }
+
+  activeTapLifecycleState = "closed";
+  refreshSilentInputHint();
+
+  activeTap = null;
+  activeTapLifecycleState = "missing";
+  refreshSilentInputHint();
 }
 
 function handleCaptureState(
@@ -1434,14 +1526,12 @@ function handleCaptureState(
       activeCaptureRequestId =
         state.requestId;
       activeTranslationPath = null;
-      activeSilentInputHint = false;
+      activeSilentInputShowHint = false;
 
       captionOverlay?.setTranslationPath(
         null,
       );
-      captionOverlay?.setSilentInputHint(
-        false,
-      );
+      refreshSilentInputHint();
     }
   }
 
@@ -1449,10 +1539,10 @@ function handleCaptureState(
 
   switch (state.status) {
     case "starting":
-      activeSilentInputHint = false;
+      activeSilentInputShowHint = false;
       cancelOverlayDestroy();
-      ensureOverlay().setSilentInputHint(
-        false,
+      refreshSilentInputHint(
+        ensureOverlay(),
       );
       ensureOverlay().setStatus(
         "loadingModel",
@@ -1460,10 +1550,10 @@ function handleCaptureState(
       return;
 
     case "loadingModel":
-      activeSilentInputHint = false;
+      activeSilentInputShowHint = false;
       cancelOverlayDestroy();
-      ensureOverlay().setSilentInputHint(
-        false,
+      refreshSilentInputHint(
+        ensureOverlay(),
       );
       ensureOverlay().setStatus(
         "loadingModel",
@@ -1473,8 +1563,8 @@ function handleCaptureState(
 
     case "running":
       cancelOverlayDestroy();
-      ensureOverlay().setSilentInputHint(
-        activeSilentInputHint,
+      refreshSilentInputHint(
+        ensureOverlay(),
       );
       ensureOverlay().setStatus("running");
       return;
@@ -1484,7 +1574,7 @@ function handleCaptureState(
       activeTranslationPath = null;
       endedAudioTapTarget = null;
       lastEosRequestId = null;
-      activeSilentInputHint = false;
+      activeSilentInputShowHint = false;
       contentSessionRequestId = null;
       clearPendingContextTerms();
       resetContentTranslator();
@@ -1497,7 +1587,7 @@ function handleCaptureState(
       activeTranslationPath = null;
       endedAudioTapTarget = null;
       lastEosRequestId = null;
-      activeSilentInputHint = false;
+      activeSilentInputShowHint = false;
       contentSessionRequestId = null;
       clearPendingContextTerms();
       resetContentTranslator();
@@ -1564,26 +1654,108 @@ function ensureOverlay(): CaptionOverlay {
   overlay.setTranslationPath(
     activeTranslationPath,
   );
-  overlay.setSilentInputHint(
-    activeSilentInputHint,
-  );
   captionOverlay = overlay;
+  refreshSilentInputHint(overlay);
   syncOverlayPlaybackGate(overlay);
   return overlay;
+}
+
+function refreshSilentInputHint(
+  overlay: CaptionOverlay | null =
+    captionOverlay,
+): void {
+  if (overlay === null) {
+    return;
+  }
+
+  overlay.setSilentInputHint(
+    resolveCurrentSilentInputHint(),
+  );
+}
+
+function resolveCurrentSilentInputHint():
+  | SilentInputHintVariant
+  | null {
+  return resolveSilentInputHint({
+    showHint:
+      lastCaptureStatus === "running" &&
+      activeSilentInputShowHint,
+    visible:
+      document.visibilityState ===
+      "visible",
+    tap: getSilentHintTapState(),
+    video: getSilentHintVideoState(),
+  });
+}
+
+function getSilentHintTapState():
+  SilentHintTapState {
+  const tap = activeTap;
+  const expectedRequestId =
+    contentSessionRequestId ??
+    activeCaptureRequestId;
+
+  if (
+    tap === null ||
+    expectedRequestId === null ||
+    tap.getRequestId() !==
+      expectedRequestId
+  ) {
+    return "missing";
+  }
+
+  if (
+    activeTapLifecycleState ===
+      "starting" ||
+    activeTapLifecycleState ===
+      "stopping" ||
+    activeTapLifecycleState ===
+      "closed"
+  ) {
+    return activeTapLifecycleState;
+  }
+
+  return tap.isSuspended()
+    ? "suspended"
+    : "running";
+}
+
+function getSilentHintVideoState():
+  SilentHintVideoState {
+  const video =
+    getCurrentAudioTapTarget() ??
+    endedAudioTapTarget;
+
+  if (
+    video === null ||
+    !video.isConnected
+  ) {
+    return "missing";
+  }
+
+  if (video.ended) {
+    return "ended";
+  }
+
+  if (video.paused) {
+    return "paused";
+  }
+
+  return "playing";
 }
 
 function showOverlayError(
   progress?: number,
 ): void {
   lastCaptureStatus = "error";
-  activeSilentInputHint = false;
+  activeSilentInputShowHint = false;
   cancelOverlayDestroy();
   clearTargetPlaybackFreeze();
 
   const overlay = ensureOverlay();
   overlay.clear();
   overlay.setTranslationPath(null);
-  overlay.setSilentInputHint(false);
+  refreshSilentInputHint(overlay);
   overlay.setStatus("error", progress);
 
   overlayDestroyTimerId =
