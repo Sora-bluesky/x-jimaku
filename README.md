@@ -60,6 +60,10 @@ Audio and recognized text never leave your device. Whisper speech recognition ru
 
 For fast-talking videos, lowering the X player's playback speed (e.g. to 0.75x) gives the pipeline more time to keep up, so captions fall behind less.
 
+## Troubleshooting
+
+- Captions stop or the extension reports no audio (「音声がありません」) after you leave a muted x.com tab: Chrome suspends muted videos in background tabs to save power, so the extension receives silence. Keep the x.com tab in the foreground while captioning.
+
 ## Limitations
 
 - Speech recognition targets English only. Setting the speech language to "auto" will still show the original (non-Japanese) text for non-English audio.
