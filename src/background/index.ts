@@ -580,17 +580,6 @@ async function hydrateCaptureState(): Promise<void> {
         storedUnhandledError,
       );
 
-      if (
-        isLastUnhandledErrorRecord(
-          storedUnhandledError,
-        ) &&
-        storedUnhandledError.context ===
-          "offscreen"
-      ) {
-        offscreenUnhandledErrorRecorded =
-          true;
-      }
-
       try {
         await chrome.storage.session.remove(
           LAST_UNHANDLED_ERROR_STORAGE_KEY,
@@ -1196,7 +1185,8 @@ function relayContentPcm(
   ) {
     if (
       captureState.status !== "stopping" &&
-      captureState.status !== "idle"
+      captureState.status !== "idle" &&
+      captureState.status !== "error"
     ) {
       incrementPcmRelayDrop(
         "captureStateMismatch",
@@ -1851,6 +1841,7 @@ function failActiveCaptureUnexpectedly(
   recognitionLines.clear();
   resetSilentInputTracking();
   broadcastLevel();
+  flushPcmRelayDropCounts();
 
   moveCaptureState("error", {
     ...(requestId === undefined
@@ -3019,33 +3010,6 @@ function isPersistedCaptureSession(
     Number.isSafeInteger(record.tabId) &&
     record.tabId >= 0 &&
     isSettings(record.settings)
-  );
-}
-
-function isLastUnhandledErrorRecord(
-  value: unknown,
-): value is LastUnhandledErrorRecord {
-  if (
-    typeof value !== "object" ||
-    value === null
-  ) {
-    return false;
-  }
-
-  const record =
-    value as Record<string, unknown>;
-
-  return (
-    typeof record.at === "string" &&
-    (
-      record.context === "background" ||
-      record.context === "offscreen"
-    ) &&
-    typeof record.message === "string" &&
-    (
-      record.stack === undefined ||
-      typeof record.stack === "string"
-    )
   );
 }
 

@@ -752,6 +752,9 @@ async function handleCaptureStart(
     expectedPcmSequence = 0;
     lastPcmGapLogAt =
       Number.NEGATIVE_INFINITY;
+    rejectedPcmChunkCount = 0;
+    lastRejectedPcmLogAt =
+      Number.NEGATIVE_INFINITY;
 
     await audioCapture.start(
       requestId,
