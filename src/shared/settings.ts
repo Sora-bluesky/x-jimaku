@@ -44,7 +44,7 @@ export interface Settings {
 export const DEFAULT_SETTINGS: Readonly<Settings> = {
   model: "base",
   sourceLang: "en",
-  translationBackend: "auto",
+  translationBackend: "prompt-api",
   showOriginal: false,
   showTentative: false,
 };

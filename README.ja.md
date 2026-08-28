@@ -17,12 +17,12 @@ X (x.com) の動画にリアルタイム日本語字幕を重ねる Chrome 拡�
 
 ## 仕組み
 
-content script が対象の `<video>` 要素の音声を `captureStream()` で直接タップし、16kHz PCM にリサンプルして offscreen document 内の Whisper（transformers.js 経由）へ送る。WebGPU が使える環境ではそちらで、使えない環境では WASM に自動フォールバックしてローカルで英語音声認識を行う。認識したテキストは Chrome 内蔵の Translator API で英語から日本語へ翻訳する（これも端末内処理）。結果は動画下部の高さ固定の字幕バーに表示される。既定では日本語のみで、オプションページの設定で英語原文の小さい行を併記できる。確定していない暫定行は、音声が増えるごとに約2秒おきに再翻訳される。
+content script が対象の `<video>` 要素の音声を `captureStream()` で直接タップし、16kHz PCM にリサンプルして offscreen document 内の Whisper（transformers.js 経由）へ送る。WebGPU が使える環境ではそちらで、使えない環境では WASM に自動フォールバックしてローカルで英語音声認識を行う。認識したテキストは端末内で英語から日本語へ翻訳する。既定は Chrome 内蔵の Gemini Nano（Prompt API）で、直前の行と画面上の固有名詞を文脈として渡す。モデルが使えない環境では Chrome 内蔵の Translator API に自動で切り替わる。結果は動画下部の高さ固定の字幕バーに表示される。既定では日本語のみで、オプションページの設定で英語原文の小さい行を併記できる。翻訳は認識が確定した節から順に行われる。
 
 ```
 video要素 --captureStream()--> 16kHz PCM
    --> offscreen document: Whisper (transformers.js, WebGPU/WASM) --> 英語テキスト
-   --> Chrome Translator API（en → ja・端末内処理） --> 日本語テキスト
+   --> Chrome 内蔵 AI（Gemini Nano prompt・不可時は Translator API） --> 日本語テキスト
    --> 動画下部の字幕オーバーレイ
 ```
 
@@ -48,13 +48,13 @@ Chrome ウェブストア未公開のため、GitHub Release から導入する�
 
 ## プライバシー
 
-音声・テキストとも外部へ送信されない。Whisper による音声認識は offscreen document 内でローカル実行し（モデルは初回のみ Hugging Face から取得しキャッシュ）、翻訳には Chrome 内蔵の端末内翻訳モデルを使う。サーバー側コンポーネントやテレメトリは存在しない。
+音声・テキストとも外部へ送信されない。Whisper による音声認識は offscreen document 内でローカル実行し（モデルは初回のみ Hugging Face から取得しキャッシュ）、翻訳には Chrome 内蔵の端末内モデル（既定 Gemini Nano・不可時は Translator モデル）を使う。サーバー側コンポーネントやテレメトリは存在しない。
 
 ## 動作要件
 
 - Chrome 138 以降（Translator API の要件）
 - WebGPU 推奨（NVIDIA GPU 等）。実用的な速度に必要。WebGPU がない場合は WASM にフォールバックするが、体感できる程度遅くなる
-- 翻訳の事前準備は通常不要（Chrome が言語パックを自動取得する）。翻訳が表示されない場合はオプションページの診断を確認する
+- 翻訳の事前準備は通常不要。端末内の Gemini Nano が使えない環境では Translator API に切り替わり、Chrome が言語パックを自動取得する。翻訳が表示されない場合はオプションページの診断を確認する
 
 ## Tips
 

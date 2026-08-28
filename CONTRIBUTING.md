@@ -26,7 +26,7 @@ Load the `dist/` directory via `chrome://extensions` → Developer mode → "Loa
 - Keep accuracy claims tied to bench numbers, not impressions.
 - Don't commit video or audio clips from x.com (copyright). The bench fetches its real-clip case locally via `yt-dlp` and it stays untracked.
 - One concern per PR. A behavior change and a refactor should be two PRs.
-- The default pipeline (`translationBackend: "auto"`) must keep working unchanged on machines without WebGPU or the on-device Gemini Nano model — degraded paths are part of the product.
+- The default pipeline (`translationBackend: "prompt-api"`, falling back to the Translator paths) must keep working unchanged on machines without WebGPU or the on-device Gemini Nano model — degraded paths are part of the product.
 
 ## Reporting issues
 
@@ -59,7 +59,7 @@ PR を出す前に `npm run typecheck` が通ることを確認してくださ�
 - 精度の主張は体感でなくベンチ数値に紐づける
 - x.com の動画・音声クリップはコミットしない（著作権）
 - 1 PR に 1 つの関心事。挙動変更とリファクタは分ける
-- 既定パイプライン（`translationBackend: "auto"`）は WebGPU や Gemini Nano が無い環境でも従来どおり動き続けること
+- 既定パイプライン（`translationBackend: "prompt-api"`・不可時は Translator 経路へフォールバック）は WebGPU や Gemini Nano が無い環境でも従来どおり動き続けること
 
 ### 不具合報告
 

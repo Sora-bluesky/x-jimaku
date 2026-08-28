@@ -17,12 +17,12 @@ A Chrome extension (Manifest V3) that overlays live Japanese subtitles on videos
 
 ## How it works
 
-The content script grabs the target `<video>` element's audio with `captureStream()`, resamples it to 16kHz PCM, and streams it to an offscreen document running Whisper (via transformers.js) for local English speech recognition, using WebGPU where available and falling back to WASM otherwise. Recognized text is translated from English to Japanese with Chrome's built-in Translator API, which also runs on-device. The result is drawn as a fixed caption bar over the bottom of the video, showing Japanese only by default (an options-page setting adds the smaller English source line), with in-progress lines re-translated roughly every two seconds as more audio comes in.
+The content script grabs the target `<video>` element's audio with `captureStream()`, resamples it to 16kHz PCM, and streams it to an offscreen document running Whisper (via transformers.js) for local English speech recognition, using WebGPU where available and falling back to WASM otherwise. Recognized text is translated from English to Japanese on-device: by default with Chrome's built-in Gemini Nano model (the Prompt API), which takes recent lines and on-page proper nouns as context, falling back to Chrome's built-in Translator API when that model is unavailable. The result is drawn as a fixed caption bar over the bottom of the video, showing Japanese only by default (an options-page setting adds the smaller English source line), with committed clauses translated one by one as the recognizer finalizes them.
 
 ```
 video element --captureStream()--> 16kHz PCM
    --> offscreen document: Whisper (transformers.js, WebGPU/WASM) --> English text
-   --> Chrome Translator API (en -> ja, on-device) --> Japanese text
+   --> Chrome built-in AI (Gemini Nano prompt; fallback: Translator API) --> Japanese text
    --> caption overlay under the video
 ```
 
@@ -48,13 +48,13 @@ Pick a model on the options page: `tiny`, `base` (default, ~150MB), `small`, or 
 
 ## Privacy
 
-Audio and recognized text never leave your device. Whisper speech recognition runs locally in an offscreen document (the model is downloaded once from Hugging Face and cached), and translation uses Chrome's built-in, on-device Translator model. There is no server component and no telemetry.
+Audio and recognized text never leave your device. Whisper speech recognition runs locally in an offscreen document (the model is downloaded once from Hugging Face and cached), and translation uses Chrome's built-in on-device models: Gemini Nano by default, the Translator model as fallback. There is no server component and no telemetry.
 
 ## Requirements
 
 - Chrome 138 or later (required for the built-in Translator API)
 - WebGPU is recommended (e.g. an NVIDIA GPU) for reasonable speed; without it the extension falls back to WASM, which is noticeably slower
-- Translation normally needs no setup: Chrome fetches the language pack automatically. If translation doesn't appear, check the diagnostics on the options page.
+- Translation normally needs no setup: when the on-device Gemini Nano model is not available, the extension falls back to the Translator API and Chrome fetches its language pack automatically. If translation doesn't appear, check the diagnostics on the options page.
 
 ## Tips
 
