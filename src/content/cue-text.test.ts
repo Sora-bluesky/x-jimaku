@@ -1,0 +1,369 @@
+import {
+  describe,
+  expect,
+  it,
+} from "vitest";
+import {
+  displayUnits,
+  endsWithJapaneseParticle,
+  MAX_LINE_UNITS,
+  splitCueText,
+  wrapCueText,
+} from "./cue-text";
+
+function normalizeCueText(
+  text: string,
+): string {
+  return text
+    .replace(/\s+/gu, " ")
+    .trim();
+}
+
+function createSeededRandom(
+  seed: number,
+): () => number {
+  let state = seed >>> 0;
+
+  return () => {
+    state ^= state << 13;
+    state ^= state >>> 17;
+    state ^= state << 5;
+    state >>>= 0;
+
+    return state / 0x1_0000_0000;
+  };
+}
+
+function createRandomText(
+  random: () => number,
+  length: number,
+): string {
+  const groups = [
+    Array.from(
+      "あいうえおかきくけこさしすせそ",
+    ),
+    Array.from(
+      "字幕翻訳動画音声言葉境界日本語",
+    ),
+    Array.from(
+      "abcdefghijklmnopqrstuvwxyz",
+    ),
+  ];
+  const characters: string[] = [];
+
+  while (characters.length < length) {
+    const remaining =
+      length - characters.length;
+
+    if (
+      remaining >= 24 &&
+      random() < 0.16
+    ) {
+      const base =
+        Array.from("https://example.com/");
+      const urlLength =
+        24 +
+        Math.floor(
+          random() * (remaining - 23),
+        );
+      const url = [
+        ...base,
+        ...Array.from(
+          "a".repeat(
+            Math.max(
+              0,
+              urlLength - base.length,
+            ),
+          ),
+        ),
+      ];
+
+      characters.push(
+        ...url.slice(0, remaining),
+      );
+      continue;
+    }
+
+    const group =
+      groups[
+        Math.floor(
+          random() * groups.length,
+        )
+      ] ?? groups[0];
+    const character =
+      group[
+        Math.floor(
+          random() * group.length,
+        )
+      ] ?? "あ";
+
+    characters.push(character);
+  }
+
+  return characters.join("");
+}
+
+function hasParticleAt(
+  text: string,
+  before: string,
+): boolean {
+  return endsWithJapaneseParticle(
+    Array.from(text),
+    0,
+    Array.from(before).length,
+  );
+}
+
+describe("wrapCueText", () => {
+  it(
+    "balances a normal cue without losing normalized characters",
+    () => {
+      const text =
+        "alpha beta gamma delta epsilon zeta";
+      const wrapped =
+        wrapCueText(text);
+
+      expect(wrapped).toBe(
+        "alpha beta gamma \ndelta epsilon zeta",
+      );
+      expect(
+        wrapped.split("\n").join(""),
+      ).toBe(normalizeCueText(text));
+    },
+  );
+
+  it(
+    "force-cuts a forty-unit URL without dropping characters",
+    () => {
+      const url =
+        `https://${"a".repeat(72)}`;
+
+      expect(displayUnits(url)).toBe(40);
+
+      const lines =
+        wrapCueText(url).split("\n");
+
+      expect(lines.length).toBeGreaterThan(2);
+      expect(lines.join("")).toBe(url);
+
+      for (const line of lines) {
+        expect(
+          displayUnits(line),
+        ).toBeLessThanOrEqual(
+          MAX_LINE_UNITS,
+        );
+      }
+    },
+  );
+
+  it(
+    "force-cuts before slicing when a protected URL crosses the target",
+    () => {
+      const text =
+        `https://${"a".repeat(32)} あいうえおかき`;
+      const normalized =
+        normalizeCueText(text);
+      const lines =
+        wrapCueText(text).split("\n");
+
+      expect(
+        displayUnits(normalized),
+      ).toBe(27.5);
+      expect(lines).toHaveLength(2);
+      expect(lines.join("")).toBe(
+        normalized,
+      );
+
+      for (const line of lines) {
+        expect(
+          displayUnits(line),
+        ).toBeLessThanOrEqual(
+          MAX_LINE_UNITS,
+        );
+      }
+    },
+  );
+
+  it(
+    "never loses characters or returns a line above the unit limit for seeded random text",
+    () => {
+      const random =
+        createSeededRandom(0x47c0ffee);
+
+      for (
+        let index = 0;
+        index < 200;
+        index += 1
+      ) {
+        const length =
+          1 +
+          Math.floor(random() * 120);
+        const text =
+          createRandomText(
+            random,
+            length,
+          );
+        const normalized =
+          normalizeCueText(text);
+        const lines =
+          wrapCueText(text).split("\n");
+
+        expect(
+          lines.join(""),
+        ).toBe(normalized);
+
+        for (const line of lines) {
+          expect(
+            displayUnits(line),
+          ).toBeLessThanOrEqual(
+            MAX_LINE_UNITS,
+          );
+        }
+      }
+    },
+  );
+});
+
+describe("splitCueText", () => {
+  it(
+    "never emits a segment above its unit budget for unsplittable units",
+    () => {
+      const url =
+        `https://${"a".repeat(72)}`;
+      const katakana =
+        "カ".repeat(40);
+      const unitBudget = 10;
+
+      for (
+        const text of [
+          url,
+          katakana,
+          `${url}${katakana}`,
+        ]
+      ) {
+        const segments =
+          splitCueText(
+            text,
+            unitBudget,
+          );
+
+        expect(
+          segments.length,
+        ).toBeGreaterThan(1);
+
+        for (const segment of segments) {
+          expect(
+            displayUnits(segment),
+          ).toBeLessThanOrEqual(
+            unitBudget,
+          );
+        }
+      }
+    },
+  );
+});
+
+describe(
+  "Japanese particle boundary bonus",
+  () => {
+    it.each([
+      {
+        text: "本です",
+        before: "本で",
+      },
+      {
+        text: "本ですが",
+        before: "本で",
+      },
+      {
+        text: "猫でした",
+        before: "猫で",
+      },
+      {
+        text: "漢字ながら",
+        before: "漢字なが",
+      },
+      {
+        text: "学校でも",
+        before: "学校で",
+      },
+      {
+        text: "本ですが",
+        before: "本ですが",
+      },
+    ])(
+      "does not reward the word-internal boundary after $before",
+      ({
+        text,
+        before,
+      }) => {
+        expect(
+          hasParticleAt(text, before),
+        ).toBe(false);
+      },
+    );
+
+    it.each([
+      {
+        text: "自分でする",
+        before: "自分で",
+      },
+      {
+        text: "学校でもう一度学ぶ",
+        before: "学校で",
+      },
+      {
+        text: "庭でしようと思う",
+        before: "庭で",
+      },
+    ])(
+      "keeps the real particle boundary after $before despite a matching prefix",
+      ({
+        text,
+        before,
+      }) => {
+        expect(
+          hasParticleAt(text, before),
+        ).toBe(true);
+      },
+    );
+
+    it.each([
+      {
+        text: "漢字は",
+        before: "漢字は",
+      },
+      {
+        text: "漢字を",
+        before: "漢字を",
+      },
+      {
+        text: "カタカナが続く",
+        before: "カタカナが",
+      },
+      {
+        text: "AIと",
+        before: "AIと",
+      },
+      {
+        text: "駅まで",
+        before: "駅まで",
+      },
+      {
+        text: "漢字で",
+        before: "漢字で",
+      },
+    ])(
+      "keeps the real particle boundary after $before",
+      ({
+        text,
+        before,
+      }) => {
+        expect(
+          hasParticleAt(text, before),
+        ).toBe(true);
+      },
+    );
+  },
+);
+
