@@ -87,6 +87,12 @@ const FORBIDDEN_SUFFIXES:
       requiresEdge: true,
     },
     {
+      suffix: "で",
+      continuation: "しょう",
+      particle: "で",
+      requiresEdge: true,
+    },
+    {
       suffix: "なが",
       continuation: "ら",
       particle: "が",

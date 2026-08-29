@@ -499,6 +499,8 @@ describe(
     it.each([
       { text: "素敵ですので行く", before: "素敵で" },
       { text: "元気ですのに休む", before: "元気で" },
+      { text: "元気でしょうから", before: "元気で" },
+      { text: "そうでしょうね", before: "そうで" },
       { text: "元気ですけど帰る", before: "元気で" },
       { text: "本ですし、", before: "本で" },
     ])(
