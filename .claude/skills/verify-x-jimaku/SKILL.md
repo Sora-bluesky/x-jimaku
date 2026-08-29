@@ -26,7 +26,7 @@ This runs `vite build` (main bundle) then `vite build -c vite.config.iife.ts` (c
 
 - **Ready check:** `dist/manifest.json` exists and its `version` matches `public/manifest.json` (or is newer than the previous run's copy).
 - **For the scripted path:** no separate launch step — `bench/run-bench.mjs` starts its own bench server (`127.0.0.1:8123`, fixed port) and its own disposable Chrome profile per invocation, and tears both down itself (`finally` block). Do not pre-start anything.
-- **For the manual path:** open `chrome://extensions`, enable Developer mode, "Load unpacked" → the repo's `dist/` directory. After any rebuild, click the extension's reload icon (🔄) in `chrome://extensions` — a stale service worker survives a `dist/` overwrite otherwise.
+- **For the manual path:** open `chrome://extensions`, enable Developer mode, "Load unpacked" → the repo's `dist/` directory. After any rebuild, click the extension's reload icon (🔄) in `chrome://extensions` — a stale service worker survives a `dist/` overwrite otherwise. Then reload every already-open x.com test tab as well: the retired content script leaves `window.__xJimakuContentScriptVersion__` set, and since a rebuild keeps the same version, the freshly injected replacement treats itself as a duplicate and never initializes (`src/content/index.ts:265-279`) — manual checks then time out against a disconnected content script.
 - **Teardown:** the scripted path self-terminates. For the manual path, remove the unpacked extension from `chrome://extensions` when done, or leave it if further manual checks follow in the same session.
 
 ## Doctor

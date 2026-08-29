@@ -23,7 +23,7 @@ Preconditions:
 - Options page open in real Chrome (not CfT — see Gotchas).
 
 - **English original toggle.** Check "英語原文も表示". Toggle subtitles on for an x.com video. Confirm the subtitle bar now shows both the English source and the Japanese translation, not just Japanese.
-- **Toggle off.** Uncheck "英語原文も表示". Confirm the subtitle bar reverts to Japanese-only.
+- **Toggle off.** Uncheck "英語原文も表示", then **restart the capture** (toggle subtitles off and back on for the tab) before checking. The overlay snapshots `showOriginal` at capture start (`CaptionOverlay` holds it as a fixed field, `src/content/overlay.ts:124`), so unchecking mid-capture leaves the current overlay showing English — that is correct behavior, not a failure. After the restart, confirm the subtitle bar is Japanese-only.
 - **Run diagnostics.** Click "診断を実行". This runs the background/offscreen diagnostics snapshot only (`runBackgroundDiagnostics`, `src/options/index.ts:248-253`). The WebGPU result is rendered automatically at page load (`optionsWebGpuPromise` → `renderWebGpu`, `src/options/index.ts:239-246`), not by this button.
 - **Translator probe.** Click the separate Translator button ("Options page Translator診断" → `runOptionsTranslatorProbe`, `src/options/index.ts:255-260`) to get the Translator status for the options-page context.
 - **Retrieve saved diagnostics.** Click "保存済み診断を取得" without re-running. Confirm it returns the last diagnostics result rather than blocking on a fresh probe.
