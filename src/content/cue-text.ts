@@ -51,6 +51,7 @@ const SENTENCE_FINAL_PARTICLES: ReadonlySet<string> =
 // ので. ですし is a clause edge only before punctuation.
 const COPULA_CONNECTIVES: readonly string[] = [
   "ので",
+  "のに",
   "けれど",
   "けど",
 ];
