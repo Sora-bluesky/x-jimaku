@@ -367,3 +367,34 @@ describe(
   },
 );
 
+
+describe(
+  "sub-character unit budgets",
+  () => {
+    it(
+      "splitCueText consumes at least one character per segment",
+      () => {
+        expect(
+          splitCueText("日", 0.5),
+        ).toEqual(["日"]);
+        expect(
+          splitCueText("日本語", 0.5),
+        ).toEqual(["日", "本", "語"]);
+      },
+    );
+
+    it(
+      "wrapCueText terminates and loses nothing",
+      () => {
+        const wrapped = wrapCueText(
+          "日本",
+          0.5,
+        );
+
+        expect(
+          wrapped.split("\n").join(""),
+        ).toBe("日本");
+      },
+    );
+  },
+);

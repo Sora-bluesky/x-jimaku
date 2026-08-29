@@ -284,6 +284,13 @@ function findMaximumUnitBoundary(
     end += 1;
   }
 
+  if (
+    end === start &&
+    start < characters.length
+  ) {
+    return start + 1;
+  }
+
   return end;
 }
 
