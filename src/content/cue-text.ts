@@ -33,6 +33,17 @@ const KATAKANA_CHARACTER =
 const HIRAGANA_CHARACTER =
   /\p{Script=Hiragana}/u;
 
+// Only で and が double as word-internal characters of common
+// non-particle forms; other one-character particles after
+// hiragana (きょうは…) are usually genuine boundaries.
+const AMBIGUOUS_SINGLE_PARTICLES: ReadonlySet<string> =
+  new Set(["で", "が"]);
+
+// A copula veto still applies when a sentence-final particle
+// follows (素敵ですか / そうですよ).
+const SENTENCE_FINAL_PARTICLES: ReadonlySet<string> =
+  new Set(["か", "よ", "ね", "な", "わ"]);
+
 interface ForbiddenSuffix {
   readonly suffix: string;
   readonly continuation: string;
@@ -516,6 +527,9 @@ export function endsWithJapaneseParticle(
 
       return !(
         particleCharacters.length === 1 &&
+        AMBIGUOUS_SINGLE_PARTICLES.has(
+          particle,
+        ) &&
         HIRAGANA_CHARACTER.test(
           characters[particleStart - 1] ?? "",
         )
@@ -562,6 +576,9 @@ function isForbiddenParticleBoundary(
       return (
         next === "" ||
         next === "が" ||
+        SENTENCE_FINAL_PARTICLES.has(
+          next,
+        ) ||
         JAPANESE_PUNCTUATION_CHARACTER.test(
           next,
         )

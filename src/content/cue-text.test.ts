@@ -398,3 +398,34 @@ describe(
     );
   },
 );
+
+describe(
+  "particle heuristic refinements",
+  () => {
+    it.each([
+      { text: "きょうは", before: "きょうは" },
+      { text: "わたしは", before: "わたしは" },
+      { text: "うちにかえる", before: "うちに" },
+    ])(
+      "keeps genuine particles after hiragana words ($before)",
+      ({ text, before }) => {
+        expect(
+          hasParticleAt(text, before),
+        ).toBe(true);
+      },
+    );
+
+    it.each([
+      { text: "素敵ですか", before: "素敵で" },
+      { text: "そうですよ", before: "そうで" },
+      { text: "元気ですね", before: "元気で" },
+    ])(
+      "vetoes copulas followed by sentence-final particles ($text)",
+      ({ text, before }) => {
+        expect(
+          hasParticleAt(text, before),
+        ).toBe(false);
+      },
+    );
+  },
+);
