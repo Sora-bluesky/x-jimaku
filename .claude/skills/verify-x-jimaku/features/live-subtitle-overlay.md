@@ -6,8 +6,8 @@ The core end-user feature: on a real x.com video with audio, the extension captu
 
 - `overlay-caption-render` shows recognized/translated text in a subtitle bar positioned over the video.
 - `overlay-target-detection` distinguishes a supported video (subtitle bar appears) from an unsupported one (`対象外` badge instead).
-- `overlay-translation` shows Japanese output via the Chrome Translator API when available.
-- `overlay-english-fallback` shows English-only output with a "translation unavailable" indication when the Translator API cannot create a translator (see Gotchas).
+- `overlay-translation` shows Japanese output via the configured translation backend (default: Gemini Nano prompt API; Chrome Translator API as fallback or when selected).
+- `overlay-english-fallback` shows English-only output with a "翻訳未使用" indication when every translation path failed (`translationPath === "none"`, `src/content/overlay.ts:1882-1886`) — under the default `prompt-api` backend that means both the language model and the Translator paths are unavailable (see Gotchas).
 
 ## How to get to it (user POV)
 
@@ -18,7 +18,7 @@ The core end-user feature: on a real x.com video with audio, the extension captu
 
 Preconditions:
 
-- `npm run build` has just completed and the unpacked extension in `chrome://extensions` has been reloaded (🔄) against the fresh `dist/`.
+- `npm run build` has just completed and the unpacked extension in `chrome://extensions` has been reloaded (🔄) against the fresh `dist/`, **and the x.com test tab itself has been reloaded afterwards** — without the tab reload, the re-injected content script sees the old `window.__xJimakuContentScriptVersion__` marker and refuses to initialize (see SKILL.md Launch).
 - Subtitles are toggled ON for the tab (toolbar icon or `Ctrl+Shift+9` — see `toggle-controls.md`).
 - A real x.com/twitter.com tab with a playing video that has audio.
 - This is real Chrome, not Chrome for Testing (CfT) — CfT cannot complete the Translator pack download, so translation cannot be verified there (see Gotchas).
@@ -26,7 +26,7 @@ Preconditions:
 - **Target video.** Open a video with audio and let it play. The subtitle bar appears over the video within the model's processing latency; observe it transition `字幕 準備中…N%` → `字幕ON` as loading completes.
 - **Non-target video.** With capture active on the target video, bring a second **unmuted, visible** video into view. A `対象外` badge appears on it — confirm no subtitle bar renders and no ASR activity starts for that video. A muted video will NOT show the badge (`refreshOtherVideos` filters on `!video.muted`, `src/content/overlay.ts:1714-1732`); target selection itself has no muted filter (`refreshTarget`, `src/content/overlay.ts:1670-1700`), so a muted video can even end up as the capture target instead. Either way a muted example cannot demonstrate `対象外` — a correct build would fail the recipe. See `toggle-controls.md` for the full badge conditions.
 - **Caption content.** Let the video play for 15-20 seconds of speech. Confirm the subtitle bar text updates with plausible Japanese text tracking the audio (not frozen, not garbled placeholder text).
-- **Translation path.** Confirm the rendered text is Japanese, not English — this is the signal that the Translator API succeeded from the content-script origin at `x.com`.
+- **Translation path.** Japanese text alone does not identify which backend produced it. `selectBestPath` (`src/offscreen/translate.ts:732-783`) orders candidates per configured backend: default `prompt-api` tries language-model → offscreen Translator → content Translator → none; `translator` (options 「翻訳API」) tries offscreen Translator → content Translator → none, never the language model; `auto` tries the Translator pair first and the language model last. To claim the Translator API path specifically works, select 「翻訳API」 on the options page and start a **new** capture (backend changes apply at the next capture start, `src/offscreen/index.ts:825-828`), then confirm Japanese output. Otherwise report only "translation produced Japanese", without attributing it to a specific path.
 - **Proof.** Screenshot the video with the subtitle bar visible and readable text, at a point where the bar shows `字幕ON` (not the loading percentage state). Capture a second screenshot of the `対象外` badge case on a non-target video in the same session.
 
 ## Gotchas

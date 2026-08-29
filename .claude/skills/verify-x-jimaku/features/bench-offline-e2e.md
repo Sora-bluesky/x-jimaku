@@ -7,7 +7,7 @@ The bench harness replays a fixed audio fixture through the extension's real off
 - `bench-tts-smoke` runs the self-contained `tts` case at the `tiny` model for a fast pass/fail check.
 - `bench-tts-quality` runs the `tts` case at the `base` model over the full 90s duration and records observed WER/recall/fragment metrics.
 - `bench-result-artifact` produces a timestamped result JSON plus a stdout markdown metrics table.
-- `bench-trace` captures the offscreen document's console output inline for debugging a failing run.
+- `bench-trace` captures the offscreen document's console output to a sibling `.trace.log` file (path echoed on stderr) for debugging.
 - `bench-tibo` (needs external material staged into `bench/work/` first — confirm before attempting; not self-contained like `tts`).
 
 ## How to get to it (user POV)
