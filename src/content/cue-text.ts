@@ -33,45 +33,63 @@ const KATAKANA_CHARACTER =
 const HIRAGANA_CHARACTER =
   /\p{Script=Hiragana}/u;
 
-// Only で and が double as word-internal characters of common
-// non-particle forms; other one-character particles after
-// hiragana (きょうは…) are usually genuine boundaries.
+// Only で doubles as a word-internal character of common
+// copula forms after hiragana; other one-character particles
+// after hiragana (きょうは… / ことが…) are usually genuine
+// boundaries. The word-internal が (ながら) has its own
+// forbidden-suffix entry below.
 const AMBIGUOUS_SINGLE_PARTICLES: ReadonlySet<string> =
-  new Set(["で", "が"]);
+  new Set(["で"]);
 
 // A copula veto still applies when a sentence-final particle
-// (素敵ですか / そうですよ) or a connective (ですので /
-// ですけど / ですし) follows the completed copula.
-const COPULA_EDGE_FOLLOWERS: ReadonlySet<string> =
-  new Set([
-    "か", "よ", "ね", "な", "わ",
-    "の", "け", "し",
-  ]);
+// (素敵ですか / そうですよ) follows the completed copula.
+const SENTENCE_FINAL_PARTICLES: ReadonlySet<string> =
+  new Set(["か", "よ", "ね", "な", "わ"]);
+
+// Connectives after a copula (ですので / ですけど) must match
+// in full so that word starts like すのこ are not mistaken for
+// ので. ですし is a clause edge only before punctuation.
+const COPULA_CONNECTIVES: readonly string[] = [
+  "ので",
+  "けれど",
+  "けど",
+];
 
 interface ForbiddenSuffix {
   readonly suffix: string;
   readonly continuation: string;
   readonly particle: string;
+  readonly requiresEdge: boolean;
 }
 
 // A one-character suffix such as で is ambiguous with a real particle.
-// Veto it only when the continuation completes at a clause edge.
+// Veto it only when the continuation completes at a clause edge,
+// except entries that complete a word on their own (ながら).
 const FORBIDDEN_SUFFIXES:
   readonly ForbiddenSuffix[] = [
     {
       suffix: "で",
       continuation: "す",
       particle: "で",
+      requiresEdge: true,
     },
     {
       suffix: "で",
       continuation: "した",
       particle: "で",
+      requiresEdge: true,
     },
     {
       suffix: "で",
       continuation: "も",
       particle: "で",
+      requiresEdge: true,
+    },
+    {
+      suffix: "なが",
+      continuation: "ら",
+      particle: "が",
+      requiresEdge: false,
     },
   ];
 
@@ -560,6 +578,7 @@ function isForbiddenParticleBoundary(
       suffix,
       continuation,
       particle: shadowedParticle,
+      requiresEdge,
     }) => {
       if (
         shadowedParticle !== particle ||
@@ -569,23 +588,40 @@ function isForbiddenParticleBoundary(
         return false;
       }
 
+      if (!requiresEdge) {
+        return true;
+      }
+
       const continuationLength =
         Array.from(continuation).length;
+      const rest = characters
+        .slice(
+          boundary + continuationLength,
+        )
+        .join("");
       const next =
-        characters[
-          boundary +
-          continuationLength
-        ] ?? "";
+        Array.from(rest)[0] ?? "";
+      const afterNext =
+        Array.from(rest)[1] ?? "";
 
       return (
         next === "" ||
         next === "が" ||
-        COPULA_EDGE_FOLLOWERS.has(
+        SENTENCE_FINAL_PARTICLES.has(
           next,
         ) ||
         JAPANESE_PUNCTUATION_CHARACTER.test(
           next,
-        )
+        ) ||
+        COPULA_CONNECTIVES.some(
+          (connective) =>
+            rest.startsWith(connective),
+        ) ||
+        (next === "し" &&
+          (afterNext === "" ||
+            JAPANESE_PUNCTUATION_CHARACTER.test(
+              afterNext,
+            )))
       );
     },
   );

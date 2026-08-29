@@ -287,10 +287,6 @@ describe(
         text: "学校でも",
         before: "学校で",
       },
-      {
-        text: "本ですが",
-        before: "本ですが",
-      },
     ])(
       "does not reward the word-internal boundary after $before",
       ({
@@ -453,6 +449,73 @@ describe(
           hasParticleAt(
             "学校ですぐ帰る",
             "学校で",
+          ),
+        ).toBe(true);
+      },
+    );
+  },
+);
+
+describe(
+  "fourth review round refinements",
+  () => {
+    it.each([
+      { text: "ことがわかる", before: "ことが" },
+      { text: "これができる", before: "これが" },
+      { text: "本ですが、", before: "本ですが" },
+    ])(
+      "keeps genuine が after hiragana ($before)",
+      ({ text, before }) => {
+        expect(
+          hasParticleAt(text, before),
+        ).toBe(true);
+      },
+    );
+
+    it(
+      "still vetoes the word-internal が in ながら",
+      () => {
+        expect(
+          hasParticleAt(
+            "歩きながら話す",
+            "歩きなが",
+          ),
+        ).toBe(false);
+      },
+    );
+
+    it(
+      "does not mistake すのこ for the ので connective",
+      () => {
+        expect(
+          hasParticleAt(
+            "学校ですのこを作る",
+            "学校で",
+          ),
+        ).toBe(true);
+      },
+    );
+
+    it.each([
+      { text: "素敵ですので行く", before: "素敵で" },
+      { text: "元気ですけど帰る", before: "元気で" },
+      { text: "本ですし、", before: "本で" },
+    ])(
+      "still vetoes complete connectives ($text)",
+      ({ text, before }) => {
+        expect(
+          hasParticleAt(text, before),
+        ).toBe(false);
+      },
+    );
+
+    it(
+      "keeps a genuine で before すし",
+      () => {
+        expect(
+          hasParticleAt(
+            "店ですしを食べた",
+            "店で",
           ),
         ).toBe(true);
       },
