@@ -40,9 +40,13 @@ const AMBIGUOUS_SINGLE_PARTICLES: ReadonlySet<string> =
   new Set(["で", "が"]);
 
 // A copula veto still applies when a sentence-final particle
-// follows (素敵ですか / そうですよ).
-const SENTENCE_FINAL_PARTICLES: ReadonlySet<string> =
-  new Set(["か", "よ", "ね", "な", "わ"]);
+// (素敵ですか / そうですよ) or a connective (ですので /
+// ですけど / ですし) follows the completed copula.
+const COPULA_EDGE_FOLLOWERS: ReadonlySet<string> =
+  new Set([
+    "か", "よ", "ね", "な", "わ",
+    "の", "け", "し",
+  ]);
 
 interface ForbiddenSuffix {
   readonly suffix: string;
@@ -576,7 +580,7 @@ function isForbiddenParticleBoundary(
       return (
         next === "" ||
         next === "が" ||
-        SENTENCE_FINAL_PARTICLES.has(
+        COPULA_EDGE_FOLLOWERS.has(
           next,
         ) ||
         JAPANESE_PUNCTUATION_CHARACTER.test(

@@ -429,3 +429,33 @@ describe(
     );
   },
 );
+
+describe(
+  "copulas followed by connectives",
+  () => {
+    it.each([
+      { text: "素敵ですので", before: "素敵で" },
+      { text: "元気ですけど", before: "元気で" },
+      { text: "本ですし", before: "本で" },
+    ])(
+      "vetoes copula + connective ($text)",
+      ({ text, before }) => {
+        expect(
+          hasParticleAt(text, before),
+        ).toBe(false);
+      },
+    );
+
+    it(
+      "keeps a genuine で before すぐ",
+      () => {
+        expect(
+          hasParticleAt(
+            "学校ですぐ帰る",
+            "学校で",
+          ),
+        ).toBe(true);
+      },
+    );
+  },
+);
