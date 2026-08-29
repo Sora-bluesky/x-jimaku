@@ -11,7 +11,7 @@
 | # | 種別 | タイトル案 | 中身 |
 |---|---|---|---|
 | A | 計測 | bench: record JA translation-quality baseline via score-ja | v0.4.5 マージ後に tts/base・tts/small × prompt-api/translator の jaClauses を採取し、score-ja（LLM-judge・誤訳/欠落/不自然）の before を `bench/results/` に記録。同一結果を 2 回採点して判定ノイズ幅も記録。コード変更は手順 doc 化のみ |
-| B | 可読性 | overlay: clamp wrapped cue lines and fix particle boundary false positives | (a) `wrapCueText` 2 行目の絶対長クランプ（[overlay.ts:2454-2476](src/content/overlay.ts:2454)・分割不能ユニットは強制切り）(b) 助詞境界の語中誤マッチ排除（[overlay.ts:26-41, 2715-2739](src/content/overlay.ts:2715)）。**手法: 禁止形テーブル（「です」「ですが」「ながら」「だが」「でも」「まで」等）を主、前接文字クラス（ひらがな連続ならボーナス 1→0）を副**。形態素解析器の同梱はバンドル増のため不採用。wrap/split の単体テスト新設（ランダム長 + URL のプロパティ的テスト 1 本含む） |
+| B | 可読性 | **完了（Issue #47 / PR #51・2026-08-29 マージ）** | wrap/particle ロジックを `src/content/cue-text.ts` へ抽出し、行クランプ（文字欠落ゼロの不変条件つき）+ 禁止形テーブル + copula 接続の完全一致判定を実装。プロパティテスト含む 197 テストでピン。ひらがな後の で の包括抑制は意図的限界として PR #51 コメントに記録 |
 | C | 可読性 | translate: make bracket stripping balance-aware | `normalizeLanguageModelResponse`（[translate.ts:1100-1110](src/offscreen/translate.ts:1100)）を 3 関数に分離（code fence / ラベル / 括弧）。括弧は**全体が単一の対応ペアで囲まれている場合のみ 1 段剥がす**。片側のみ・交差は無変換。export して単体テスト新設 |
 | D | 精度 | translate: pin proper-noun renderings and strengthen context prompt | 優先度順に: ①properNouns を対訳形式（`Roman → Roman`）+ 「一般語として解釈しない」の否定形明示 ②リスト外の大文字始まり語の固有名詞フォールバック指示 ③recentPairs 2→3 の A/B（降格発生率を同時記録・悪化なら戻す）④（①〜③で不足時のみ）出力の固有名詞照合→行単位救済。1 レバーごとに score-ja 採点 |
 | E | 精度 | segmenter: merge ultra-short clauses before translation (P1-1) | n 語以下の節を次節へ併合してから翻訳投入。cue 数減で表示遅延が悪化しないことを bench で確認 |
