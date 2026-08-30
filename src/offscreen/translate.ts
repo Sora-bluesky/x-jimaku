@@ -1100,9 +1100,21 @@ function createTranslationPrompt(
 export function stripCodeFence(
   text: string,
 ): string {
+  const sameLine = text.match(
+    /^```([^\r\n]*?)```$/u,
+  );
+
+  if (sameLine !== null) {
+    return sameLine[1].trim();
+  }
+
+  // The info string only exists when a
+  // newline follows: without one, the
+  // whole response would be consumed as
+  // an info string.
   return text
     .replace(
-      /^```[^\r\n]*\r?\n?/u,
+      /^```[^\r\n]*\r?\n/u,
       "",
     )
     .replace(

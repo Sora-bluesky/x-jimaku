@@ -36,6 +36,22 @@ describe("stripCodeFence", () => {
     ).toBe("こんにちは");
   });
 
+  it("strips a same-line fence without eating the content", () => {
+    expect(
+      stripCodeFence(
+        "```こんにちは```",
+      ),
+    ).toBe("こんにちは");
+  });
+
+  it("strips a fence whose closing has no newline", () => {
+    expect(
+      stripCodeFence(
+        "```text\nこんにちは```",
+      ),
+    ).toBe("こんにちは");
+  });
+
   it("leaves plain text alone", () => {
     expect(
       stripCodeFence("こんにちは"),
