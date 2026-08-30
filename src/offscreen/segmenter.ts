@@ -171,6 +171,11 @@ export interface RecognitionLine {
   at: string;
 }
 
+export type SegmenterFlushReason =
+  | "stop"
+  | "end-of-stream"
+  | "silence";
+
 export interface SegmenterOptions {
   worker: Worker;
   getWriteOffset(): number;
@@ -181,6 +186,9 @@ export interface SegmenterOptions {
   ): Float32Array;
   getEnergyHistory(): readonly AudioEnergyFrame[];
   onLine(line: RecognitionLine): void;
+  onFlushCompleted?(
+    reason: SegmenterFlushReason,
+  ): void;
   onError(message: string): void;
   properNouns?: readonly string[];
   showTentative?: boolean;
@@ -209,6 +217,8 @@ export class WhisperSegmenter {
     SegmenterOptions["getEnergyHistory"];
   private readonly onLine:
     SegmenterOptions["onLine"];
+  private readonly onFlushCompleted:
+    SegmenterOptions["onFlushCompleted"];
   private readonly onError:
     SegmenterOptions["onError"];
   private readonly showTentative: boolean;
@@ -265,6 +275,8 @@ export class WhisperSegmenter {
     this.getEnergyHistory =
       options.getEnergyHistory;
     this.onLine = options.onLine;
+    this.onFlushCompleted =
+      options.onFlushCompleted;
     this.onError = options.onError;
     this.showTentative =
       options.showTentative ?? false;
@@ -341,6 +353,8 @@ export class WhisperSegmenter {
       "message",
       this.handleWorkerMessage,
     );
+
+    this.onFlushCompleted?.("stop");
   }
 
   flushPendingAudio(): void {
@@ -470,6 +484,7 @@ export class WhisperSegmenter {
         endOffset - SILENCE_TAIL_SAMPLES,
       );
       this.resetAgreementSeries();
+      this.onFlushCompleted?.("silence");
       return;
     }
 
@@ -565,6 +580,7 @@ export class WhisperSegmenter {
       );
     const lowAudioAtCommit =
       shouldCommitForSilence;
+    let completedSilenceFlush = false;
 
     let tokens = tokenizeHypothesis(text);
 
@@ -617,6 +633,8 @@ export class WhisperSegmenter {
             ? "maximum-length"
             : "trailing-silence",
         );
+        completedSilenceFlush =
+          shouldCommitForSilence;
       } else {
         this.forceAgreementIfTimedOut();
         this.emitTentative();
@@ -644,6 +662,8 @@ export class WhisperSegmenter {
             ? "maximum-length-empty"
             : "trailing-silence-empty",
         );
+        completedSilenceFlush =
+          shouldCommitForSilence;
       } else {
         this.forceAgreementIfTimedOut();
         this.emitTentative();
@@ -651,6 +671,10 @@ export class WhisperSegmenter {
     } else {
       this.forceAgreementIfTimedOut();
       this.emitTentative();
+    }
+
+    if (completedSilenceFlush) {
+      this.onFlushCompleted?.("silence");
     }
 
     if (this.eosPending) {
@@ -917,6 +941,9 @@ export class WhisperSegmenter {
     this.eosCompletedOffset =
       completedOffset;
     this.eosTranscriptionIssued = false;
+    this.onFlushCompleted?.(
+      "end-of-stream",
+    );
   }
 
   private resumeAfterEndOfStream(

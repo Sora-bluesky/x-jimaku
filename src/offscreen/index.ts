@@ -50,6 +50,9 @@ import {
   type RecognitionLine,
 } from "./segmenter";
 import {
+  SentenceAssembler,
+} from "./sentence-assembler";
+import {
   isMostlyJapanese,
   TranslationEngine,
   type ContentTranslationResponse,
@@ -121,6 +124,12 @@ let activeWhisperSession:
   | null = null;
 let activeSegmenter:
   | WhisperSegmenter
+  | null = null;
+let activeSentenceAssembler:
+  | SentenceAssembler
+  | null = null;
+let activeSentenceAssemblerRequestId:
+  | string
   | null = null;
 let activeTranslationEngine:
   | TranslationEngine
@@ -829,6 +838,30 @@ async function handleCaptureStart(
     return;
   }
 
+  activeSentenceAssembler?.destroy();
+
+  const sentenceAssembler =
+    new SentenceAssembler({
+      onLine(
+        outputRequestId,
+        line,
+      ) {
+        postRecognition(
+          outputRequestId,
+          line,
+          settings.showTentative,
+        );
+      },
+    });
+
+  sentenceAssembler.startCapture(
+    requestId,
+  );
+  activeSentenceAssembler =
+    sentenceAssembler;
+  activeSentenceAssemblerRequestId =
+    requestId;
+
   prepareRecognitionBuffer(requestId);
   pendingEosRequestId = null;
   activeContextTerms = [];
@@ -1117,10 +1150,14 @@ async function handleCaptureStart(
         showTentative:
           settings.showTentative,
         onLine(line) {
-          postRecognition(
+          sentenceAssembler.accept(
             requestId,
             line,
-            settings.showTentative,
+          );
+        },
+        onFlushCompleted() {
+          sentenceAssembler.flush(
+            requestId,
           );
         },
         onError(message) {
@@ -1361,6 +1398,18 @@ function terminateRecognition(
   }
 
   beginRecognitionDrain(requestId);
+
+  if (
+    requestId === undefined ||
+    activeSentenceAssemblerRequestId ===
+      requestId
+  ) {
+    activeSentenceAssembler?.destroy();
+    activeSentenceAssembler = null;
+    activeSentenceAssemblerRequestId =
+      null;
+  }
+
   finishPendingCaptionDrain(requestId);
 
   activeTranslationEngine?.destroy();
