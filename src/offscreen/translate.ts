@@ -1136,7 +1136,7 @@ export function createTranslationPrompt(
         ...context.properNouns.map(
           (term) => `${term} → ${term}`,
         ),
-        "これらは固有名詞であり、一般語・地名・別の固有名詞として解釈しない。",
+        "これらは固有名詞であり、一般語・地名・別の固有名詞として解釈しない。既存の訳語や地名訳に置き換えず、原綴りのまま残すか片仮名で音写する。",
       ].join("\n"),
     );
   }

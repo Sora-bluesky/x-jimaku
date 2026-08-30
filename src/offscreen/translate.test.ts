@@ -336,7 +336,7 @@ describe("createTranslationPrompt", () => {
           "[固有名詞（訳さず右の表記をそのまま出力に使う）]",
           "Roman → Roman",
           "Kennedy Space Center → Kennedy Space Center",
-          "これらは固有名詞であり、一般語・地名・別の固有名詞として解釈しない。",
+          "これらは固有名詞であり、一般語・地名・別の固有名詞として解釈しない。既存の訳語や地名訳に置き換えず、原綴りのまま残すか片仮名で音写する。",
           "[直前の文脈]",
           "EN: The checks are complete.",
           "JA: 確認は完了した。",
