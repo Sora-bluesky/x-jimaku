@@ -87,7 +87,7 @@ function parseArguments(argv) {
 
     if (argument === "--case") {
       if (!value) {
-        throw new ArgumentError("--case requires tts or tibo");
+        throw new ArgumentError("--case requires tts, tts2, or tibo");
       }
 
       options.caseName = value;
@@ -134,8 +134,12 @@ function parseArguments(argv) {
     return options;
   }
 
-  if (options.caseName !== "tts" && options.caseName !== "tibo") {
-    throw new ArgumentError("--case must be tts or tibo");
+  if (
+    options.caseName !== "tts"
+    && options.caseName !== "tts2"
+    && options.caseName !== "tibo"
+  ) {
+    throw new ArgumentError("--case must be tts, tts2, or tibo");
   }
 
   if (
@@ -162,7 +166,7 @@ function parseArguments(argv) {
 
 function printUsage() {
   console.log(
-    "Usage: node bench/run-bench.mjs --case tts|tibo "
+    "Usage: node bench/run-bench.mjs --case tts|tts2|tibo "
       + "[--model tiny|base|small|turbo] "
       + "[--backend auto|translator|prompt-api] [--duration 90] "
       + "[--chrome <path>]",
@@ -387,6 +391,31 @@ function loadCase(caseName) {
       properNouns: [],
       reference: readFileSync(referenceFile, "utf8").trim(),
       referenceSource: "bench/refs/tts-script.txt",
+    };
+  }
+
+  if (caseName === "tts2") {
+    const mediaFile = path.join(REFS_DIRECTORY, "tts2-speech.wav");
+    const referenceFile = path.join(REFS_DIRECTORY, "tts2-script.txt");
+
+    if (!existsSync(mediaFile)) {
+      throw new Error(`Missing TTS2 media file: ${mediaFile}`);
+    }
+
+    if (!existsSync(referenceFile)) {
+      throw new Error(`Missing TTS2 reference file: ${referenceFile}`);
+    }
+
+    return {
+      mediaFile,
+      properNouns: [
+        "Roman",
+        "NASA Goddard",
+        "Kennedy Space Center",
+        "coronagraph",
+      ],
+      reference: readFileSync(referenceFile, "utf8").trim(),
+      referenceSource: "bench/refs/tts2-script.txt",
     };
   }
 
