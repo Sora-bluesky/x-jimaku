@@ -1,4 +1,6 @@
 import type {
+  OffDevLogData,
+  OffDevLogMessage,
   RecognitionPayload,
   TranslationPath,
 } from "../shared/messages";
@@ -52,8 +54,31 @@ interface TranslationAttemptResult {
   recordHistory: boolean;
 }
 
+type TranslationDevLogEvent =
+  Omit<
+    OffDevLogMessage,
+    "t" | "data"
+  > & {
+    data: Omit<
+      OffDevLogData,
+      "requestId"
+    >;
+  };
+
+export class PlaceholderVerificationError
+  extends Error {
+  constructor() {
+    super(
+      "Translator rescue failed placeholder verification",
+    );
+    this.name =
+      "PlaceholderVerificationError";
+  }
+}
+
 export interface TranslationEngineOptions {
   backend: TranslationBackend;
+  requestId?: string;
   getContext(): TranslationContext;
   requestContentTranslation(
     text: string,
@@ -63,6 +88,9 @@ export interface TranslationEngineOptions {
     ja: string,
   ): void;
   onPathChanged(path: TranslationPath): void;
+  onDevLog?(
+    message: OffDevLogMessage,
+  ): void | Promise<void>;
 }
 
 const TRANSLATOR_OPTIONS: TranslatorOptions = {
@@ -190,6 +218,16 @@ export class TranslationEngine {
         console.warn(
           `[translate] dropped oldest pending committed clause (id=${dropped.id}, textLength=${dropped.text.length})`,
         );
+        this.emitDevLog({
+          level: "warn",
+          tag: "translate",
+          message:
+            "dropped oldest pending committed clause",
+          data: {
+            kind: "queue-drop",
+            lineId: dropped.id,
+          },
+        });
       }
     }
 
@@ -293,7 +331,7 @@ export class TranslationEngine {
               recordHistory: true,
             }
           : await this.translateWithFallback(
-              line.text,
+              line,
             );
 
       if (
@@ -322,11 +360,11 @@ export class TranslationEngine {
   }
 
   private async translateWithFallback(
-    text: string,
+    line: TranslationQueueEntry,
   ): Promise<TranslationAttemptResult | null> {
     const context = this.readContext();
     const request = createMaskPlan(
-      text,
+      line.text,
       context.properNouns,
     );
 
@@ -344,6 +382,7 @@ export class TranslationEngine {
             attemptedPath,
             request,
             context,
+            line.id,
           );
         const normalized = result.ja.trim();
 
@@ -394,12 +433,14 @@ export class TranslationEngine {
     path: TranslationPath,
     request: MaskedTranslationLine,
     context: TranslationContext,
+    lineId: number,
   ): Promise<TranslationAttemptResult> {
     switch (path) {
       case "offscreen-translator":
         if (request.maskPlan !== null) {
           return this.rescueLanguageModelLine(
             request,
+            lineId,
           );
         }
 
@@ -420,6 +461,7 @@ export class TranslationEngine {
         if (request.maskPlan !== null) {
           return this.rescueLanguageModelLine(
             request,
+            lineId,
           );
         }
 
@@ -445,6 +487,7 @@ export class TranslationEngine {
         return this.translateWithLanguageModel(
           request,
           context,
+          lineId,
         );
 
       case "none":
@@ -457,6 +500,7 @@ export class TranslationEngine {
   private async translateWithLanguageModel(
     request: MaskedTranslationLine,
     context: TranslationContext,
+    lineId: number,
   ): Promise<TranslationAttemptResult> {
     const prompt = createTranslationPrompt(
       request.masked,
@@ -490,6 +534,7 @@ export class TranslationEngine {
         );
         return this.rescueLanguageModelLine(
           request,
+          lineId,
         );
       }
 
@@ -523,6 +568,7 @@ export class TranslationEngine {
       );
       return this.rescueLanguageModelLine(
         request,
+        lineId,
       );
     }
 
@@ -545,6 +591,7 @@ export class TranslationEngine {
       );
       return this.rescueLanguageModelLine(
         request,
+        lineId,
       );
     }
 
@@ -697,6 +744,7 @@ export class TranslationEngine {
 
   private async rescueLanguageModelLine(
     request: MaskedTranslationLine,
+    lineId: number,
   ): Promise<TranslationAttemptResult> {
     for (
       const rescuePath of [
@@ -731,14 +779,27 @@ export class TranslationEngine {
                   request.masked,
                 );
 
+        if (result === undefined) {
+          throw new Error(
+            "Translator rescue is not initialized",
+          );
+        }
+
+        if (
+          typeof result !== "string" &&
+          !result.available
+        ) {
+          throw new Error(
+            "Content-script Translator rescue became unavailable",
+          );
+        }
+
         const ja =
-          typeof result === "string"
-            ? result.trim()
-            : (
-                result?.available === true
-                  ? result.ja.trim()
-                  : ""
-              );
+          (
+            typeof result === "string"
+              ? result
+              : result.ja
+          ).trim();
 
         if (ja === "") {
           throw new Error(
@@ -753,9 +814,7 @@ export class TranslationEngine {
           );
 
         if (restored === null) {
-          throw new Error(
-            "Translator rescue failed placeholder verification",
-          );
+          throw new PlaceholderVerificationError();
         }
 
         return {
@@ -771,6 +830,24 @@ export class TranslationEngine {
             error,
           },
         );
+        this.emitDevLog({
+          level: "warn",
+          tag: "translate",
+          message:
+            "Translator line rescue failed",
+          data: {
+            kind: "rescue-failure",
+            lineId,
+            path: rescuePath,
+          },
+        });
+
+        if (
+          error instanceof
+          PlaceholderVerificationError
+        ) {
+          continue;
+        }
 
         const wasActive =
           this.path === rescuePath;
@@ -782,10 +859,63 @@ export class TranslationEngine {
       }
     }
 
+    this.emitDevLog({
+      level: "info",
+      tag: "translate",
+      message:
+        "Translator line rescue exhausted; passing through original",
+      data: {
+        kind: "passthrough",
+        lineId,
+      },
+    });
+
     return {
       ja: request.original,
       recordHistory: false,
     };
+  }
+
+  private emitDevLog(
+    event: TranslationDevLogEvent,
+  ): void {
+    try {
+      const requestId =
+        this.options.requestId;
+      const onDevLog =
+        this.options.onDevLog;
+
+      if (
+        requestId === undefined ||
+        onDevLog === undefined
+      ) {
+        return;
+      }
+
+      const message: OffDevLogMessage = {
+        t: "OFF_DEV_LOG",
+        level: event.level,
+        tag: event.tag,
+        message: event.message,
+        data: {
+          kind: event.data.kind,
+          requestId,
+          lineId: event.data.lineId,
+          ...(event.data.path === undefined
+            ? {}
+            : { path: event.data.path }),
+        },
+      };
+      const pending = onDevLog(message);
+
+      if (pending !== undefined) {
+        void Promise.resolve(pending).catch(
+          () => undefined,
+        );
+      }
+    } catch {
+      return;
+    }
   }
 
   private readContext(): TranslationContext {
