@@ -2946,6 +2946,9 @@ function handleOffscreenState(
           postStopToOffscreen(
             offscreenPort,
             current.requestId,
+            isExplicitStopDrainState(
+              current,
+            ),
           );
         }
         return;
@@ -2996,6 +2999,9 @@ function handleOffscreenState(
           postStopToOffscreen(
             offscreenPort,
             current.requestId,
+            isExplicitStopDrainState(
+              current,
+            ),
           );
         }
         return;
