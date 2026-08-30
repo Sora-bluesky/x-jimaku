@@ -62,6 +62,25 @@ beforeEach(() => {
 
 describe("extractPostContextTerms", () => {
   it(
+    "splits after an acronym that ends a sentence",
+    () => {
+      setPostText(
+        "NASA. Kennedy Space Center opened.",
+      );
+
+      const acronymTerms =
+        extractPostContextTerms();
+
+      expect(acronymTerms).toContain(
+        "Kennedy Space Center",
+      );
+      expect(acronymTerms).not.toContain(
+        "NASA Kennedy Space Center",
+      );
+    },
+  );
+
+  it(
     "keeps a title abbreviation inside a run",
     () => {
       setPostText(

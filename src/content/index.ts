@@ -2892,16 +2892,20 @@ export function extractPostContextTerms(): string[] {
     // common title abbreviation is treated
     // as an abbreviation dot (U.S. Space
     // Force, St. Louis), not a sentence
-    // end. The abbreviation set is a small
-    // closed list on purpose: this feeds a
-    // hint list for the translation
-    // prompt, so a missed exotic
-    // abbreviation only costs one hint,
-    // and a full lexicon is not worth the
-    // false joins it would cause.
+    // end. Only a SINGLE capital before
+    // the dot counts (U.S. yes, NASA. no,
+    // so a sentence-final acronym still
+    // splits). The abbreviation set is a
+    // small closed list on purpose: this
+    // feeds a hint list for the
+    // translation prompt, so a missed
+    // exotic abbreviation only costs one
+    // hint, and a full lexicon is not
+    // worth the false joins it would
+    // cause.
     const runs = normalizedText
       .split(
-        /(?<!\b(?:St|Mt|Dr|Mr|Mrs|Ms|Jr|Sr)|[A-Z])[.!?。！？](?:\s|$)/u,
+        /(?<!\b(?:St|Mt|Dr|Mr|Mrs|Ms|Jr|Sr)|\b[A-Z])[.!?。！？](?:\s|$)/u,
       )
       .flatMap(
         (sentence) =>
