@@ -72,7 +72,7 @@ const LANGUAGE_MODEL_EXPECTED_OUTPUTS:
   ];
 
 const TRANSLATION_SYSTEM_PROMPT =
-  "あなたは英語動画の日本語字幕翻訳者。与えられた英語の節を、直前の文脈と固有名詞リストに整合する自然な日本語に訳す。出力は当該節の訳だけ。説明・引用符・前後の節の再訳は出力しない";
+  "あなたは英語動画の日本語字幕翻訳者。与えられた英語の節を、直前の文脈と固有名詞リストに整合する自然な日本語に訳す。出力は当該節の訳だけ。説明・引用符・前後の節の再訳は出力しない。リストに無い語でも、大文字で始まる語・見慣れない語は固有名詞として原綴りのまま残す";
 
 const MAX_PENDING_TRANSLATIONS = 2;
 export const TRANSLATOR_CREATE_TIMEOUT_MS =
