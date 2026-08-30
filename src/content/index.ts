@@ -2895,7 +2895,13 @@ export function extractPostContextTerms(): string[] {
     // end. Only a SINGLE capital before
     // the dot counts (U.S. yes, NASA. no,
     // so a sentence-final acronym still
-    // splits). The abbreviation set is a
+    // splits). A sentence ending in a
+    // one-letter name (Malcolm X.) is the
+    // accepted false join of this rule:
+    // one regex cannot tell it apart from
+    // a dotted acronym without breaking
+    // U.S., and the cost is bounded to a
+    // single noisy four-word hint. The abbreviation set is a
     // small closed list on purpose: this
     // feeds a hint list for the
     // translation prompt, so a missed
