@@ -28,3 +28,16 @@ metrics table goes to stdout (`printMarkdownTable`, run-bench.mjs:1119-1131).
 (run-bench.mjs:1437-1439), so a run that dies earlier leaves no trace file.
 `MODULE_NOT_FOUND` with exit 1 is operator error from the wrong cwd — run from the repo root.
 The full verification recipe lives in `.claude/skills/verify-x-jimaku/SKILL.md`.
+
+## 実Chromeでの訳質採取（live2 手順・2026-08-30 確立）
+
+CfT には翻訳モデルが降りないため、訳質の jaClauses は実 Chrome でしか採れない。
+
+1. `node bench/serve-standalone.mjs` で fixture サーバだけを起動する（8123 固定）。
+2. 拡張を読み込んだ実 Chrome で `http://127.0.0.1:8123/case.html` を開く。再生開始はタブ前面 + 実クリックが要る（autoplay ポリシー）。
+3. DEV origin なので `window.postMessage({t:'CS_DEV_SET_SETTINGS', settings:{...}})` と `{t:'CS_DEV_TOGGLE'}` で backend/model 切替とトグルを scripting できる。
+4. overlay の shadow DOM から `.caption-primary` を 300ms 間隔で重複排除しつつ収集し、`recognition.jaClauses` に詰めた result JSON を `bench/results/live2-*.json` として保存する。
+5. あとは上記「日本語訳質の採点」と同じ（agy はプロンプト直埋め・ツール使用禁止を明示する）。
+
+ベースライン（2026-08-30・95 秒ループ採取）: prompt-api/base = 誤訳10/欠落1/不自然10 (n=32)、
+translator/base = 6/2/7 (n=21)。judge ノイズはカテゴリ ±2・合計 ±2（同一採取の2回採点で実測）。
