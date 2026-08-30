@@ -209,6 +209,12 @@ export interface OffStartMessage {
 export interface OffStopMessage {
   t: "OFF_STOP";
   requestId: string;
+  drain?: boolean;
+}
+
+export interface OffDrainReadyMessage {
+  t: "OFF_DRAIN_READY";
+  requestId: string;
 }
 
 export interface OffFlushRecogMessage {
@@ -231,6 +237,7 @@ export interface OffStatusMessage {
 export interface OffStateMessage {
   t: "OFF_STATE";
   state: CaptureState;
+  drain?: boolean;
 }
 
 export interface OffLevelMessage {
@@ -258,6 +265,11 @@ export interface CsStartTapMessage {
 
 export interface CsStopTapMessage {
   t: "CS_STOP_TAP";
+  requestId: string;
+}
+
+export interface CsDrainCompleteMessage {
+  t: "CS_DRAIN_COMPLETE";
   requestId: string;
 }
 
@@ -329,6 +341,7 @@ export interface RecognitionPayload {
 export interface OffRecognitionMessage
   extends RecognitionPayload {
   t: "OFF_RECOG";
+  requestId?: string;
 }
 
 export interface SwRecognitionMessage
@@ -415,12 +428,14 @@ export type CaptionPortMessage =
 export type ContentPortMessage =
   | CsStartTapMessage
   | CsStopTapMessage
+  | CsDrainCompleteMessage
   | CsEosMessage
   | CsTapStateMessage
   | CsPcmMessage
   | CsTranslateMessage
   | CsTranslateResultMessage
   | OffStateMessage
+  | OffDrainReadyMessage
   | SwTranslationStateMessage
   | SwSilentInputMessage
   | CaptionPortMessage;
@@ -428,6 +443,7 @@ export type ContentPortMessage =
 export type CapturePortMessage =
   | OffStartMessage
   | OffStopMessage
+  | OffDrainReadyMessage
   | OffFlushRecogMessage
   | OffQueryMessage
   | OffStatusMessage
@@ -436,6 +452,7 @@ export type CapturePortMessage =
   | OffDiagnosticMessage
   | OffRecognitionMessage
   | OffTranslationStateMessage
+  | CsDrainCompleteMessage
   | CsPcmMessage
   | CsEosMessage
   | CsTranslateMessage
@@ -645,8 +662,18 @@ export function isM1Message(
       );
 
     case "OFF_STOP":
+      return (
+        typeof value.requestId === "string" &&
+        (
+          value.drain === undefined ||
+          typeof value.drain === "boolean"
+        )
+      );
+
+    case "OFF_DRAIN_READY":
     case "OFF_FLUSH_RECOG":
     case "CS_STOP_TAP":
+    case "CS_DRAIN_COMPLETE":
     case "CS_EOS":
       return typeof value.requestId === "string";
 
@@ -662,7 +689,13 @@ export function isM1Message(
       );
 
     case "OFF_STATE":
-      return isCaptureState(value.state);
+      return (
+        isCaptureState(value.state) &&
+        (
+          value.drain === undefined ||
+          typeof value.drain === "boolean"
+        )
+      );
 
     case "OFF_LEVEL":
       return (
@@ -757,6 +790,14 @@ export function isM1Message(
       );
 
     case "OFF_RECOG":
+      return (
+        isRecognitionPayload(value) &&
+        (
+          value.requestId === undefined ||
+          typeof value.requestId === "string"
+        )
+      );
+
     case "SW_RECOG":
     case "SW_CAPTION":
       return isRecognitionPayload(value);
@@ -786,6 +827,10 @@ export function isCapturePortMessage(
     isMessageOfType(value, "OFF_STOP") ||
     isMessageOfType(
       value,
+      "OFF_DRAIN_READY",
+    ) ||
+    isMessageOfType(
+      value,
       "OFF_FLUSH_RECOG",
     ) ||
     isMessageOfType(value, "OFF_QUERY") ||
@@ -800,6 +845,10 @@ export function isCapturePortMessage(
     isMessageOfType(
       value,
       "OFF_TRANSLATION_STATE",
+    ) ||
+    isMessageOfType(
+      value,
+      "CS_DRAIN_COMPLETE",
     ) ||
     isMessageOfType(value, "CS_PCM") ||
     isMessageOfType(value, "CS_EOS") ||
@@ -817,6 +866,10 @@ export function isContentPortMessage(
   return (
     isMessageOfType(value, "CS_START_TAP") ||
     isMessageOfType(value, "CS_STOP_TAP") ||
+    isMessageOfType(
+      value,
+      "CS_DRAIN_COMPLETE",
+    ) ||
     isMessageOfType(value, "CS_EOS") ||
     isMessageOfType(value, "CS_TAP_STATE") ||
     isMessageOfType(value, "CS_PCM") ||
@@ -826,6 +879,10 @@ export function isContentPortMessage(
       "CS_TRANSLATE_RESULT",
     ) ||
     isMessageOfType(value, "OFF_STATE") ||
+    isMessageOfType(
+      value,
+      "OFF_DRAIN_READY",
+    ) ||
     isMessageOfType(
       value,
       "SW_TRANSLATION_STATE",
