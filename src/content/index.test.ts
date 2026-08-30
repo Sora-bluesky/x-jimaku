@@ -62,6 +62,19 @@ beforeEach(() => {
 
 describe("extractPostContextTerms", () => {
   it(
+    "keeps a title abbreviation inside a run",
+    () => {
+      setPostText(
+        "Fly to St. Louis Airport today.",
+      );
+
+      expect(
+        extractPostContextTerms(),
+      ).toContain("St. Louis Airport");
+    },
+  );
+
+  it(
     "keeps a standalone dotted abbreviation",
     () => {
       setPostText(

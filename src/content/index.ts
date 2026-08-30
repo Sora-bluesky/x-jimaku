@@ -2784,6 +2784,12 @@ function flushBufferedContentMessages():
 const RUN_LEADING_ARTICLES: ReadonlySet<string> =
   new Set(["the", "a", "an"]);
 
+const TITLE_ABBREVIATIONS: ReadonlySet<string> =
+  new Set([
+    "st", "mt", "dr", "mr",
+    "mrs", "ms", "jr", "sr",
+  ]);
+
 export function extractPostContextTerms(): string[] {
   const articles = new Set<HTMLElement>();
   const target =
@@ -2882,14 +2888,21 @@ export function extractPostContextTerms(): string[] {
     )
       .normalize("NFKC")
       .replace(/\s+/gu, " ");
-    // A period right after a capital is
-    // treated as an abbreviation dot
-    // (U.S. Space Force), not a sentence
-    // end; the cost is that an acronym
-    // ending a sentence can bridge into
-    // the next one.
+    // A period right after a capital or a
+    // common title abbreviation is treated
+    // as an abbreviation dot (U.S. Space
+    // Force, St. Louis), not a sentence
+    // end. The abbreviation set is a small
+    // closed list on purpose: this feeds a
+    // hint list for the translation
+    // prompt, so a missed exotic
+    // abbreviation only costs one hint,
+    // and a full lexicon is not worth the
+    // false joins it would cause.
     const runs = normalizedText
-      .split(/(?<![A-Z])[.!?。！？](?:\s|$)/u)
+      .split(
+        /(?<!\b(?:St|Mt|Dr|Mr|Mrs|Ms|Jr|Sr)|[A-Z])[.!?。！？](?:\s|$)/u,
+      )
       .flatMap(
         (sentence) =>
           sentence.match(
@@ -2912,11 +2925,25 @@ export function extractPostContextTerms(): string[] {
 
       const term = words
         .slice(0, 4)
-        .map((word) =>
-          /^(?:\p{Lu}\.)+$/u.test(word)
-            ? word
-            : word.replace(/\.+$/u, ""),
-        )
+        .map((word) => {
+          const stripped = word.replace(
+            /\.+$/u,
+            "",
+          );
+
+          if (
+            /^(?:\p{Lu}\.)+$/u.test(word) ||
+            TITLE_ABBREVIATIONS.has(
+              stripped.toLocaleLowerCase(
+                "en-US",
+              ),
+            )
+          ) {
+            return word;
+          }
+
+          return stripped;
+        })
         .join(" ");
 
       if (
