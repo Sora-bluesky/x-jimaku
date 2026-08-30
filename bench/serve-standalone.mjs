@@ -14,6 +14,11 @@ const cases = {
   },
   tts2: {
     mediaFile: path.join(here, "refs", "tts2-speech.wav"),
+    // These render as page text and go through the same
+    // extractPostContextTerms regex as a real x.com post, so
+    // multi-word names fragment (NASA + Goddard) and lowercase
+    // terms drop. That fragmentation is production behavior and
+    // part of what issue #49 measures; do not bypass it here.
     contextTerms: [
       "Roman",
       "NASA Goddard",
