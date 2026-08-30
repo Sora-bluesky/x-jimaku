@@ -761,7 +761,7 @@ function connectBackgroundPort(): void {
         activeTap !== null;
 
       if (disconnectDuringCapture) {
-        console.warn(
+        console.info(
           "[cs]",
           "background port disconnected during capture",
           disconnectError ?? "",
@@ -904,9 +904,8 @@ function scheduleGraceEpisodeExpiry(
           );
 
         if (transition !== null) {
-          beginFullGraceTeardown(
-            transition.episode.requestId,
-            "grace period expired",
+          handleExpiredGraceEpisode(
+            transition,
           );
         }
       },
@@ -952,11 +951,26 @@ function expireGraceEpisodeAt(
   }
 
   clearGraceEpisodeTimer();
+  handleExpiredGraceEpisode(transition);
+  return transition;
+}
+
+function handleExpiredGraceEpisode(
+  transition: GraceEpisodeTransition,
+): void {
+  console.warn(
+    "[cs]",
+    "background reconnect grace period expired; capture recovery failed",
+    {
+      requestId:
+        transition.episode.requestId,
+    },
+  );
+
   beginFullGraceTeardown(
     transition.episode.requestId,
     "grace period expired",
   );
-  return transition;
 }
 
 function closeGraceEpisodeForRequest(

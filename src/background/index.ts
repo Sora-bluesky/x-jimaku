@@ -1187,7 +1187,7 @@ function handleContentPortConnected(
       return;
     }
 
-    console.warn(
+    console.info(
       "[bg]",
       "content port disconnected",
       {
@@ -1427,6 +1427,15 @@ function expireContentReconnectGraceEpisode(
   ) {
     return;
   }
+
+  console.warn(
+    "[bg]",
+    "content reconnect grace period expired; capture recovery failed",
+    {
+      requestId: expected.requestId,
+      tabId: expected.tabId,
+    },
+  );
 
   contentReconnectGraceEpisode = null;
   failDeferredTranslationRequests(

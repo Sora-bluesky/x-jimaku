@@ -9,6 +9,9 @@ import {
   MAX_WAITING_CUES,
 } from "../shared/explicit-stop-drain";
 import {
+  INITIALIZATION_PROGRESS_CEILING,
+} from "../shared/initialization-progress";
+import {
   cueDisplayDurationMs,
   decideCueQueueDiscipline,
   retainAccelerationUntilDrained,
@@ -1824,6 +1827,16 @@ export class CaptionOverlay {
         this.targetChip.classList.add(
           "status-loading",
         );
+
+        if (
+          this.progress !== undefined &&
+          this.progress >=
+            INITIALIZATION_PROGRESS_CEILING
+        ) {
+          this.targetText.textContent =
+            "字幕 準備中(ウォームアップ)…";
+          return;
+        }
 
         const percent =
           this.progress === undefined

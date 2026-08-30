@@ -3,6 +3,9 @@ import {
   pipeline,
 } from "@huggingface/transformers";
 import {
+  INITIALIZATION_PROGRESS_CEILING,
+} from "../shared/initialization-progress";
+import {
   isWhisperWorkerInputMessage,
   toProbeError,
   type WhisperProgressMessage,
@@ -17,24 +20,11 @@ env.allowLocalModels = false;
 env.useBrowserCache = true;
 
 type OnnxWebGpuEnvironment = {
-  powerPreference?: GPUPowerPreference;
+  adapter?: unknown;
 };
 
-if (
-  navigator.userAgent.includes("Windows")
-) {
-  const webGpuEnvironment =
-    env.backends?.onnx?.webgpu as
-      | OnnxWebGpuEnvironment
-      | undefined;
-
-  if (webGpuEnvironment !== undefined) {
-    webGpuEnvironment.powerPreference =
-      undefined;
-  }
-}
-
-const INITIALIZATION_PROGRESS_CEILING = 99;
+const IS_WINDOWS =
+  navigator.userAgent.includes("Windows");
 
 const MODELS = {
   tiny: {
@@ -260,16 +250,52 @@ async function initialize(
   }
 }
 
+function configureWindowsOrtWebGpuAdapter(
+  adapter?: unknown,
+): void {
+  if (!IS_WINDOWS) {
+    return;
+  }
+
+  const webGpuEnvironment =
+    env.backends?.onnx?.webgpu as
+      | OnnxWebGpuEnvironment
+      | undefined;
+  const injected =
+    adapter !== null &&
+    adapter !== undefined &&
+    webGpuEnvironment !== undefined;
+
+  if (injected) {
+    webGpuEnvironment.adapter = adapter;
+  }
+
+  console.info(
+    "[whisper]",
+    "Windows ORT WebGPU adapter injection",
+    { injected },
+  );
+}
+
 async function resolveInitializationDevice(
   forceDevice?: WhisperDevice,
 ): Promise<WhisperDevice> {
-  if (forceDevice !== undefined) {
+  if (forceDevice === "wasm") {
     console.log(
       "[whisper]",
       "initialization device forced",
       forceDevice,
     );
+    configureWindowsOrtWebGpuAdapter();
     return forceDevice;
+  }
+
+  if (forceDevice === "webgpu") {
+    console.log(
+      "[whisper]",
+      "initialization device forced",
+      forceDevice,
+    );
   }
 
   const gpu = (
@@ -282,6 +308,10 @@ async function resolveInitializationDevice(
     const adapter =
       await gpu?.requestAdapter?.();
 
+    configureWindowsOrtWebGpuAdapter(
+      adapter,
+    );
+
     if (
       adapter === null ||
       adapter === undefined
@@ -290,17 +320,19 @@ async function resolveInitializationDevice(
         "[whisper]",
         "WebGPU adapter unavailable; using WASM",
       );
-      return "wasm";
+      return forceDevice ?? "wasm";
     }
 
     return "webgpu";
   } catch (error) {
+    configureWindowsOrtWebGpuAdapter();
+
     console.warn(
       "[whisper]",
       "WebGPU adapter probe failed; using WASM",
       toProbeError(error),
     );
-    return "wasm";
+    return forceDevice ?? "wasm";
   }
 }
 

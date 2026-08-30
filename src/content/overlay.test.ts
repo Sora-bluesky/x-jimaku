@@ -9,6 +9,9 @@ import {
   vi,
 } from "vitest";
 import {
+  INITIALIZATION_PROGRESS_CEILING,
+} from "../shared/initialization-progress";
+import {
   CaptionOverlay,
   CUE_MINIMUM_DISPLAY_MS,
 } from "./overlay";
@@ -61,6 +64,7 @@ function requireElement<T extends Element>(
 function getOverlayDom(): {
   captionStack: HTMLDivElement;
   cueContainer: HTMLDivElement;
+  targetChip: HTMLDivElement;
 } {
   const host =
     requireElement<HTMLDivElement>(
@@ -88,6 +92,11 @@ function getOverlayDom(): {
       requireElement<HTMLDivElement>(
         shadow,
         ".cue-container",
+      ),
+    targetChip:
+      requireElement<HTMLDivElement>(
+        shadow,
+        ".target-chip",
       ),
   };
 }
@@ -118,6 +127,29 @@ afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
 });
+
+describe(
+  "CaptionOverlay initialization status",
+  () => {
+    it(
+      "shows the warmup label at the initialization ceiling",
+      () => {
+        const overlay = createOverlay();
+
+        overlay.setStatus(
+          "loadingModel",
+          INITIALIZATION_PROGRESS_CEILING,
+        );
+
+        expect(
+          getOverlayDom().targetChip.textContent,
+        ).toBe(
+          "字幕 準備中(ウォームアップ)…",
+        );
+      },
+    );
+  },
+);
 
 describe(
   "CaptionOverlay pending finals",

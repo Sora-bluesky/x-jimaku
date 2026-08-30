@@ -421,7 +421,7 @@ function connectOptionsPort(): void {
       const disconnectError =
         chrome.runtime.lastError?.message;
 
-      console.warn(
+      console.info(
         "[options]",
         "background port disconnected",
         disconnectError ?? "",
@@ -1232,13 +1232,13 @@ function translationPathDescription(
 ): string {
   switch (path) {
     case "offscreen-translator":
-      return "Offscreen Translator";
+      return "翻訳API（Offscreen Chrome Translator）";
     case "content-translator":
-      return "Content Script Translator";
+      return "翻訳API（Content Script Chrome Translator）";
     case "language-model":
-      return "LanguageModel";
+      return "AIモデル（ブラウザ内蔵 LanguageModel）";
     case "none":
-      return "翻訳未使用";
+      return "翻訳なし（英語原文）";
   }
 }
 

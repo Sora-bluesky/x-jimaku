@@ -59,6 +59,7 @@ function installTranslator(
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
 
@@ -307,6 +308,246 @@ describe("normalizeLanguageModelResponse", () => {
     ).toBe("こんにちは");
   });
 });
+
+describe(
+  "TranslationEngine queue capacity",
+  () => {
+    it(
+      "keeps stop-flush clauses when the live queue is full",
+      async () => {
+        const first =
+          createDeferred<string>();
+        const second =
+          createDeferred<string>();
+        const third =
+          createDeferred<string>();
+        const pending = [
+          first,
+          second,
+          third,
+        ];
+        const translate = vi.fn(() => {
+          const next = pending.shift();
+
+          if (next === undefined) {
+            return Promise.reject(
+              new Error(
+                "Unexpected translation call",
+              ),
+            );
+          }
+
+          return next.promise;
+        });
+
+        installTranslator(translate);
+
+        const warning = vi
+          .spyOn(console, "warn")
+          .mockImplementation(() => {
+          });
+        const onTranslated = vi.fn();
+        const engine =
+          new TranslationEngine({
+            backend: "translator",
+            getContext: () => ({
+              recentPairs: [],
+              properNouns: [],
+            }),
+            requestContentTranslation:
+              vi.fn(async () => ({
+                available: false,
+                ja: "",
+              })),
+            onTranslated,
+            onPathChanged: vi.fn(),
+          });
+
+        await engine.initialize();
+
+        engine.enqueue({
+          id: 1,
+          text: "first",
+          final: true,
+          at: "2026-08-30T00:00:00.000Z",
+        });
+        engine.enqueue({
+          id: 2,
+          text: "second",
+          final: true,
+          at: "2026-08-30T00:00:01.000Z",
+        });
+        engine.enqueue(
+          {
+            id: 3,
+            text: "third",
+            final: true,
+            at: "2026-08-30T00:00:02.000Z",
+          },
+          { stopFlush: true },
+        );
+
+        const drainPromise = engine.drain();
+
+        expect(warning).not.toHaveBeenCalled();
+
+        first.resolve("一");
+        await vi.waitFor(() => {
+          expect(translate).toHaveBeenCalledTimes(
+            2,
+          );
+        });
+
+        second.resolve("二");
+        await vi.waitFor(() => {
+          expect(translate).toHaveBeenCalledTimes(
+            3,
+          );
+        });
+
+        third.resolve("三");
+
+        await expect(
+          drainPromise,
+        ).resolves.toBe(true);
+        expect(
+          onTranslated,
+        ).toHaveBeenNthCalledWith(
+          1,
+          expect.objectContaining({ id: 1 }),
+          "一",
+        );
+        expect(
+          onTranslated,
+        ).toHaveBeenNthCalledWith(
+          2,
+          expect.objectContaining({ id: 2 }),
+          "二",
+        );
+        expect(
+          onTranslated,
+        ).toHaveBeenNthCalledWith(
+          3,
+          expect.objectContaining({ id: 3 }),
+          "三",
+        );
+
+        engine.destroy();
+      },
+    );
+
+    it(
+      "keeps the live-path drop and logs only id and text length",
+      async () => {
+        const first =
+          createDeferred<string>();
+        const third =
+          createDeferred<string>();
+        const pending = [first, third];
+        const translate = vi.fn(() => {
+          const next = pending.shift();
+
+          if (next === undefined) {
+            return Promise.reject(
+              new Error(
+                "Unexpected translation call",
+              ),
+            );
+          }
+
+          return next.promise;
+        });
+
+        installTranslator(translate);
+
+        const warning = vi
+          .spyOn(console, "warn")
+          .mockImplementation(() => {
+          });
+        const onTranslated = vi.fn();
+        const engine =
+          new TranslationEngine({
+            backend: "translator",
+            getContext: () => ({
+              recentPairs: [],
+              properNouns: [],
+            }),
+            requestContentTranslation:
+              vi.fn(async () => ({
+                available: false,
+                ja: "",
+              })),
+            onTranslated,
+            onPathChanged: vi.fn(),
+          });
+
+        await engine.initialize();
+
+        engine.enqueue({
+          id: 1,
+          text: "first",
+          final: true,
+          at: "2026-08-30T00:00:00.000Z",
+        });
+        engine.enqueue({
+          id: 2,
+          text: "second",
+          final: true,
+          at: "2026-08-30T00:00:01.000Z",
+        });
+        engine.enqueue({
+          id: 3,
+          text: "third",
+          final: true,
+          at: "2026-08-30T00:00:02.000Z",
+        });
+
+        expect(warning.mock.calls).toEqual([
+          [
+            "[translate] dropped oldest pending committed clause (id=2, textLength=6)",
+          ],
+        ]);
+
+        const drainPromise = engine.drain();
+
+        first.resolve("一");
+        await vi.waitFor(() => {
+          expect(translate).toHaveBeenCalledTimes(
+            2,
+          );
+        });
+
+        third.resolve("三");
+
+        await expect(
+          drainPromise,
+        ).resolves.toBe(true);
+        expect(
+          onTranslated,
+        ).toHaveBeenNthCalledWith(
+          1,
+          expect.objectContaining({ id: 1 }),
+          "一",
+        );
+        expect(
+          onTranslated,
+        ).toHaveBeenNthCalledWith(
+          2,
+          expect.objectContaining({ id: 3 }),
+          "三",
+        );
+        expect(
+          onTranslated,
+        ).not.toHaveBeenCalledWith(
+          expect.objectContaining({ id: 2 }),
+          expect.anything(),
+        );
+
+        engine.destroy();
+      },
+    );
+  },
+);
 
 describe("TranslationEngine drain", () => {
   it("delivers the final clause before a successful drain completes", async () => {

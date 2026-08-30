@@ -43,6 +43,9 @@ import {
   type AudioCaptureCallbacks,
 } from "./audio-capture";
 import {
+  describePcmSequenceGap,
+} from "./pcm-sequence-log";
+import {
   WhisperSegmenter,
   type RecognitionLine,
 } from "./segmenter";
@@ -123,6 +126,9 @@ let activeTranslationEngine:
   | TranslationEngine
   | null = null;
 let activeTranslationRequestId:
+  | string
+  | null = null;
+let stopFlushTranslationRequestId:
   | string
   | null = null;
 let activeTranslationPath:
@@ -769,25 +775,21 @@ function detectPcmSequenceGap(
     ) {
       lastPcmGapLogAt = now;
 
-      if (receivedSequence < expected) {
-        console.warn(
-          "[offscreen] pcm sequence restarted after recovery; audio during the disconnect was not captured",
-          {
-            expected,
-            received: receivedSequence,
-          },
+      const gapLog =
+        describePcmSequenceGap(
+          expected,
+          receivedSequence,
+        );
+
+      if (gapLog.level === "info") {
+        console.info(
+          gapLog.message,
+          gapLog.payload,
         );
       } else {
-        const lost =
-          receivedSequence - expected;
-
         console.warn(
-          `[offscreen] lost ${lost} pcm chunks in transit`,
-          {
-            expected,
-            received: receivedSequence,
-            lost,
-          },
+          gapLog.message,
+          gapLog.payload,
         );
       }
     }
@@ -1330,8 +1332,19 @@ function beginRecognitionDrain(
     return;
   }
 
-  activeSegmenter?.stop();
-  activeSegmenter = null;
+  const segmenter = activeSegmenter;
+
+  stopFlushTranslationRequestId =
+    segmenter === null
+      ? null
+      : activeRecognitionRequestId;
+
+  try {
+    segmenter?.stop();
+  } finally {
+    stopFlushTranslationRequestId = null;
+    activeSegmenter = null;
+  }
 
   activeWhisperSession?.terminate();
   activeWhisperSession = null;
@@ -1483,13 +1496,23 @@ function postRecognition(
     },
   );
 
-  activeTranslationEngine?.enqueue({
-    id: line.id,
-    text,
-    final: true,
-    at: line.at,
-    skipTranslation,
-  });
+  activeTranslationEngine?.enqueue(
+    {
+      id: line.id,
+      text,
+      final: true,
+      at: line.at,
+      skipTranslation,
+    },
+    {
+      // A stop flush is bounded by max_new_tokens: 96 and the
+      // segmenter's 10-word clause target, so bypassing the
+      // live cap adds no more than about 10 clauses.
+      stopFlush:
+        stopFlushTranslationRequestId ===
+        requestId,
+    },
+  );
 }
 
 function prepareRecognitionBuffer(

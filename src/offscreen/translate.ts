@@ -24,6 +24,10 @@ export interface TranslationQueueEntry
   skipTranslation?: boolean;
 }
 
+export interface TranslationEnqueueOptions {
+  stopFlush?: boolean;
+}
+
 export interface TranslationPair {
   en: string;
   ja: string;
@@ -143,7 +147,10 @@ export class TranslationEngine {
     return operation;
   }
 
-  enqueue(line: TranslationQueueEntry): void {
+  enqueue(
+    line: TranslationQueueEntry,
+    options: TranslationEnqueueOptions = {},
+  ): void {
     const skipTranslation =
       line.skipTranslation === true;
 
@@ -164,22 +171,15 @@ export class TranslationEngine {
       (this.processing ? 1 : 0);
 
     if (
+      options.stopFlush !== true &&
       this.queue.length >=
-      Math.max(1, queuedCapacity)
+        Math.max(1, queuedCapacity)
     ) {
       const dropped = this.queue.shift();
 
       if (dropped !== undefined) {
         console.warn(
-          "[translate]",
-          "dropped oldest pending committed clause",
-          {
-            id: dropped.id,
-            text: dropped.text,
-            skipTranslation:
-              dropped.skipTranslation ===
-              true,
-          },
+          `[translate] dropped oldest pending committed clause (id=${dropped.id}, textLength=${dropped.text.length})`,
         );
       }
     }
