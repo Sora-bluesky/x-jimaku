@@ -1123,7 +1123,7 @@ export class TranslationEngine {
   }
 }
 
-function createTranslationPrompt(
+export function createTranslationPrompt(
   text: string,
   context: TranslationContext,
 ): string {
@@ -1132,8 +1132,11 @@ function createTranslationPrompt(
   if (context.properNouns.length > 0) {
     blocks.push(
       [
-        "[固有名詞（原綴りのまま使う）]",
-        context.properNouns.join(", "),
+        "[固有名詞（訳さず右の表記をそのまま出力に使う）]",
+        ...context.properNouns.map(
+          (term) => `${term} → ${term}`,
+        ),
+        "これらは固有名詞であり、一般語・地名・別の固有名詞として解釈しない。",
       ].join("\n"),
     );
   }
@@ -1284,12 +1287,21 @@ export function normalizeLanguageModelResponse(
   );
 }
 
-function isBadLanguageModelResponse(
+export function isBadLanguageModelResponse(
   response: string,
   source: string,
   properNouns: readonly string[],
 ): boolean {
   if (response === "") {
+    return true;
+  }
+
+  if (
+    response.includes("→") ||
+    response.includes("[固有名詞（") ||
+    response.includes("[直前の文脈]") ||
+    response.includes("[今訳す節]")
+  ) {
     return true;
   }
 

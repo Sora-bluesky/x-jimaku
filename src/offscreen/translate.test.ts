@@ -7,6 +7,8 @@ import {
 } from "vitest";
 
 import {
+  createTranslationPrompt,
+  isBadLanguageModelResponse,
   normalizeLanguageModelResponse,
   stripBalancedWrappingPair,
   stripCodeFence,
@@ -308,6 +310,83 @@ describe("normalizeLanguageModelResponse", () => {
     ).toBe("こんにちは");
   });
 });
+
+describe("createTranslationPrompt", () => {
+  it(
+    "renders proper nouns as pinned pairs with a generic negative instruction",
+    () => {
+      expect(
+        createTranslationPrompt(
+          "Roman is ready.",
+          {
+            properNouns: [
+              "Roman",
+              "Kennedy Space Center",
+            ],
+            recentPairs: [
+              {
+                en: "The checks are complete.",
+                ja: "確認は完了した。",
+              },
+            ],
+          },
+        ),
+      ).toBe(
+        [
+          "[固有名詞（訳さず右の表記をそのまま出力に使う）]",
+          "Roman → Roman",
+          "Kennedy Space Center → Kennedy Space Center",
+          "これらは固有名詞であり、一般語・地名・別の固有名詞として解釈しない。",
+          "[直前の文脈]",
+          "EN: The checks are complete.",
+          "JA: 確認は完了した。",
+          "[今訳す節]",
+          "Roman is ready.",
+        ].join("\n"),
+      );
+    },
+  );
+});
+
+describe(
+  "isBadLanguageModelResponse",
+  () => {
+    const source =
+      "This source clause is deliberately long enough for the echo checks.";
+
+    it.each([
+      "→",
+      "Roman → Roman",
+      "[固有名詞（訳さず右の表記をそのまま出力に使う）]",
+      "[直前の文脈]",
+      "[今訳す節]",
+    ])(
+      "rejects prompt echo %j",
+      (response) => {
+        expect(
+          isBadLanguageModelResponse(
+            response,
+            source,
+            ["Roman"],
+          ),
+        ).toBe(true);
+      },
+    );
+
+    it(
+      "accepts a normal translation containing a pinned proper noun",
+      () => {
+        expect(
+          isBadLanguageModelResponse(
+            "Romanの打ち上げ準備が整った。",
+            source,
+            ["Roman"],
+          ),
+        ).toBe(false);
+      },
+    );
+  },
+);
 
 describe(
   "TranslationEngine queue capacity",
