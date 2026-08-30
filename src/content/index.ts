@@ -2781,7 +2781,7 @@ function flushBufferedContentMessages():
   }
 }
 
-function extractPostContextTerms(): string[] {
+export function extractPostContextTerms(): string[] {
   const articles = new Set<HTMLElement>();
   const target =
     getCurrentAudioTapTarget();
@@ -2822,7 +2822,8 @@ function extractPostContextTerms(): string[] {
     for (const match of matches) {
       const term = match
         .normalize("NFKC")
-        .trim();
+        .trim()
+        .replace(/\.+$/u, "");
       const termLength =
         Array.from(term).length;
 
@@ -2848,6 +2849,63 @@ function extractPostContextTerms(): string[] {
           !term.startsWith("@") &&
           CONTEXT_TERM_STOPLIST.has(key)
         )
+      ) {
+        continue;
+      }
+
+      seen.add(key);
+      terms.push(term);
+
+      if (
+        terms.length >= MAX_CONTEXT_TERMS
+      ) {
+        return terms;
+      }
+    }
+  }
+
+  for (const article of articles) {
+    const normalizedText = (
+      article.innerText ||
+      article.textContent ||
+      ""
+    )
+      .normalize("NFKC")
+      .replace(/\s+/gu, " ");
+    const runs = normalizedText
+      .split(/[.!?。！？](?:\s|$)/u)
+      .flatMap(
+        (sentence) =>
+          sentence.match(
+            /(?<![@\p{L}\p{M}\p{N}'’._-])\p{Lu}[\p{L}\p{M}\p{N}'’._-]+(?: \p{Lu}[\p{L}\p{M}\p{N}'’._-]+)+/gu,
+          ) ?? [],
+      );
+
+    for (const run of runs) {
+      const term = run
+        .split(" ")
+        .slice(0, 4)
+        .map((word) =>
+          word.replace(/\.+$/u, ""),
+        )
+        .join(" ");
+      const termLength =
+        Array.from(term).length;
+
+      if (
+        termLength < 4 ||
+        termLength > 128
+      ) {
+        continue;
+      }
+
+      const key = term
+        .toLocaleLowerCase("en-US");
+
+      if (
+        key === "" ||
+        seen.has(key) ||
+        CONTEXT_TERM_STOPLIST.has(key)
       ) {
         continue;
       }

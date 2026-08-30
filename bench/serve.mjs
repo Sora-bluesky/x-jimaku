@@ -67,7 +67,7 @@ function casePageHtml(sourceUrl, contextTerms = []) {
 </head>
 <body>
   <article data-testid="tweet">
-    <div lang="en">${contextTerms.map((t) => `<span>${t}</span>`).join(" ")}
+    <div lang="en">${contextTerms.map((t) => `<span>${t}.</span>`).join("\n")}
       <a href="#">@BenchAuthor</a>
     </div>
     <video id="bench-media" src="${sourceUrl}" playsinline controls muted></video>
