@@ -387,7 +387,7 @@ export class AudioTap {
           }
         })
         .catch((error: unknown) => {
-          console.warn(
+          console.info(
             "[tap]",
             "deferred AudioContext resume was rejected",
             error,
