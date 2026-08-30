@@ -35,9 +35,10 @@ CfT には翻訳モデルが降りないため、訳質の jaClauses は実 Chro
 
 1. `node bench/serve-standalone.mjs` で fixture サーバだけを起動する（8123 固定）。
 2. 拡張を読み込んだ実 Chrome で `http://127.0.0.1:8123/case.html` を開く。再生開始はタブ前面 + 実クリックが要る（autoplay ポリシー）。
-3. DEV origin なので `window.postMessage({t:'CS_DEV_SET_SETTINGS', settings:{...}})` と `{t:'CS_DEV_TOGGLE'}` で backend/model 切替とトグルを scripting できる。
-4. overlay の shadow DOM から `.caption-primary` を 300ms 間隔で重複排除しつつ収集し、`recognition.jaClauses` に詰めた result JSON を `bench/results/live2-*.json` として保存する。
-5. あとは上記「日本語訳質の採点」と同じ（agy はプロンプト直埋め・ツール使用禁止を明示する）。
+3. DEV origin なので `window.postMessage({t:'CS_DEV_SET_SETTINGS', settings:{...}})` と `{t:'CS_DEV_TOGGLE'}` で backend/model 切替とトグルを scripting できる。**settings の反映は fire-and-forget**（`src/background/index.ts:427` → capture は storage を独立に snapshot する）なので、設定投稿からトグルまで 2 秒以上空け、採取開始後に出力の文体か options ページの翻訳経路表示で意図した backend で動いていることを確認してから採用する。
+4. **モデルが cold のときは fixture を先に再生しない**。ハーネスと同じく、トグル後に「字幕ON」へ達するまで動画を一時停止し、到達後に `currentTime = 0` へ巻き戻してから再生する（先に流すと最初のループ分の音声が採取から欠ける）。warm なら省略可（2026-08-30 のベースラインは warm・チップは即 字幕ON）。
+5. overlay の shadow DOM から `.caption-primary` を 300ms 間隔で重複排除しつつ収集し、`recognition.jaClauses` に詰めた result JSON を `bench/results/live2-*.json` として保存する。
+6. あとは上記「日本語訳質の採点」と同じ（agy はプロンプト直埋め・ツール使用禁止を明示する）。
 
 ベースライン（2026-08-30・95 秒ループ採取）: prompt-api/base = 誤訳10/欠落1/不自然10 (n=32)、
 translator/base = 6/2/7 (n=21)。judge ノイズはカテゴリ ±2・合計 ±2（同一採取の2回採点で実測）。
