@@ -5,6 +5,15 @@ import type {
 import type {
   TranslationBackend,
 } from "../shared/settings";
+import type {
+  MaskPlan,
+  MaskedTranslationLine,
+} from "./term-masking";
+import {
+  createMaskPlan,
+  remaskPlannedTerms,
+  restoreMaskedTranslation,
+} from "./term-masking";
 
 type TranslatorScope = typeof globalThis & {
   Translator?: TranslatorFactory;
@@ -315,6 +324,12 @@ export class TranslationEngine {
   private async translateWithFallback(
     text: string,
   ): Promise<TranslationAttemptResult | null> {
+    const context = this.readContext();
+    const request = createMaskPlan(
+      text,
+      context.properNouns,
+    );
+
     while (
       !this.destroyed &&
       this.path !== null &&
@@ -327,7 +342,8 @@ export class TranslationEngine {
         const result =
           await this.translateUsingPath(
             attemptedPath,
-            text,
+            request,
+            context,
           );
         const normalized = result.ja.trim();
 
@@ -376,10 +392,17 @@ export class TranslationEngine {
 
   private async translateUsingPath(
     path: TranslationPath,
-    text: string,
+    request: MaskedTranslationLine,
+    context: TranslationContext,
   ): Promise<TranslationAttemptResult> {
     switch (path) {
       case "offscreen-translator":
+        if (request.maskPlan !== null) {
+          return this.rescueLanguageModelLine(
+            request,
+          );
+        }
+
         if (this.translator === null) {
           throw new Error(
             "Offscreen Translator is not initialized",
@@ -388,15 +411,23 @@ export class TranslationEngine {
 
         return {
           ja: await this.translator.translate(
-            text,
+            request.original,
           ),
           recordHistory: true,
         };
 
       case "content-translator": {
+        if (request.maskPlan !== null) {
+          return this.rescueLanguageModelLine(
+            request,
+          );
+        }
+
         const response =
           await this.options
-            .requestContentTranslation(text);
+            .requestContentTranslation(
+              request.original,
+            );
 
         if (!response.available) {
           throw new Error(
@@ -412,7 +443,8 @@ export class TranslationEngine {
 
       case "language-model":
         return this.translateWithLanguageModel(
-          text,
+          request,
+          context,
         );
 
       case "none":
@@ -423,12 +455,13 @@ export class TranslationEngine {
   }
 
   private async translateWithLanguageModel(
-    text: string,
+    request: MaskedTranslationLine,
+    context: TranslationContext,
   ): Promise<TranslationAttemptResult> {
-    const context = this.readContext();
     const prompt = createTranslationPrompt(
-      text,
+      request.masked,
       context,
+      request.maskPlan,
     );
     const startedAt = performance.now();
     let rawResponse: string;
@@ -456,7 +489,7 @@ export class TranslationEngine {
           error,
         );
         return this.rescueLanguageModelLine(
-          text,
+          request,
         );
       }
 
@@ -471,11 +504,32 @@ export class TranslationEngine {
       normalizeLanguageModelResponse(
         rawResponse,
       );
+    const restored =
+      restoreMaskedTranslation(
+        normalized,
+        request.maskPlan,
+      );
+
+    if (restored === null) {
+      console.info(
+        "[translate]",
+        "LanguageModel placeholder verification failed; using line rescue",
+        {
+          responseLength:
+            Array.from(normalized).length,
+          sourceLength:
+            Array.from(request.original).length,
+        },
+      );
+      return this.rescueLanguageModelLine(
+        request,
+      );
+    }
 
     if (
       isBadLanguageModelResponse(
-        normalized,
-        text,
+        restored,
+        request.original,
         context.properNouns,
       )
     ) {
@@ -484,18 +538,18 @@ export class TranslationEngine {
         "LanguageModel returned an invalid translation; using line rescue",
         {
           responseLength:
-            Array.from(normalized).length,
+            Array.from(restored).length,
           sourceLength:
-            Array.from(text).length,
+            Array.from(request.original).length,
         },
       );
       return this.rescueLanguageModelLine(
-        text,
+        request,
       );
     }
 
     return {
-      ja: normalized,
+      ja: restored,
       recordHistory: true,
     };
   }
@@ -642,7 +696,7 @@ export class TranslationEngine {
   }
 
   private async rescueLanguageModelLine(
-    text: string,
+    request: MaskedTranslationLine,
   ): Promise<TranslationAttemptResult> {
     for (
       const rescuePath of [
@@ -671,10 +725,10 @@ export class TranslationEngine {
           rescuePath ===
           "offscreen-translator"
             ? await this.translator
-                ?.translate(text)
+                ?.translate(request.masked)
             : await this.options
                 .requestContentTranslation(
-                  text,
+                  request.masked,
                 );
 
         const ja =
@@ -692,8 +746,20 @@ export class TranslationEngine {
           );
         }
 
+        const restored =
+          restoreMaskedTranslation(
+            ja,
+            request.maskPlan,
+          );
+
+        if (restored === null) {
+          throw new Error(
+            "Translator rescue failed placeholder verification",
+          );
+        }
+
         return {
-          ja,
+          ja: restored,
           recordHistory: true,
         };
       } catch (error) {
@@ -717,7 +783,7 @@ export class TranslationEngine {
     }
 
     return {
-      ja: text,
+      ja: request.original,
       recordHistory: false,
     };
   }
@@ -1126,14 +1192,33 @@ export class TranslationEngine {
 function createTranslationPrompt(
   text: string,
   context: TranslationContext,
+  maskPlan: MaskPlan | null,
 ): string {
   const blocks: string[] = [];
+  const maskedTerms = new Set(
+    maskPlan?.entries.map(
+      (entry) => entry.term,
+    ) ?? [],
+  );
+  const promptProperNouns =
+    context.properNouns.filter(
+      (term) => !maskedTerms.has(term),
+    );
+  const renderHistoryText = (
+    value: string,
+  ): string =>
+    maskPlan === null
+      ? value
+      : remaskPlannedTerms(
+          value,
+          maskPlan,
+        );
 
-  if (context.properNouns.length > 0) {
+  if (promptProperNouns.length > 0) {
     blocks.push(
       [
         "[固有名詞（原綴りのまま使う）]",
-        context.properNouns.join(", "),
+        promptProperNouns.join(", "),
       ].join("\n"),
     );
   }
@@ -1144,8 +1229,8 @@ function createTranslationPrompt(
         "[直前の文脈]",
         ...context.recentPairs.flatMap(
           (pair) => [
-            `EN: ${pair.en}`,
-            `JA: ${pair.ja}`,
+            `EN: ${renderHistoryText(pair.en)}`,
+            `JA: ${renderHistoryText(pair.ja)}`,
           ],
         ),
       ].join("\n"),
