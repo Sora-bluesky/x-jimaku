@@ -1097,16 +1097,126 @@ function createTranslationPrompt(
   return blocks.join("\n");
 }
 
-function normalizeLanguageModelResponse(
-  response: string,
+export function stripCodeFence(
+  text: string,
 ): string {
-  return response
-    .trim()
+  const sameLine = text.match(
+    /^```([^\r\n]*?)```$/u,
+  );
+
+  if (sameLine !== null) {
+    return sameLine[1].trim();
+  }
+
+  // The info string only exists when a
+  // newline follows: without one, the
+  // whole response would be consumed as
+  // an info string.
+  return text
     .replace(
-      /^(?:```[^\r\n]*\r?\n)?\s*(?:(?:翻訳|訳|日本語訳)\s*[:：]\s*)?["'“”‘’「『]*|["'“”‘’」』]*\s*(?:\r?\n?```)?$/gu,
+      /^```[^\r\n]*\r?\n/u,
+      "",
+    )
+    .replace(
+      /\r?\n?```$/u,
       "",
     )
     .trim();
+}
+
+export function stripTranslationLabel(
+  text: string,
+): string {
+  return text
+    .replace(
+      /^(?:翻訳|日本語訳|訳)\s*[:：]\s*/u,
+      "",
+    )
+    .trim();
+}
+
+const WRAPPING_PAIRS: ReadonlyMap<
+  string,
+  string
+> = new Map([
+  ["「", "」"],
+  ["『", "』"],
+  ["“", "”"],
+  ["‘", "’"],
+  ['"', '"'],
+  ["'", "'"],
+]);
+
+export function stripBalancedWrappingPair(
+  text: string,
+): string {
+  const characters = Array.from(text);
+
+  if (characters.length < 2) {
+    return text;
+  }
+
+  const opener = characters[0];
+  const closer =
+    WRAPPING_PAIRS.get(opener);
+
+  if (
+    closer === undefined ||
+    characters[characters.length - 1] !==
+      closer
+  ) {
+    return text;
+  }
+
+  const inner = characters.slice(1, -1);
+
+  if (opener === closer) {
+    // Symmetric quotes cannot be paired
+    // unambiguously, so only strip when
+    // the inside has none of them.
+    if (inner.includes(opener)) {
+      return text;
+    }
+
+    return inner.join("").trim();
+  }
+
+  // The outer pair must be the one that
+  // closes at the very end: if the depth
+  // returns to zero earlier, the leading
+  // opener pairs with an inner closer
+  // (「A」とB) and must stay.
+  let depth = 1;
+
+  for (const character of inner) {
+    if (character === opener) {
+      depth += 1;
+    } else if (character === closer) {
+      depth -= 1;
+
+      if (depth === 0) {
+        return text;
+      }
+    }
+  }
+
+  if (depth !== 1) {
+    return text;
+  }
+
+  return inner.join("").trim();
+}
+
+export function normalizeLanguageModelResponse(
+  response: string,
+): string {
+  return stripBalancedWrappingPair(
+    stripTranslationLabel(
+      stripCodeFence(
+        response.trim(),
+      ),
+    ),
+  );
 }
 
 function isBadLanguageModelResponse(
