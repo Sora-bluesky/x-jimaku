@@ -8,6 +8,7 @@ import {
   type ContentScriptProbeResultMessage,
   type CsDevSetSettingsMessage,
   type CsDevToggleMessage,
+  type CsDrainCompleteMessage,
   type CsEosMessage,
   type CsPcmMessage,
   type CsPongMessage,
@@ -15,6 +16,7 @@ import {
   type CsTranslateMessage,
   type CsTranslateResultMessage,
   type M1Message,
+  type OffDrainReadyMessage,
   type ProbeFailureMessage,
   type SwCaptionMessage,
   type TranslationPath,
@@ -23,6 +25,9 @@ import {
 import {
   DEFAULT_SETTINGS,
 } from "../shared/settings";
+import {
+  presentCaptionIfAllowed,
+} from "../shared/explicit-stop-drain";
 import type {
   CaptureState,
   CaptureStatus,
@@ -73,6 +78,7 @@ type BufferedContentMessage =
 
 type OutboundContentMessage =
   | BufferedContentMessage
+  | CsDrainCompleteMessage
   | CsTapStateMessage
   | CsTranslateResultMessage;
 
@@ -258,6 +264,15 @@ let playbackEventTarget:
   | HTMLVideoElement
   | null = null;
 let targetPlaybackPaused = false;
+let drainingRequestId:
+  | string
+  | null = null;
+let drainReadyRequestId:
+  | string
+  | null = null;
+let drainCompleteSentRequestId:
+  | string
+  | null = null;
 
 const instanceWindow =
   window as ContentInstanceWindow;
@@ -552,17 +567,26 @@ function connectBackgroundPort(): void {
             "CS_STOP_TAP",
           )
         ) {
+          const drain =
+            isDrainingRequest(
+              message.requestId,
+            );
+
           closeGraceEpisodeForRequest(
             message.requestId,
             "explicit-stop",
           );
-          contentSendBuffer.clear();
+
+          if (!drain) {
+            contentSendBuffer.clear();
+          }
 
           clearPendingContextTerms(
             message.requestId,
           );
 
           if (
+            !drain &&
             contentSessionRequestId ===
               message.requestId
           ) {
@@ -595,7 +619,20 @@ function connectBackgroundPort(): void {
             "OFF_STATE",
           )
         ) {
-          handleCaptureState(message.state);
+          handleCaptureState(
+            message.state,
+            message.drain === true,
+          );
+          return;
+        }
+
+        if (
+          isMessageOfType(
+            message,
+            "OFF_DRAIN_READY",
+          )
+        ) {
+          handleDrainReady(message);
           return;
         }
 
@@ -660,6 +697,10 @@ function connectBackgroundPort(): void {
             "SW_CAPTION_CLEAR",
           )
         ) {
+          if (isDrainingRequest()) {
+            return;
+          }
+
           captionOverlay?.clear();
 
           if (
@@ -700,6 +741,7 @@ function connectBackgroundPort(): void {
         lastCaptureStatus = "idle";
         activeCaptureRequestId = null;
         contentSessionRequestId = null;
+        clearExplicitStopDrainState();
         clearPendingContextTerms();
         destroyOverlay();
         return;
@@ -719,7 +761,7 @@ function connectBackgroundPort(): void {
         activeTap !== null;
 
       if (disconnectDuringCapture) {
-        console.warn(
+        console.info(
           "[cs]",
           "background port disconnected during capture",
           disconnectError ?? "",
@@ -746,6 +788,7 @@ function connectBackgroundPort(): void {
       activeShowOriginal =
         DEFAULT_SETTINGS.showOriginal;
       contentSessionRequestId = null;
+      clearExplicitStopDrainState();
       clearPendingContextTerms();
       resetContentTranslator();
       destroyOverlay();
@@ -861,9 +904,8 @@ function scheduleGraceEpisodeExpiry(
           );
 
         if (transition !== null) {
-          beginFullGraceTeardown(
-            transition.episode.requestId,
-            "grace period expired",
+          handleExpiredGraceEpisode(
+            transition,
           );
         }
       },
@@ -909,11 +951,26 @@ function expireGraceEpisodeAt(
   }
 
   clearGraceEpisodeTimer();
+  handleExpiredGraceEpisode(transition);
+  return transition;
+}
+
+function handleExpiredGraceEpisode(
+  transition: GraceEpisodeTransition,
+): void {
+  console.warn(
+    "[cs]",
+    "background reconnect grace period expired; capture recovery failed",
+    {
+      requestId:
+        transition.episode.requestId,
+    },
+  );
+
   beginFullGraceTeardown(
     transition.episode.requestId,
     "grace period expired",
   );
-  return transition;
 }
 
 function closeGraceEpisodeForRequest(
@@ -1007,6 +1064,7 @@ function beginFullGraceTeardown(
   activeShowOriginal =
     DEFAULT_SETTINGS.showOriginal;
   contentSessionRequestId = null;
+  clearExplicitStopDrainState();
   clearPendingContextTerms();
   resetContentTranslator();
   destroyOverlay();
@@ -1269,6 +1327,8 @@ function prepareFreshTapSession(
   message: CsStartTapMessage,
   preservePresentation: boolean,
 ): void {
+  clearExplicitStopDrainState();
+
   activeShowOriginal =
     message.settings?.showOriginal ??
     DEFAULT_SETTINGS.showOriginal;
@@ -1842,16 +1902,24 @@ async function startTap(
         return;
       }
 
+      const drain =
+        isDrainingRequest(requestId);
+
       closeGraceEpisodeForRequest(
         requestId,
         "explicit-stop",
       );
-      contentSendBuffer.clear();
+
+      if (!drain) {
+        contentSendBuffer.clear();
+      }
+
       endedAudioTapTarget = null;
       lastEosRequestId = null;
       clearPendingContextTerms(requestId);
 
       if (
+        !drain &&
         contentSessionRequestId ===
           requestId
       ) {
@@ -1860,11 +1928,16 @@ async function startTap(
       }
 
       lastCaptureStatus = "stopping";
-      activeCaptureRequestId = null;
-      activeTranslationPath = null;
       activeSilentInputShowHint = false;
       clearActiveTap(tap);
-      destroyOverlay();
+
+      if (drain) {
+        refreshSilentInputHint();
+      } else {
+        activeCaptureRequestId = null;
+        activeTranslationPath = null;
+        destroyOverlay();
+      }
 
       postTapState(
         requestId,
@@ -2050,6 +2123,7 @@ function clearActiveTap(
 
 function handleCaptureState(
   state: CaptureState,
+  drain = false,
 ): void {
   if (
     isActivePresentationStatus(
@@ -2061,6 +2135,7 @@ function handleCaptureState(
       activeCaptureRequestId !==
       state.requestId
     ) {
+      clearExplicitStopDrainState();
       activeCaptureRequestId =
         state.requestId;
       activeTranslationPath = null;
@@ -2108,6 +2183,7 @@ function handleCaptureState(
       return;
 
     case "error":
+      clearExplicitStopDrainState();
       closeCurrentGraceEpisode(
         "explicit-stop",
       );
@@ -2125,22 +2201,49 @@ function handleCaptureState(
       return;
 
     case "stopping":
+      if (
+        drain &&
+        state.requestId !== undefined
+      ) {
+        drainingRequestId =
+          state.requestId;
+        drainReadyRequestId = null;
+        drainCompleteSentRequestId = null;
+        closeCurrentGraceEpisode(
+          "explicit-stop",
+        );
+        finishCurrentPcmSendDropSession();
+        endedAudioTapTarget = null;
+        lastEosRequestId = null;
+        activeSilentInputShowHint = false;
+        clearPendingContextTerms(
+          state.requestId,
+        );
+        cancelOverlayDestroy();
+        refreshSilentInputHint();
+        return;
+      }
+      break;
+
     case "idle":
-      closeCurrentGraceEpisode(
-        "explicit-stop",
-      );
-      contentSendBuffer.clear();
-      finishCurrentPcmSendDropSession();
-      activeCaptureRequestId = null;
-      activeTranslationPath = null;
-      endedAudioTapTarget = null;
-      lastEosRequestId = null;
-      activeSilentInputShowHint = false;
-      contentSessionRequestId = null;
-      clearPendingContextTerms();
-      resetContentTranslator();
-      destroyOverlay();
+      break;
   }
+
+  clearExplicitStopDrainState();
+  closeCurrentGraceEpisode(
+    "explicit-stop",
+  );
+  contentSendBuffer.clear();
+  finishCurrentPcmSendDropSession();
+  activeCaptureRequestId = null;
+  activeTranslationPath = null;
+  endedAudioTapTarget = null;
+  lastEosRequestId = null;
+  activeSilentInputShowHint = false;
+  contentSessionRequestId = null;
+  clearPendingContextTerms();
+  resetContentTranslator();
+  destroyOverlay();
 }
 
 function isActivePresentationStatus(
@@ -2163,8 +2266,15 @@ function isPresentationMessageCurrent(
   return (
     expectedRequestId !== null &&
     expectedRequestId === requestId &&
-    isActivePresentationStatus(
-      lastCaptureStatus,
+    (
+      isActivePresentationStatus(
+        lastCaptureStatus,
+      ) ||
+      (
+        lastCaptureStatus ===
+          "stopping" &&
+        drainingRequestId === requestId
+      )
     )
   );
 }
@@ -2172,8 +2282,82 @@ function isPresentationMessageCurrent(
 function handleCaption(
   message: SwCaptionMessage,
 ): void {
-  cancelOverlayDestroy();
-  ensureOverlay().showCaption(message);
+  presentCaptionIfAllowed(
+    lastCaptureStatus,
+    drainingRequestId,
+    () => {
+      cancelOverlayDestroy();
+      ensureOverlay().showCaption(message);
+    },
+  );
+}
+
+function handleDrainReady(
+  message: OffDrainReadyMessage,
+): void {
+  if (
+    !isDrainingRequest(
+      message.requestId,
+    ) ||
+    (
+      contentSessionRequestId !==
+        message.requestId &&
+      activeCaptureRequestId !==
+        message.requestId
+    )
+  ) {
+    return;
+  }
+
+  drainReadyRequestId =
+    message.requestId;
+
+  if (
+    captionOverlay === null ||
+    !captionOverlay.hasPendingCaption()
+  ) {
+    postExplicitStopDrainComplete(
+      message.requestId,
+    );
+  }
+}
+
+function postExplicitStopDrainComplete(
+  requestId: string,
+): void {
+  if (
+    drainCompleteSentRequestId ===
+      requestId
+  ) {
+    return;
+  }
+
+  const message: CsDrainCompleteMessage = {
+    t: "CS_DRAIN_COMPLETE",
+    requestId,
+  };
+
+  if (postContentMessage(message)) {
+    drainCompleteSentRequestId =
+      requestId;
+  }
+}
+
+function isDrainingRequest(
+  requestId?: string,
+): boolean {
+  if (requestId === undefined) {
+    return drainingRequestId !== null;
+  }
+
+  return drainingRequestId === requestId;
+}
+
+function clearExplicitStopDrainState():
+  void {
+  drainingRequestId = null;
+  drainReadyRequestId = null;
+  drainCompleteSentRequestId = null;
 }
 
 function ensureOverlay(): CaptionOverlay {
@@ -2190,6 +2374,21 @@ function ensureOverlay(): CaptionOverlay {
       endedAudioTapTarget,
     showOriginal: activeShowOriginal,
     onCaptionFadeOut() {
+      if (
+        drainReadyRequestId !== null &&
+        drainReadyRequestId ===
+          drainingRequestId
+      ) {
+        postExplicitStopDrainComplete(
+          drainReadyRequestId,
+        );
+        return;
+      }
+
+      if (isDrainingRequest()) {
+        return;
+      }
+
       if (
         lastCaptureStatus === "idle" ||
         lastCaptureStatus === "stopping"

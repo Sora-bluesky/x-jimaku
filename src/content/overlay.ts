@@ -2,6 +2,16 @@ import type {
   TranslationPath,
 } from "../shared/messages";
 import {
+  CAPTION_FADE_MS,
+  CAPTION_VISIBLE_MS,
+  CUE_ACCELERATED_DISPLAY_MS,
+  CUE_MINIMUM_DISPLAY_MS,
+  MAX_WAITING_CUES,
+} from "../shared/explicit-stop-drain";
+import {
+  INITIALIZATION_PROGRESS_CEILING,
+} from "../shared/initialization-progress";
+import {
   cueDisplayDurationMs,
   decideCueQueueDiscipline,
   retainAccelerationUntilDrained,
@@ -18,18 +28,16 @@ import type {
 } from "./silent-hint";
 
 export {
+  CUE_ACCELERATED_DISPLAY_MS,
+  CUE_MINIMUM_DISPLAY_MS,
   MAX_CUE_UNITS,
+  MAX_WAITING_CUES,
   splitCueText,
   wrapCueText,
 };
 
 const HOST_ID = "xjsub-host";
-const CAPTION_VISIBLE_MS = 5_000;
-const CAPTION_FADE_MS = 350;
-export const CUE_MINIMUM_DISPLAY_MS = 1_500;
-export const CUE_ACCELERATED_DISPLAY_MS = 1_000;
 export const CUE_ACCELERATION_THRESHOLD = 2;
-export const MAX_WAITING_CUES = 6;
 const CUE_DROP_WARNING_INTERVAL_MS = 5_000;
 const MAX_ORIGINAL_CHARS = 140;
 const PRIMARY_LINE_HEIGHT = 1.16;
@@ -543,6 +551,15 @@ export class CaptionOverlay {
       state,
       progress: this.progress,
     });
+  }
+
+  hasPendingCaption(): boolean {
+    return (
+      this.activeCue !== null ||
+      this.waitingCues.length > 0 ||
+      this.pendingFinals.size > 0 ||
+      this.tentativeLine.textContent !== ""
+    );
   }
 
   destroy(): void {
@@ -1810,6 +1827,16 @@ export class CaptionOverlay {
         this.targetChip.classList.add(
           "status-loading",
         );
+
+        if (
+          this.progress !== undefined &&
+          this.progress >=
+            INITIALIZATION_PROGRESS_CEILING
+        ) {
+          this.targetText.textContent =
+            "字幕 準備中(ウォームアップ)…";
+          return;
+        }
 
         const percent =
           this.progress === undefined

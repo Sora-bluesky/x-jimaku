@@ -9,6 +9,7 @@ import {
   nowIso,
   toProbeError,
   type ContentScriptProbeResultMessage,
+  type CsDrainCompleteMessage,
   type CsEosMessage,
   type CsPcmMessage,
   type CsPingMessage,
@@ -21,6 +22,7 @@ import {
   type DiagnosticsResultMessage,
   type M1Message,
   type OffDiagnosticMessage,
+  type OffDrainReadyMessage,
   type OffFlushRecogMessage,
   type OffLevelMessage,
   type OffQueryMessage,
@@ -56,6 +58,12 @@ import {
   type CaptureStateError,
   type CaptureStatus,
 } from "../shared/state";
+import {
+  getActionClickDisposition,
+  isCaptureRequestActiveOrDraining,
+  isExplicitStopReason,
+  isRecognitionRequestCurrent,
+} from "../shared/explicit-stop-drain";
 import {
   createCaptionReplay,
 } from "./caption-replay";
@@ -234,6 +242,9 @@ let transientErrorTimerId:
 let offscreenUnhandledErrorRecorded =
   false;
 let lastPcmRelayDropWarningAtMs = 0;
+let explicitStopDrainRequestId:
+  | string
+  | null = null;
 
 self.addEventListener(
   "error",
@@ -571,12 +582,17 @@ async function handleActionClick(
 ): Promise<void> {
   await stateInitialization;
 
-  if (isCaptureActive(captureState.status)) {
+  const disposition =
+    getActionClickDisposition(
+      captureState.status,
+    );
+
+  if (disposition === "stop") {
     requestCaptureStop("action-click");
     return;
   }
 
-  if (captureState.status === "stopping") {
+  if (disposition === "ignore") {
     return;
   }
 
@@ -934,6 +950,10 @@ function requestCaptureStop(
     captureState.requestId ??
     createProbeRequestId("capture-stop");
   const tabId = captureState.tabId;
+  const drain =
+    isExplicitStopReason(reason);
+  explicitStopDrainRequestId =
+    drain ? requestId : null;
   const startWasNotDelivered =
     captureState.status === "starting" &&
     localStartRequestId === requestId &&
@@ -950,6 +970,7 @@ function requestCaptureStop(
   stopDeliveredSession(
     tabId,
     requestId,
+    drain,
   );
 
   if (startWasNotDelivered) {
@@ -998,6 +1019,7 @@ function requestCaptureStop(
 function stopDeliveredSession(
   tabId: number | undefined,
   requestId: string,
+  drain = false,
 ): void {
   if (tabId !== undefined) {
     const content = contentPorts.get(tabId);
@@ -1014,6 +1036,7 @@ function stopDeliveredSession(
     postStopToOffscreen(
       offscreenPort,
       requestId,
+      drain,
     );
   }
 }
@@ -1116,6 +1139,19 @@ function handleContentPortConnected(
       if (
         isMessageOfType(
           message,
+          "CS_DRAIN_COMPLETE",
+        )
+      ) {
+        relayContentDrainComplete(
+          tabId,
+          message,
+        );
+        return;
+      }
+
+      if (
+        isMessageOfType(
+          message,
           "CS_TAP_STATE",
         )
       ) {
@@ -1151,7 +1187,7 @@ function handleContentPortConnected(
       return;
     }
 
-    console.warn(
+    console.info(
       "[bg]",
       "content port disconnected",
       {
@@ -1210,6 +1246,9 @@ function handleContentPortConnected(
     if (
       shouldClearCaptionForStatus(
         captureState.status,
+      ) &&
+      !isExplicitStopDrainState(
+        captureState,
       )
     ) {
       postCaptionClear(port);
@@ -1388,6 +1427,15 @@ function expireContentReconnectGraceEpisode(
   ) {
     return;
   }
+
+  console.warn(
+    "[bg]",
+    "content reconnect grace period expired; capture recovery failed",
+    {
+      requestId: expected.requestId,
+      tabId: expected.tabId,
+    },
+  );
 
   contentReconnectGraceEpisode = null;
   failDeferredTranslationRequests(
@@ -1594,9 +1642,12 @@ function relayContentTranslationResult(
 ): void {
   if (
     captureState.tabId !== tabId ||
-    captureState.requestId !==
-      message.requestId ||
-    !isCaptureActive(captureState.status)
+    !isCaptureRequestActiveOrDraining(
+      captureState.status,
+      captureState.requestId,
+      explicitStopDrainRequestId,
+      message.requestId,
+    )
   ) {
     return;
   }
@@ -1613,6 +1664,39 @@ function relayContentTranslationResult(
     console.warn(
       "[bg]",
       "could not relay content translation result to offscreen",
+      error,
+    );
+  }
+}
+
+function relayContentDrainComplete(
+  tabId: number,
+  message: CsDrainCompleteMessage,
+): void {
+  if (
+    captureState.tabId !== tabId ||
+    !isCaptureRequestActiveOrDraining(
+      captureState.status,
+      captureState.requestId,
+      explicitStopDrainRequestId,
+      message.requestId,
+    )
+  ) {
+    return;
+  }
+
+  const port = offscreenPort;
+
+  if (port === null) {
+    return;
+  }
+
+  try {
+    port.postMessage(message);
+  } catch (error) {
+    console.warn(
+      "[bg]",
+      "could not relay caption drain completion to offscreen",
       error,
     );
   }
@@ -1909,6 +1993,16 @@ function handleOffscreenPortConnected(
       if (
         isMessageOfType(
           message,
+          "OFF_DRAIN_READY",
+        )
+      ) {
+        handleOffscreenDrainReady(message);
+        return;
+      }
+
+      if (
+        isMessageOfType(
+          message,
           "CS_TRANSLATE",
         )
       ) {
@@ -1969,6 +2063,9 @@ function handleOffscreenPortConnected(
       postStopToOffscreen(
         port,
         captureState.requestId,
+        isExplicitStopDrainState(
+          captureState,
+        ),
       );
       return;
     }
@@ -2545,9 +2642,12 @@ function relayOffscreenTranslationRequest(
   message: CsTranslateMessage,
 ): void {
   if (
-    captureState.requestId !==
-      message.requestId ||
-    !isCaptureActive(captureState.status)
+    !isCaptureRequestActiveOrDraining(
+      captureState.status,
+      captureState.requestId,
+      explicitStopDrainRequestId,
+      message.requestId,
+    )
   ) {
     postTranslationFailureToOffscreen(
       message,
@@ -2734,7 +2834,12 @@ function handleOffscreenTranslationState(
   if (
     captureState.requestId !==
       message.requestId ||
-    !isCaptureActive(captureState.status)
+    (
+      !isCaptureActive(captureState.status) &&
+      !isExplicitStopDrainState(
+        captureState,
+      )
+    )
   ) {
     return;
   }
@@ -2764,6 +2869,38 @@ function handleOffscreenTranslationState(
     postTranslationState(
       content,
       relayed,
+    );
+  }
+}
+
+function handleOffscreenDrainReady(
+  message: OffDrainReadyMessage,
+): void {
+  if (
+    !isExplicitStopDrainState(
+      captureState,
+    ) ||
+    captureState.requestId !==
+      message.requestId ||
+    captureState.tabId === undefined
+  ) {
+    return;
+  }
+
+  const content =
+    contentPorts.get(captureState.tabId);
+
+  if (content === undefined) {
+    return;
+  }
+
+  try {
+    content.postMessage(message);
+  } catch (error) {
+    console.warn(
+      "[bg]",
+      "could not relay caption drain readiness to content",
+      error,
     );
   }
 }
@@ -2814,6 +2951,9 @@ function handleOffscreenState(
           postStopToOffscreen(
             offscreenPort,
             current.requestId,
+            isExplicitStopDrainState(
+              current,
+            ),
           );
         }
         return;
@@ -2864,6 +3004,9 @@ function handleOffscreenState(
           postStopToOffscreen(
             offscreenPort,
             current.requestId,
+            isExplicitStopDrainState(
+              current,
+            ),
           );
         }
         return;
@@ -3106,6 +3249,15 @@ function stateDetailsFromIncoming(
 function handleOffscreenRecognition(
   message: OffRecognitionMessage,
 ): void {
+  if (
+    !isRecognitionRequestCurrent(
+      message.requestId,
+      captureState.requestId,
+    )
+  ) {
+    return;
+  }
+
   // "stopping" still accepts lines: the segmenter's stop() flush emits the
   // final tail clause after the state has already left "running".
   if (
@@ -3212,10 +3364,12 @@ function handleOptionsPortConnected(
 function postStopToOffscreen(
   port: chrome.runtime.Port,
   requestId: string,
+  drain = false,
 ): void {
   const message: OffStopMessage = {
     t: "OFF_STOP",
     requestId,
+    drain,
   };
 
   try {
@@ -3422,7 +3576,8 @@ function replaceCaptureState(
   if (
     shouldClearCaptionForStatus(
       nextState.status,
-    )
+    ) &&
+    !isExplicitStopDrainState(nextState)
   ) {
     relayCaptionClearToContent(
       previousState,
@@ -3439,6 +3594,17 @@ function replaceCaptureState(
     scheduleOffscreenClose(
       `${previousState.status}-to-${nextState.status}`,
     );
+  }
+
+  if (
+    (
+      nextState.status === "idle" ||
+      nextState.status === "error"
+    ) &&
+    explicitStopDrainRequestId ===
+      previousState.requestId
+  ) {
+    explicitStopDrainRequestId = null;
   }
 }
 
@@ -3781,6 +3947,10 @@ function postCaptureState(
     const message: OffStateMessage = {
       t: "OFF_STATE",
       state: captureState,
+      drain:
+        isExplicitStopDrainState(
+          captureState,
+        ),
     };
 
     port.postMessage(message);
@@ -3918,6 +4088,17 @@ function isCaptureActive(
     status === "starting" ||
     status === "loadingModel" ||
     status === "running"
+  );
+}
+
+function isExplicitStopDrainState(
+  state: CaptureState,
+): boolean {
+  return (
+    state.status === "stopping" &&
+    state.requestId !== undefined &&
+    explicitStopDrainRequestId ===
+      state.requestId
   );
 }
 

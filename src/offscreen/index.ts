@@ -29,6 +29,9 @@ import {
   type CaptureState,
   type CaptureStatus,
 } from "../shared/state";
+import {
+  CAPTION_DRAIN_WAIT_MS,
+} from "../shared/explicit-stop-drain";
 import type {
   Settings,
   SourceLanguage,
@@ -39,6 +42,9 @@ import {
   AudioCapture,
   type AudioCaptureCallbacks,
 } from "./audio-capture";
+import {
+  describePcmSequenceGap,
+} from "./pcm-sequence-log";
 import {
   WhisperSegmenter,
   type RecognitionLine,
@@ -80,6 +86,12 @@ interface PendingContentTranslation {
   reject(error: Error): void;
 }
 
+interface PendingCaptionDrain {
+  requestId: string;
+  timeoutId: number;
+  resolve(): void;
+}
+
 const OFFSCREEN_PORT_NAME = "offscreen";
 const INITIAL_RECONNECT_DELAY_MS = 100;
 const MAX_RECONNECT_DELAY_MS = 1_000;
@@ -116,6 +128,9 @@ let activeTranslationEngine:
 let activeTranslationRequestId:
   | string
   | null = null;
+let stopFlushTranslationRequestId:
+  | string
+  | null = null;
 let activeTranslationPath:
   | TranslationPath
   | null = null;
@@ -144,11 +159,15 @@ let contentTranslationSequence = 0;
 const bufferedFinalRecognitions:
   OffRecognitionMessage[] = [];
 const requestedStopIds = new Set<string>();
+const drainingStopIds = new Set<string>();
 const pendingContentTranslations =
   new Map<
     string,
     PendingContentTranslation
   >();
+let pendingCaptionDrain:
+  | PendingCaptionDrain
+  | null = null;
 
 self.addEventListener(
   "error",
@@ -306,10 +325,25 @@ function connectBackgroundPort(): void {
         if (
           isMessageOfType(
             message,
+            "CS_DRAIN_COMPLETE",
+          )
+        ) {
+          handleContentDrainComplete(
+            message.requestId,
+          );
+          return;
+        }
+
+        if (
+          isMessageOfType(
+            message,
             "OFF_START",
           )
         ) {
           requestedStopIds.delete(
+            message.requestId,
+          );
+          drainingStopIds.delete(
             message.requestId,
           );
 
@@ -328,17 +362,36 @@ function connectBackgroundPort(): void {
             "OFF_STOP",
           )
         ) {
-          requestedStopIds.add(
-            message.requestId,
-          );
-          clearRecognitionBuffer();
-          terminateRecognition(
-            message.requestId,
-          );
+          const drain =
+            message.drain === true;
+
+          if (drain) {
+            requestedStopIds.delete(
+              message.requestId,
+            );
+            drainingStopIds.add(
+              message.requestId,
+            );
+            beginRecognitionDrain(
+              message.requestId,
+            );
+          } else {
+            drainingStopIds.delete(
+              message.requestId,
+            );
+            requestedStopIds.add(
+              message.requestId,
+            );
+            clearRecognitionBuffer();
+            terminateRecognition(
+              message.requestId,
+            );
+          }
 
           void enqueueCaptureOperation(() =>
             handleCaptureStop(
               message.requestId,
+              drain,
             ),
           );
         }
@@ -538,9 +591,7 @@ function handlePcm(
   if (
     activePcmRequestId !==
       message.requestId ||
-    requestedStopIds.has(
-      message.requestId,
-    ) ||
+    isStopRequested(message.requestId) ||
     !audioCapture.isActive()
   ) {
     return;
@@ -640,9 +691,7 @@ function handleEndOfStream(
   if (
     activePcmRequestId !==
       message.requestId ||
-    requestedStopIds.has(
-      message.requestId,
-    ) ||
+    isStopRequested(message.requestId) ||
     !audioCapture.isActive()
   ) {
     return;
@@ -702,6 +751,16 @@ function handleContentTranslationResult(
   });
 }
 
+function handleContentDrainComplete(
+  requestId: string,
+): void {
+  if (!drainingStopIds.has(requestId)) {
+    return;
+  }
+
+  finishPendingCaptionDrain(requestId);
+}
+
 function detectPcmSequenceGap(
   receivedSequence: number,
 ): void {
@@ -716,25 +775,21 @@ function detectPcmSequenceGap(
     ) {
       lastPcmGapLogAt = now;
 
-      if (receivedSequence < expected) {
-        console.warn(
-          "[offscreen] pcm sequence restarted after recovery; audio during the disconnect was not captured",
-          {
-            expected,
-            received: receivedSequence,
-          },
+      const gapLog =
+        describePcmSequenceGap(
+          expected,
+          receivedSequence,
+        );
+
+      if (gapLog.level === "info") {
+        console.info(
+          gapLog.message,
+          gapLog.payload,
         );
       } else {
-        const lost =
-          receivedSequence - expected;
-
         console.warn(
-          `[offscreen] lost ${lost} pcm chunks in transit`,
-          {
-            expected,
-            received: receivedSequence,
-            lost,
-          },
+          gapLog.message,
+          gapLog.payload,
         );
       }
     }
@@ -807,7 +862,7 @@ async function handleCaptureStart(
       callbacks,
     );
 
-    if (requestedStopIds.has(requestId)) {
+    if (isStopRequested(requestId)) {
       return;
     }
 
@@ -918,7 +973,7 @@ async function handleCaptureStart(
             if (
               activeWhisperSession !==
                 session ||
-              requestedStopIds.has(requestId)
+              isStopRequested(requestId)
             ) {
               return;
             }
@@ -998,7 +1053,7 @@ async function handleCaptureStart(
         activeWhisperSession = null;
       }
 
-      if (requestedStopIds.has(requestId)) {
+      if (isStopRequested(requestId)) {
         return;
       }
 
@@ -1035,7 +1090,7 @@ async function handleCaptureStart(
     }
 
     if (
-      requestedStopIds.has(requestId) ||
+      isStopRequested(requestId) ||
       activeWhisperSession !== session
     ) {
       return;
@@ -1094,7 +1149,7 @@ async function handleCaptureStart(
     );
   } catch (error) {
     if (
-      requestedStopIds.has(requestId) ||
+      isStopRequested(requestId) ||
       isAbortError(error)
     ) {
       return;
@@ -1131,6 +1186,7 @@ async function handleCaptureStart(
 
 async function handleCaptureStop(
   requestId: string,
+  drain: boolean,
 ): Promise<void> {
   pendingEosRequestId = null;
 
@@ -1152,7 +1208,21 @@ async function handleCaptureStop(
     }),
   );
 
-  terminateRecognition(requestId);
+  if (drain) {
+    beginRecognitionDrain(requestId);
+  } else {
+    terminateRecognition(requestId);
+  }
+
+  const translationEngine =
+    activeTranslationRequestId ===
+      requestId
+      ? activeTranslationEngine
+      : null;
+  const drainPromise =
+    drain && translationEngine !== null
+      ? translationEngine.drain()
+      : Promise.resolve(true);
 
   if (activePcmRequestId === requestId) {
     activePcmRequestId = null;
@@ -1160,6 +1230,14 @@ async function handleCaptureStop(
 
   try {
     await audioCapture.stop();
+
+    const drained = await drainPromise;
+
+    if (drain && drained) {
+      await waitForCaptionDrain(requestId);
+    }
+
+    terminateRecognition(requestId);
 
     latestRms = 0;
     postLevel();
@@ -1170,6 +1248,8 @@ async function handleCaptureStop(
       }),
     );
   } catch (error) {
+    terminateRecognition(requestId);
+
     publishState(
       createCaptureState("error", {
         requestId,
@@ -1177,8 +1257,11 @@ async function handleCaptureStop(
       }),
     );
   } finally {
+    finishPendingCaptionDrain(requestId);
     flushRejectedPcmChunks(requestId);
     requestedStopIds.delete(requestId);
+    drainingStopIds.delete(requestId);
+    clearRecognitionBuffer();
   }
 }
 
@@ -1198,7 +1281,7 @@ async function handleRecognitionFatal(
   await enqueueCaptureOperation(async () => {
     if (
       localCaptureState.requestId !== requestId ||
-      requestedStopIds.has(requestId)
+      isStopRequested(requestId)
     ) {
       return;
     }
@@ -1240,23 +1323,45 @@ async function handleRecognitionFatal(
   });
 }
 
-function terminateRecognition(
+function beginRecognitionDrain(
   requestId?: string,
 ): void {
   if (
-    requestId !== undefined &&
-    activeRecognitionRequestId !== null &&
-    activeRecognitionRequestId !== requestId
+    !canStopRecognitionResources(requestId)
   ) {
     return;
   }
 
-  activeSegmenter?.stop();
-  activeSegmenter = null;
+  const segmenter = activeSegmenter;
+
+  stopFlushTranslationRequestId =
+    segmenter === null
+      ? null
+      : activeRecognitionRequestId;
+
+  try {
+    segmenter?.stop();
+  } finally {
+    stopFlushTranslationRequestId = null;
+    activeSegmenter = null;
+  }
 
   activeWhisperSession?.terminate();
   activeWhisperSession = null;
   activeRecognitionRequestId = null;
+}
+
+function terminateRecognition(
+  requestId?: string,
+): void {
+  if (
+    !canStopRecognitionResources(requestId)
+  ) {
+    return;
+  }
+
+  beginRecognitionDrain(requestId);
+  finishPendingCaptionDrain(requestId);
 
   activeTranslationEngine?.destroy();
   activeTranslationEngine = null;
@@ -1276,6 +1381,36 @@ function terminateRecognition(
   );
 
   lastModelProgress = 0;
+}
+
+function canStopRecognitionResources(
+  requestId: string | undefined,
+): boolean {
+  if (requestId === undefined) {
+    return true;
+  }
+
+  return (
+    (
+      activeRecognitionRequestId === null ||
+      activeRecognitionRequestId ===
+        requestId
+    ) &&
+    (
+      activeTranslationRequestId === null ||
+      activeTranslationRequestId ===
+        requestId
+    )
+  );
+}
+
+function isStopRequested(
+  requestId: string,
+): boolean {
+  return (
+    requestedStopIds.has(requestId) ||
+    drainingStopIds.has(requestId)
+  );
 }
 
 function createWhisperWorker(): Worker {
@@ -1338,6 +1473,7 @@ function postRecognition(
   if (!line.final) {
     postToBackground({
       t: "OFF_RECOG",
+      requestId,
       id: line.id,
       text,
       final: false,
@@ -1360,13 +1496,23 @@ function postRecognition(
     },
   );
 
-  activeTranslationEngine?.enqueue({
-    id: line.id,
-    text,
-    final: true,
-    at: line.at,
-    skipTranslation,
-  });
+  activeTranslationEngine?.enqueue(
+    {
+      id: line.id,
+      text,
+      final: true,
+      at: line.at,
+      skipTranslation,
+    },
+    {
+      // A stop flush is bounded by max_new_tokens: 96 and the
+      // segmenter's 10-word clause target, so bypassing the
+      // live cap adds no more than about 10 clauses.
+      stopFlush:
+        stopFlushTranslationRequestId ===
+        requestId,
+    },
+  );
 }
 
 function prepareRecognitionBuffer(
@@ -1416,13 +1562,19 @@ function postFinalRecognition(
   requestId: string,
   message: OffRecognitionMessage,
 ): void {
-  if (postToBackground(message)) {
+  const identified:
+    OffRecognitionMessage = {
+      ...message,
+      requestId,
+    };
+
+  if (postToBackground(identified)) {
     return;
   }
 
   bufferFinalRecognition(
     requestId,
-    message,
+    identified,
   );
 }
 
@@ -1560,6 +1712,56 @@ function rejectPendingContentTranslations(
     );
     pending.reject(error);
   }
+}
+
+function waitForCaptionDrain(
+  requestId: string,
+): Promise<void> {
+  finishPendingCaptionDrain();
+
+  return new Promise<void>((resolve) => {
+    const timeoutId = self.setTimeout(
+      () => {
+        finishPendingCaptionDrain(
+          requestId,
+        );
+      },
+      CAPTION_DRAIN_WAIT_MS,
+    );
+
+    pendingCaptionDrain = {
+      requestId,
+      timeoutId,
+      resolve,
+    };
+
+    postToBackground({
+      t: "OFF_DRAIN_READY",
+      requestId,
+    });
+  });
+}
+
+function finishPendingCaptionDrain(
+  requestId?: string,
+): void {
+  const pending = pendingCaptionDrain;
+
+  if (
+    pending === null ||
+    (
+      requestId !== undefined &&
+      pending.requestId !== requestId
+    )
+  ) {
+    return;
+  }
+
+  pendingCaptionDrain = null;
+  globalThis.clearTimeout(
+    pending.timeoutId,
+  );
+  pending.resolve();
 }
 
 function publishState(

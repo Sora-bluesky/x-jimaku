@@ -435,13 +435,20 @@
           <label for="translation-backend-select">
             翻訳エンジン
           </label>
-          <select id="translation-backend-select">
-            <option value="auto">自動</option>
-            <option value="translator">翻訳API</option>
-            <option value="prompt-api">
-              AIモデル
-            </option>
-          </select>
+          <div class="settings-control">
+            <select id="translation-backend-select">
+              <option value="auto">自動</option>
+              <option value="translator">
+                翻訳API（Chrome Translator）
+              </option>
+              <option value="prompt-api">
+                AIモデル（ブラウザ内蔵 LanguageModel）
+              </option>
+            </select>
+            <p class="settings-help">
+              自動ではChrome Translator（Offscreen）→Chrome Translator（Content Script）→ブラウザ内蔵 LanguageModel→英語原文の順に切り替えます。
+            </p>
+          </div>
         </div>
 
         <div class="settings-row">

@@ -24,6 +24,10 @@ export interface TranslationQueueEntry
   skipTranslation?: boolean;
 }
 
+export interface TranslationEnqueueOptions {
+  stopFlush?: boolean;
+}
+
 export interface TranslationPair {
   en: string;
   ja: string;
@@ -71,7 +75,8 @@ const TRANSLATION_SYSTEM_PROMPT =
   "あなたは英語動画の日本語字幕翻訳者。与えられた英語の節を、直前の文脈と固有名詞リストに整合する自然な日本語に訳す。出力は当該節の訳だけ。説明・引用符・前後の節の再訳は出力しない";
 
 const MAX_PENDING_TRANSLATIONS = 2;
-const TRANSLATOR_CREATE_TIMEOUT_MS = 8_000;
+export const TRANSLATOR_CREATE_TIMEOUT_MS =
+  8_000;
 const LANGUAGE_MODEL_PROMPT_TIMEOUT_MS =
   10_000;
 const LANGUAGE_MODEL_SLOW_THRESHOLD_MS =
@@ -90,6 +95,8 @@ export class TranslationEngine {
     TranslationPair[] = [];
   private readonly languageModelSlowSamples:
     boolean[] = [];
+  private readonly drainResolvers =
+    new Set<() => void>();
 
   private translator:
     | TranslatorInstance
@@ -140,7 +147,10 @@ export class TranslationEngine {
     return operation;
   }
 
-  enqueue(line: TranslationQueueEntry): void {
+  enqueue(
+    line: TranslationQueueEntry,
+    options: TranslationEnqueueOptions = {},
+  ): void {
     const skipTranslation =
       line.skipTranslation === true;
 
@@ -161,22 +171,15 @@ export class TranslationEngine {
       (this.processing ? 1 : 0);
 
     if (
+      options.stopFlush !== true &&
       this.queue.length >=
-      Math.max(1, queuedCapacity)
+        Math.max(1, queuedCapacity)
     ) {
       const dropped = this.queue.shift();
 
       if (dropped !== undefined) {
         console.warn(
-          "[translate]",
-          "dropped oldest pending committed clause",
-          {
-            id: dropped.id,
-            text: dropped.text,
-            skipTranslation:
-              dropped.skipTranslation ===
-              true,
-          },
+          `[translate] dropped oldest pending committed clause (id=${dropped.id}, textLength=${dropped.text.length})`,
         );
       }
     }
@@ -191,6 +194,28 @@ export class TranslationEngine {
 
   getPath(): TranslationPath | null {
     return this.path;
+  }
+
+  async drain(): Promise<boolean> {
+    if (this.destroyed) {
+      return false;
+    }
+
+    try {
+      await waitWithTimeout(
+        this.waitForQueueToDrain(),
+        TRANSLATOR_CREATE_TIMEOUT_MS,
+        "Translation drain timed out",
+      );
+      return true;
+    } catch (error) {
+      if (!isTimeoutError(error)) {
+        throw error;
+      }
+
+      this.destroy();
+      return false;
+    }
   }
 
   destroy(): void {
@@ -208,6 +233,7 @@ export class TranslationEngine {
       0,
       this.languageModelSlowSamples.length,
     );
+    this.resolveDrainWaiters();
     this.destroyTranslator();
     this.destroyLanguageModel();
     this.path = null;
@@ -282,6 +308,7 @@ export class TranslationEngine {
     } finally {
       this.processing = false;
       this.runQueue();
+      this.resolveDrainWaitersIfIdle();
     }
   }
 
@@ -1022,6 +1049,44 @@ export class TranslationEngine {
     );
 
     this.runQueue();
+    this.resolveDrainWaitersIfIdle();
+  }
+
+  private waitForQueueToDrain():
+    Promise<void> {
+    if (
+      !this.processing &&
+      this.queue.length === 0
+    ) {
+      return Promise.resolve();
+    }
+
+    return new Promise<void>((resolve) => {
+      this.drainResolvers.add(resolve);
+    });
+  }
+
+  private resolveDrainWaitersIfIdle():
+    void {
+    if (
+      this.processing ||
+      this.queue.length > 0
+    ) {
+      return;
+    }
+
+    this.resolveDrainWaiters();
+  }
+
+  private resolveDrainWaiters(): void {
+    const resolvers = [
+      ...this.drainResolvers,
+    ];
+    this.drainResolvers.clear();
+
+    for (const resolve of resolvers) {
+      resolve();
+    }
   }
 
   private destroyTranslator(): void {
@@ -1364,7 +1429,7 @@ function waitWithTimeout<T>(
     (resolve, reject) => {
       let settled = false;
 
-      const timerId = self.setTimeout(
+      const timerId = globalThis.setTimeout(
         () => {
           if (settled) {
             return;
