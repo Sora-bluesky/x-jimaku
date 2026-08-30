@@ -62,6 +62,19 @@ beforeEach(() => {
 
 describe("extractPostContextTerms", () => {
   it(
+    "keeps a standalone dotted abbreviation",
+    () => {
+      setPostText(
+        "U.S. officials spoke today.",
+      );
+
+      expect(
+        extractPostContextTerms(),
+      ).toContain("U.S.");
+    },
+  );
+
+  it(
     "keeps abbreviation periods inside a run",
     () => {
       setPostText(

@@ -2823,10 +2823,17 @@ export function extractPostContextTerms(): string[] {
     ) ?? [];
 
     for (const match of matches) {
-      const term = match
+      const normalizedMatch = match
         .normalize("NFKC")
-        .trim()
-        .replace(/\.+$/u, "");
+        .trim();
+      const term = /^(?:\p{Lu}\.)+$/u.test(
+        normalizedMatch,
+      )
+        ? normalizedMatch
+        : normalizedMatch.replace(
+            /\.+$/u,
+            "",
+          );
       const termLength =
         Array.from(term).length;
 
