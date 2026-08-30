@@ -2781,6 +2781,9 @@ function flushBufferedContentMessages():
   }
 }
 
+const RUN_LEADING_ARTICLES: ReadonlySet<string> =
+  new Set(["the", "a", "an"]);
+
 export function extractPostContextTerms(): string[] {
   const articles = new Set<HTMLElement>();
   const target =
@@ -2872,8 +2875,14 @@ export function extractPostContextTerms(): string[] {
     )
       .normalize("NFKC")
       .replace(/\s+/gu, " ");
+    // A period right after a capital is
+    // treated as an abbreviation dot
+    // (U.S. Space Force), not a sentence
+    // end; the cost is that an acronym
+    // ending a sentence can bridge into
+    // the next one.
     const runs = normalizedText
-      .split(/[.!?。！？](?:\s|$)/u)
+      .split(/(?<![A-Z])[.!?。！？](?:\s|$)/u)
       .flatMap(
         (sentence) =>
           sentence.match(
@@ -2882,13 +2891,32 @@ export function extractPostContextTerms(): string[] {
       );
 
     for (const run of runs) {
-      const term = run
-        .split(" ")
+      const words = run.split(" ");
+
+      while (
+        words.length > 0 &&
+        RUN_LEADING_ARTICLES.has(
+          (words[0] ?? "")
+            .toLocaleLowerCase("en-US"),
+        )
+      ) {
+        words.shift();
+      }
+
+      const term = words
         .slice(0, 4)
         .map((word) =>
-          word.replace(/\.+$/u, ""),
+          /^(?:\p{Lu}\.)+$/u.test(word)
+            ? word
+            : word.replace(/\.+$/u, ""),
         )
         .join(" ");
+
+      if (
+        !term.includes(" ")
+      ) {
+        continue;
+      }
       const termLength =
         Array.from(term).length;
 

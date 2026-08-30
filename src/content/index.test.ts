@@ -62,6 +62,20 @@ beforeEach(() => {
 
 describe("extractPostContextTerms", () => {
   it(
+    "keeps abbreviation periods inside a run",
+    () => {
+      setPostText(
+        "The U.S. Space Force launched.",
+      );
+
+      expect(
+        extractPostContextTerms(),
+      ).toContain("U.S. Space Force");
+    },
+  );
+
+
+  it(
     "appends multi-word terms after their single-token components",
     () => {
       setPostText(
