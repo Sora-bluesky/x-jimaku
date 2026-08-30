@@ -2834,7 +2834,12 @@ function handleOffscreenTranslationState(
   if (
     captureState.requestId !==
       message.requestId ||
-    !isCaptureActive(captureState.status)
+    (
+      !isCaptureActive(captureState.status) &&
+      !isExplicitStopDrainState(
+        captureState,
+      )
+    )
   ) {
     return;
   }
