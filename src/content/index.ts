@@ -2781,7 +2781,16 @@ function flushBufferedContentMessages():
   }
 }
 
-function extractPostContextTerms(): string[] {
+const RUN_LEADING_ARTICLES: ReadonlySet<string> =
+  new Set(["the", "a", "an"]);
+
+const TITLE_ABBREVIATIONS: ReadonlySet<string> =
+  new Set([
+    "st", "mt", "dr", "mr",
+    "mrs", "ms", "jr", "sr",
+  ]);
+
+export function extractPostContextTerms(): string[] {
   const articles = new Set<HTMLElement>();
   const target =
     getCurrentAudioTapTarget();
@@ -2820,9 +2829,17 @@ function extractPostContextTerms(): string[] {
     ) ?? [];
 
     for (const match of matches) {
-      const term = match
+      const normalizedMatch = match
         .normalize("NFKC")
         .trim();
+      const term = /^(?:\p{Lu}\.)+$/u.test(
+        normalizedMatch,
+      )
+        ? normalizedMatch
+        : normalizedMatch.replace(
+            /\.+$/u,
+            "",
+          );
       const termLength =
         Array.from(term).length;
 
@@ -2848,6 +2865,119 @@ function extractPostContextTerms(): string[] {
           !term.startsWith("@") &&
           CONTEXT_TERM_STOPLIST.has(key)
         )
+      ) {
+        continue;
+      }
+
+      seen.add(key);
+      terms.push(term);
+
+      if (
+        terms.length >= MAX_CONTEXT_TERMS
+      ) {
+        return terms;
+      }
+    }
+  }
+
+  for (const article of articles) {
+    const normalizedText = (
+      article.innerText ||
+      article.textContent ||
+      ""
+    )
+      .normalize("NFKC")
+      .replace(/\s+/gu, " ");
+    // A period right after a capital or a
+    // common title abbreviation is treated
+    // as an abbreviation dot (U.S. Space
+    // Force, St. Louis), not a sentence
+    // end. Only a SINGLE capital before
+    // the dot counts (U.S. yes, NASA. no,
+    // so a sentence-final acronym still
+    // splits). A sentence ending in a
+    // one-letter name (Malcolm X.) is the
+    // accepted false join of this rule:
+    // one regex cannot tell it apart from
+    // a dotted acronym without breaking
+    // U.S., and the cost is bounded to a
+    // single noisy four-word hint. The abbreviation set is a
+    // small closed list on purpose: this
+    // feeds a hint list for the
+    // translation prompt, so a missed
+    // exotic abbreviation only costs one
+    // hint, and a full lexicon is not
+    // worth the false joins it would
+    // cause.
+    const runs = normalizedText
+      .split(
+        /(?<!\b(?:St|Mt|Dr|Mr|Mrs|Ms|Jr|Sr)|\b[A-Z])[.!?。！？](?:\s|$)/u,
+      )
+      .flatMap(
+        (sentence) =>
+          sentence.match(
+            /(?<![@\p{L}\p{M}\p{N}'’._-])\p{Lu}[\p{L}\p{M}\p{N}'’._-]+(?: \p{Lu}[\p{L}\p{M}\p{N}'’._-]+)+/gu,
+          ) ?? [],
+      );
+
+    for (const run of runs) {
+      const words = run.split(" ");
+
+      while (
+        words.length > 0 &&
+        RUN_LEADING_ARTICLES.has(
+          (words[0] ?? "")
+            .toLocaleLowerCase("en-US"),
+        )
+      ) {
+        words.shift();
+      }
+
+      const term = words
+        .slice(0, 4)
+        .map((word) => {
+          const stripped = word.replace(
+            /\.+$/u,
+            "",
+          );
+
+          if (
+            /^(?:\p{Lu}\.)+$/u.test(word) ||
+            TITLE_ABBREVIATIONS.has(
+              stripped.toLocaleLowerCase(
+                "en-US",
+              ),
+            )
+          ) {
+            return word;
+          }
+
+          return stripped;
+        })
+        .join(" ");
+
+      if (
+        !term.includes(" ")
+      ) {
+        continue;
+      }
+      const termLength =
+        Array.from(term).length;
+
+      if (
+        termLength < 4 ||
+        termLength > 128
+      ) {
+        continue;
+      }
+
+      const key = term
+        .toLocaleLowerCase("en-US");
+
+      if (
+        key === "" ||
+        seen.has(key) ||
+        CONTEXT_TERM_STOPLIST.has(key)
       ) {
         continue;
       }
