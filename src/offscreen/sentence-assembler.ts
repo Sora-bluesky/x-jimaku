@@ -167,16 +167,24 @@ export class SentenceAssembler {
   }
 }
 
+const TRAILING_CLOSERS =
+  /[”"』」）)\]]*$/u;
+
 function hasSentenceFinalPunctuation(
   text: string,
 ): boolean {
-  if (/[?!]$/u.test(text)) {
+  const core = text.replace(
+    TRAILING_CLOSERS,
+    "",
+  );
+
+  if (/[?!]$/u.test(core)) {
     return true;
   }
 
   return (
-    /\.$/u.test(text) &&
-    !/\b[A-Z]\.$/u.test(text)
+    /\.$/u.test(core) &&
+    !/\b[A-Z]\.$/u.test(core)
   );
 }
 

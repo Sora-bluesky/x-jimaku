@@ -133,6 +133,52 @@ describe("SentenceAssembler", () => {
   );
 
   it(
+    "treats a multi-capital acronym dot as a sentence end",
+    () => {
+      const {
+        assembler,
+        emitted,
+      } = createHarness();
+
+      assembler.accept(
+        "capture:1",
+        createLine(
+          1,
+          "They work at NASA.",
+        ),
+      );
+
+      expect(
+        emitted[0]?.line.text,
+      ).toBe("They work at NASA.");
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
+  it(
+    "emits when the sentence end is followed by closing quotes",
+    () => {
+      const {
+        assembler,
+        emitted,
+      } = createHarness();
+
+      assembler.accept(
+        "capture:1",
+        createLine(
+          1,
+          'He said "no."',
+        ),
+      );
+
+      expect(
+        emitted[0]?.line.text,
+      ).toBe('He said "no."');
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
+  it(
     "emits at the twenty-word cap with the last clause id",
     () => {
       const {
