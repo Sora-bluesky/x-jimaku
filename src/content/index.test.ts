@@ -15,6 +15,8 @@ import {
 
 let extractPostContextTerms:
   typeof import("./index").extractPostContextTerms;
+let handleOffscreenDevLog:
+  typeof import("./index").handleOffscreenDevLog;
 
 function setPostText(text: string): void {
   document.body.innerHTML =
@@ -49,6 +51,7 @@ beforeAll(async () => {
 
   ({
     extractPostContextTerms,
+    handleOffscreenDevLog,
   } = await import("./index"));
 });
 
@@ -57,6 +60,50 @@ beforeEach(() => {
     {},
     "",
     "/tester/status/49",
+  );
+});
+
+describe("handleOffscreenDevLog", () => {
+  it(
+    "does not print on a non-development origin",
+    () => {
+      expect(location.origin).not.toBe(
+        "http://127.0.0.1:8123",
+      );
+
+      const methods = [
+        vi
+          .spyOn(console, "info")
+          .mockImplementation(() => {
+          }),
+        vi
+          .spyOn(console, "warn")
+          .mockImplementation(() => {
+          }),
+        vi
+          .spyOn(console, "error")
+          .mockImplementation(() => {
+          }),
+      ];
+
+      handleOffscreenDevLog({
+        t: "OFF_DEV_LOG",
+        level: "info",
+        tag: "translate",
+        message:
+          "Translator line rescue exhausted; passing through original",
+        data: {
+          kind: "passthrough",
+          requestId: "request-63",
+          lineId: 1,
+        },
+      });
+
+      for (const method of methods) {
+        expect(method).not.toHaveBeenCalled();
+        method.mockRestore();
+      }
+    },
   );
 });
 

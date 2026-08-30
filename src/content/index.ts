@@ -16,6 +16,7 @@ import {
   type CsTranslateMessage,
   type CsTranslateResultMessage,
   type M1Message,
+  type OffDevLogMessage,
   type OffDrainReadyMessage,
   type ProbeFailureMessage,
   type SwCaptionMessage,
@@ -403,6 +404,46 @@ function handleDevMessage(
   }
 }
 
+export function handleOffscreenDevLog(
+  message: OffDevLogMessage,
+): void {
+  if (location.origin !== DEV_ORIGIN) {
+    return;
+  }
+
+  const details =
+    message.data === undefined
+      ? []
+      : [message.data];
+
+  if (message.level === "info") {
+    console.info(
+      "[x-jimaku-dev]",
+      `[${message.tag}]`,
+      message.message,
+      ...details,
+    );
+    return;
+  }
+
+  if (message.level === "warn") {
+    console.warn(
+      "[x-jimaku-dev]",
+      `[${message.tag}]`,
+      message.message,
+      ...details,
+    );
+    return;
+  }
+
+  console.error(
+    "[x-jimaku-dev]",
+    `[${message.tag}]`,
+    message.message,
+    ...details,
+  );
+}
+
 function installTargetPlaybackListeners():
   void {
   document.addEventListener(
@@ -550,6 +591,16 @@ function connectBackgroundPort(): void {
     port.onMessage.addListener(
       (message: unknown) => {
         expireGraceEpisodeAt(Date.now());
+
+        if (
+          isMessageOfType(
+            message,
+            "OFF_DEV_LOG",
+          )
+        ) {
+          handleOffscreenDevLog(message);
+          return;
+        }
 
         if (
           isMessageOfType(

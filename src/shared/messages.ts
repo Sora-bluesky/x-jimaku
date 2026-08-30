@@ -257,6 +257,26 @@ export interface OffDiagnosticMessage {
   stack?: string;
 }
 
+export type OffDevLogKind =
+  | "rescue-failure"
+  | "passthrough"
+  | "queue-drop";
+
+export interface OffDevLogData {
+  kind: OffDevLogKind;
+  requestId: string;
+  lineId: number;
+  path?: TranslationPath;
+}
+
+export interface OffDevLogMessage {
+  t: "OFF_DEV_LOG";
+  level: "info" | "warn" | "error";
+  tag: string;
+  message: string;
+  data?: OffDevLogData;
+}
+
 export interface CsStartTapMessage {
   t: "CS_START_TAP";
   requestId: string;
@@ -434,6 +454,7 @@ export type ContentPortMessage =
   | CsPcmMessage
   | CsTranslateMessage
   | CsTranslateResultMessage
+  | OffDevLogMessage
   | OffStateMessage
   | OffDrainReadyMessage
   | SwTranslationStateMessage
@@ -450,6 +471,7 @@ export type CapturePortMessage =
   | OffStateMessage
   | OffLevelMessage
   | OffDiagnosticMessage
+  | OffDevLogMessage
   | OffRecognitionMessage
   | OffTranslationStateMessage
   | CsDrainCompleteMessage
@@ -721,6 +743,45 @@ export function isM1Message(
         )
       );
 
+    case "OFF_DEV_LOG":
+      return (
+        (
+          value.level === "info" ||
+          value.level === "warn" ||
+          value.level === "error"
+        ) &&
+        typeof value.tag === "string" &&
+        typeof value.message === "string" &&
+        (
+          value.data === undefined ||
+          (
+            isRecord(value.data) &&
+            (
+              value.data.kind ===
+                "rescue-failure" ||
+              value.data.kind ===
+                "passthrough" ||
+              value.data.kind ===
+                "queue-drop"
+            ) &&
+            typeof value.data.requestId ===
+              "string" &&
+            typeof value.data.lineId ===
+              "number" &&
+            Number.isSafeInteger(
+              value.data.lineId,
+            ) &&
+            value.data.lineId >= 0 &&
+            (
+              value.data.path === undefined ||
+              isTranslationPath(
+                value.data.path,
+              )
+            )
+          )
+        )
+      );
+
     case "CS_START_TAP":
       return (
         typeof value.requestId === "string" &&
@@ -841,6 +902,10 @@ export function isCapturePortMessage(
       value,
       "OFF_DIAGNOSTIC",
     ) ||
+    isMessageOfType(
+      value,
+      "OFF_DEV_LOG",
+    ) ||
     isMessageOfType(value, "OFF_RECOG") ||
     isMessageOfType(
       value,
@@ -877,6 +942,10 @@ export function isContentPortMessage(
     isMessageOfType(
       value,
       "CS_TRANSLATE_RESULT",
+    ) ||
+    isMessageOfType(
+      value,
+      "OFF_DEV_LOG",
     ) ||
     isMessageOfType(value, "OFF_STATE") ||
     isMessageOfType(

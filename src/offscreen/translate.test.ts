@@ -57,6 +57,105 @@ function installTranslator(
   return destroy;
 }
 
+function createRescueHarness(
+  translatorRespond: (
+    text: string,
+  ) => Promise<string>,
+  contentRespond: (
+    text: string,
+  ) => Promise<{
+    available: boolean;
+    ja: string;
+  }>,
+) {
+  const prompt = vi.fn(
+    async () => "ここです",
+  );
+  const translator = {
+    translate: vi.fn(translatorRespond),
+    destroy: vi.fn(),
+  };
+
+  vi.stubGlobal("LanguageModel", {
+    availability: vi.fn(
+      async () => "available",
+    ),
+    create: vi.fn(async () => ({
+      clone: vi.fn(async () => ({
+        prompt,
+        destroy: vi.fn(),
+      })),
+      destroy: vi.fn(),
+    })),
+  });
+  vi.stubGlobal("Translator", {
+    availability: vi.fn(
+      async () => "available",
+    ),
+    create: vi.fn(
+      async () => translator,
+    ),
+  });
+
+  const requestContentTranslation =
+    vi.fn(async (text: string) => {
+      if (text === "") {
+        return {
+          available: true,
+          ja: "",
+        };
+      }
+
+      return contentRespond(text);
+    });
+  const onTranslated = vi.fn();
+  const onDevLog = vi.fn();
+  const engine =
+    new TranslationEngine({
+      backend: "prompt-api",
+      requestId: "request-63",
+      getContext: () => ({
+        recentPairs: [],
+        properNouns: ["Roman"],
+      }),
+      requestContentTranslation,
+      onTranslated,
+      onPathChanged: vi.fn(),
+      onDevLog,
+    });
+
+  vi.spyOn(
+    console,
+    "warn",
+  ).mockImplementation(() => {
+  });
+
+  return {
+    engine,
+    translator,
+    requestContentTranslation,
+    onTranslated,
+    onDevLog,
+  };
+}
+
+async function translateRescueClause(
+  engine: TranslationEngine,
+  id: number,
+  text: string,
+): Promise<void> {
+  engine.enqueue({
+    id,
+    text,
+    final: true,
+    at: "2026-08-30T00:00:00.000Z",
+  });
+
+  await expect(
+    engine.drain(),
+  ).resolves.toBe(true);
+}
+
 afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
@@ -308,6 +407,245 @@ describe("normalizeLanguageModelResponse", () => {
     ).toBe("こんにちは");
   });
 });
+
+describe(
+  "TranslationEngine rescue classification",
+  () => {
+    it(
+      "tries the second path after a semantic failure without failing the first path",
+      async () => {
+        const harness =
+          createRescueHarness(
+            async () => "ここです",
+            async () => ({
+              available: true,
+              ja: "%%1%%です",
+            }),
+          );
+
+        await harness.engine.initialize();
+        await translateRescueClause(
+          harness.engine,
+          1,
+          "Roman is here.",
+        );
+
+        expect(
+          harness.translator.translate,
+        ).toHaveBeenCalledWith(
+          "%%1%% is here.",
+        );
+        expect(
+          harness.requestContentTranslation,
+        ).toHaveBeenCalledWith(
+          "%%1%% is here.",
+        );
+        expect(
+          harness.translator.destroy,
+        ).not.toHaveBeenCalled();
+        expect(
+          harness.onTranslated,
+        ).toHaveBeenCalledWith(
+          expect.objectContaining({ id: 1 }),
+          "Romanです",
+        );
+
+        harness.engine.destroy();
+      },
+    );
+
+    it(
+      "keeps both paths alive for the next line after persistent semantic failures",
+      async () => {
+        const harness =
+          createRescueHarness(
+            async () => "ここです",
+            async () => ({
+              available: true,
+              ja: "ここです",
+            }),
+          );
+
+        await harness.engine.initialize();
+        await translateRescueClause(
+          harness.engine,
+          11,
+          "Roman is here.",
+        );
+        await translateRescueClause(
+          harness.engine,
+          12,
+          "Roman is there.",
+        );
+
+        expect(
+          harness.translator.translate,
+        ).toHaveBeenCalledTimes(2);
+        expect(
+          harness.requestContentTranslation
+            .mock.calls.filter(
+              ([text]) => text !== "",
+            ),
+        ).toHaveLength(2);
+        expect(
+          harness.translator.destroy,
+        ).not.toHaveBeenCalled();
+        expect(
+          harness.onTranslated,
+        ).toHaveBeenNthCalledWith(
+          1,
+          expect.objectContaining({ id: 11 }),
+          "Roman is here.",
+        );
+        expect(
+          harness.onTranslated,
+        ).toHaveBeenNthCalledWith(
+          2,
+          expect.objectContaining({ id: 12 }),
+          "Roman is there.",
+        );
+        expect(
+          harness.onDevLog,
+        ).toHaveBeenCalledWith({
+          t: "OFF_DEV_LOG",
+          level: "info",
+          tag: "translate",
+          message:
+            "Translator line rescue exhausted; passing through original",
+          data: {
+            kind: "passthrough",
+            requestId: "request-63",
+            lineId: 11,
+          },
+        });
+
+        harness.engine.destroy();
+      },
+    );
+
+    it.each([
+      {
+        name: "an empty result",
+        respond: async (
+          _text: string,
+        ) => "",
+      },
+      {
+        name: "an undefined result",
+        respond: async (
+          _text: string,
+        ) =>
+          undefined as unknown as string,
+      },
+      {
+        name: "an infrastructure exception",
+        respond: async (
+          _text: string,
+        ) => {
+          throw new Error(
+            "Translator failed",
+          );
+        },
+      },
+    ])(
+      "fails the path after $name",
+      async ({ respond }) => {
+        const harness =
+          createRescueHarness(
+            respond,
+            async () => ({
+              available: true,
+              ja: "%%1%%です",
+            }),
+          );
+
+        await harness.engine.initialize();
+        await translateRescueClause(
+          harness.engine,
+          21,
+          "Roman is here.",
+        );
+        await translateRescueClause(
+          harness.engine,
+          22,
+          "Roman is there.",
+        );
+
+        expect(
+          harness.translator.translate,
+        ).toHaveBeenCalledTimes(1);
+        expect(
+          harness.translator.destroy,
+        ).toHaveBeenCalledOnce();
+        expect(
+          harness.onTranslated,
+        ).toHaveBeenNthCalledWith(
+          1,
+          expect.objectContaining({ id: 21 }),
+          "Romanです",
+        );
+        expect(
+          harness.onTranslated,
+        ).toHaveBeenNthCalledWith(
+          2,
+          expect.objectContaining({ id: 22 }),
+          "Romanです",
+        );
+
+        harness.engine.destroy();
+      },
+    );
+
+    it(
+      "fails an unavailable content rescue path instead of treating it as semantic",
+      async () => {
+        const harness =
+          createRescueHarness(
+            async () => "ここです",
+            async () => ({
+              available: false,
+              ja: "",
+            }),
+          );
+
+        await harness.engine.initialize();
+        await translateRescueClause(
+          harness.engine,
+          31,
+          "Roman is here.",
+        );
+        await translateRescueClause(
+          harness.engine,
+          32,
+          "Roman is there.",
+        );
+
+        expect(
+          harness.translator.translate,
+        ).toHaveBeenCalledTimes(2);
+        expect(
+          harness.requestContentTranslation,
+        ).toHaveBeenCalledTimes(2);
+        expect(
+          harness.onTranslated,
+        ).toHaveBeenNthCalledWith(
+          1,
+          expect.objectContaining({ id: 31 }),
+          "Roman is here.",
+        );
+        expect(
+          harness.onTranslated,
+        ).toHaveBeenNthCalledWith(
+          2,
+          expect.objectContaining({ id: 32 }),
+          "Roman is there.",
+        );
+
+        harness.engine.destroy();
+      },
+    );
+  },
+);
 
 describe(
   "TranslationEngine queue capacity",

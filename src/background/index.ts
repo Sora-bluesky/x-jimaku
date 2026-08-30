@@ -21,6 +21,7 @@ import {
   type CsTranslateResultMessage,
   type DiagnosticsResultMessage,
   type M1Message,
+  type OffDevLogMessage,
   type OffDiagnosticMessage,
   type OffDrainReadyMessage,
   type OffFlushRecogMessage,
@@ -1934,6 +1935,20 @@ function handleOffscreenPortConnected(
       if (
         isMessageOfType(
           message,
+          "OFF_DEV_LOG",
+        )
+      ) {
+        if (offscreenPort === port) {
+          relayOffscreenDevLogToContent(
+            message,
+          );
+        }
+        return;
+      }
+
+      if (
+        isMessageOfType(
+          message,
           "OFF_STATUS",
         )
       ) {
@@ -2100,6 +2115,38 @@ function handleOffscreenDiagnostic(
           ),
         }),
   });
+}
+
+function relayOffscreenDevLogToContent(
+  message: OffDevLogMessage,
+): void {
+  const tabId = captureState.tabId;
+
+  if (tabId === undefined) {
+    return;
+  }
+
+  const content = contentPorts.get(tabId);
+  const sender = content?.sender;
+
+  if (
+    content === undefined ||
+    sender === undefined ||
+    getMessageSenderOrigin(sender) !==
+      DEV_ORIGIN
+  ) {
+    return;
+  }
+
+  try {
+    content.postMessage(message);
+  } catch (error) {
+    console.warn(
+      "[bg]",
+      "could not relay development log to content",
+      error,
+    );
+  }
 }
 
 function handleOffscreenLevel(

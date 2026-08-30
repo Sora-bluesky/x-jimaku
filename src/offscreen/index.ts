@@ -914,6 +914,7 @@ async function handleCaptureStart(
       new TranslationEngine({
         backend:
           settings.translationBackend,
+        requestId,
         getContext() {
           return {
             recentPairs: [],
@@ -927,6 +928,10 @@ async function handleCaptureStart(
             requestId,
             text,
           );
+        },
+
+        onDevLog(message) {
+          postToBackground(message);
         },
 
         onTranslated(line, ja) {
