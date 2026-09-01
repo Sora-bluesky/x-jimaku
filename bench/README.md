@@ -29,16 +29,56 @@ metrics table goes to stdout (`printMarkdownTable`, run-bench.mjs:1119-1131).
 `MODULE_NOT_FOUND` with exit 1 is operator error from the wrong cwd — run from the repo root.
 The full verification recipe lives in `.claude/skills/verify-x-jimaku/SKILL.md`.
 
-## 実Chromeでの訳質採取（live2 手順・2026-08-30 確立）
+## 実Chromeでの訳質採取（live2・2026-09-01 に無人化）
 
 CfT には翻訳モデルが降りないため、訳質の jaClauses は実 Chrome でしか採れない。
+人手のリロードとタブ前面化は不要になった。
 
-1. `node bench/serve-standalone.mjs` で fixture サーバだけを起動する（8123 固定）。
-2. 拡張を読み込んだ実 Chrome で `http://127.0.0.1:8123/case.html` を開く。再生開始はタブ前面 + 実クリックが要る（autoplay ポリシー）。
-3. DEV origin なので `window.postMessage({t:'CS_DEV_SET_SETTINGS', settings:{...}})` と `{t:'CS_DEV_TOGGLE'}` で backend/model 切替とトグルを scripting できる。**settings の反映は fire-and-forget**（`src/background/index.ts:427` → capture は storage を独立に snapshot する）なので、設定投稿からトグルまで 2 秒以上空け、採取開始後に出力の文体か options ページの翻訳経路表示で意図した backend で動いていることを確認してから採用する。
-4. **モデルが cold のときは fixture を先に再生しない**。ハーネスと同じく、トグル後に「字幕ON」へ達するまで動画を一時停止し、到達後に `currentTime = 0` へ巻き戻してから再生する（先に流すと最初のループ分の音声が採取から欠ける）。warm なら省略可（2026-08-30 のベースラインは warm・チップは即 字幕ON）。
-5. overlay の shadow DOM から `.caption-primary` を 300ms 間隔で重複排除しつつ収集し、`recognition.jaClauses` に詰めた result JSON を `bench/results/live2-*.json` として保存する。
-6. あとは上記「日本語訳質の採点」と同じ（agy はプロンプト直埋め・ツール使用禁止を明示する）。
+```
+node bench/live2.mjs --case tts2 --duration 95
+```
+
+fixture サーバ起動・Chrome 起動・拡張インストール・設定投入・再生・overlay 収集・
+result JSON 保存・機械ゲート出力までを 1 コマンドで行う。
+`--case tts|tts2` / `--model` / `--backend` / `--chrome` / `--profile` / `--extension` で切替。
+
+成立条件（いずれか欠けると無音で失敗するので消さないこと）:
+
+- **モデル入りプロファイル**が要る。既定は `%TEMP%` 配下の `x-jimaku-builtin-ai-nano`
+  （2026-08-27 の Gemma4/Nano 実験で DL 済み・約 4.1GB）。消すと数GB 再 DL になる。
+  起動直後に `LanguageModel.availability()` を検査し、`available` でなければ即中断する。
+- **pipe 接続**が要る。CDP の `Extensions` ドメインは `--remote-debugging-port` には出ない。
+  `puppeteer.launch({ pipe: true })` + `--enable-unsafe-extension-debugging`（2 つ同時に
+  検証済み・個別の要否は未切り分け）。
+- **拡張は `Extensions.loadUnpacked` で入れる**。`--load-extension` は debugging 接続下では
+  無効化されており、`chrome://version` のコマンドラインに載っていても導入数 0 になる。
+  毎回 dist/ を入れ直すのでリロードボタンは不要。
+- **`puppeteer.defaultArgs()` は引数なしだと headless 既定を返す**（`--headless=new`・
+  `--mute-audio`）。`ignoreDefaultArgs: true` と併用すると `headless: false` を無視して
+  ヘッドレスで動き、拡張が入らない。`defaultArgs({ headless: false })` + `--headless` 除去が要る。
+- **puppeteer 既定の `--disable-features=` 一式と `--disable-background-networking` を外す**。
+  残すと Optimization Guide が死んでモデルが永遠に `unavailable` になる。
+- **fixture は 1 タブだけで開く**。bench テンプレの `<video>` は `muted` なので、背面に回ると
+  Chrome が「音声のない動画」として省電力停止する（"video-only background media was paused"）。
+  再生は `--autoplay-policy=no-user-gesture-required` で実クリック不要。
+
+計測環境は Canary + 専用プロファイルで、日常使いの Chrome Stable とは別物である。
+ゲート判定はここで回し、リリース検収の体感確認だけ Stable で行う。
+
+採点は上記「日本語訳質の採点」と同じ（agy はプロンプト直埋め・ツール使用禁止を明示する）。
+
+### 手動採取（Stable での確認用フォールバック）
+
+1. `node bench/serve-standalone.mjs <case>` で fixture サーバだけを起動する（8123 固定）。
+2. 拡張を読み込んだ実 Chrome で `http://127.0.0.1:8123/case.html` を開く。**タブを前面にする**
+   （背面だと上記の理由で再生が止まる）。
+3. `window.postMessage({t:'CS_DEV_SET_SETTINGS', settings:{...}})` と `{t:'CS_DEV_TOGGLE'}` で
+   切替。**settings の反映は fire-and-forget**（`src/background/index.ts:427`）なので、
+   設定投稿からトグルまで 2 秒以上空け、意図した backend で動いていることを確認してから採用する。
+4. **モデルが cold のときは fixture を先に再生しない**。トグル後に「字幕ON」へ達するまで動画を
+   一時停止し、到達後に `currentTime = 0` へ巻き戻してから再生する。
+5. overlay の shadow DOM から `.caption-primary` を 300ms 間隔で重複排除しつつ収集し、
+   `recognition.jaClauses` に詰めた result JSON を `bench/results/live2-*.json` として保存する。
 
 ベースライン（2026-08-30・95 秒ループ採取）: prompt-api/base = 誤訳10/欠落1/不自然10 (n=32)、
 translator/base = 6/2/7 (n=21)。judge ノイズはカテゴリ ±2・合計 ±2（同一採取の2回採点で実測）。
