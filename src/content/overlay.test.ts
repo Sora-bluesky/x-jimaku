@@ -621,6 +621,54 @@ describe(
     );
 
     it(
+      "appends only the new tail when a clause is revised longer",
+      () => {
+        const overlay = createOverlay({});
+
+        showFinal(overlay, 1, "これは途中まで");
+        vi.advanceTimersByTime(
+          CUE_MINIMUM_DISPLAY_MS,
+        );
+        showFinal(
+          overlay,
+          2,
+          "これは途中まで届いた文です。",
+        );
+
+        const seen = new Set<string>();
+        const step = Math.ceil(
+          CUE_MINIMUM_DISPLAY_MS / 10,
+        );
+
+        for (
+          let elapsed = 0;
+          elapsed <=
+            CUE_MINIMUM_DISPLAY_MS * 3;
+          elapsed += step
+        ) {
+          for (const slot of getBlockLines()) {
+            if (slot !== "") seen.add(slot);
+          }
+
+          vi.advanceTimersByTime(step);
+        }
+
+        const joined = [...seen].join("|");
+
+        expect(joined).toContain(
+          "これは途中まで",
+        );
+        expect(
+          joined.split("これは途中まで")
+            .length - 1,
+        ).toBe(1);
+        expect(joined).toContain(
+          "届いた文です。",
+        );
+      },
+    );
+
+    it(
       "shows a line pending at stop before drain completion",
       () => {
         const onCaptionFadeOut = vi.fn();

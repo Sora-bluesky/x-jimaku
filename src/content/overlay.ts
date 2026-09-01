@@ -163,6 +163,7 @@ export class CaptionOverlay {
   private readonly pendingLines: string[] = [];
   private blockLines:
     [string, string] = ["", ""];
+  private lastAcceptedPrimary = "";
 
   private targetVideo:
     | HTMLVideoElement
@@ -476,6 +477,7 @@ export class CaptionOverlay {
     this.acceleratedUntilDrained = false;
     this.captionBarEnabled = false;
 
+    this.lastAcceptedPrimary = "";
     this.resetDisplayBlock();
     this.captionLedger.replaceChildren();
     this.tentativeLine.textContent = "";
@@ -963,10 +965,39 @@ export class CaptionOverlay {
       return;
     }
 
+    // The recognizer sometimes commits a clause and then commits a longer
+    // revision of the same words. Replacing the cue used to hide that; an
+    // append block would show the sentence twice, so only the new tail is
+    // appended.
+    const fullPrimary =
+      this.resolvePrimaryText(line);
+    let primary = fullPrimary;
+
+    if (
+      this.lastAcceptedPrimary !== "" &&
+      primary.startsWith(
+        this.lastAcceptedPrimary,
+      )
+    ) {
+      primary = primary
+        .slice(
+          this.lastAcceptedPrimary.length,
+        )
+        .trimStart();
+    }
+
+    if (fullPrimary !== "") {
+      this.lastAcceptedPrimary = fullPrimary;
+    }
+
     const cues =
-      this.createCueSegments(line);
+      this.createCueSegments(
+        line,
+        primary,
+      );
 
     if (cues.length === 0) {
+      this.acceptedFinalIds.add(line.id);
       return;
     }
 
@@ -985,8 +1016,22 @@ export class CaptionOverlay {
     this.updateCaptionVisibility();
   }
 
+  private resolvePrimaryText(
+    line: CaptionLine,
+  ): string {
+    const source = line.text.trim();
+    const translated =
+      line.ja?.trim() ?? "";
+
+    return translated === "" &&
+      this.translationPath === "none"
+      ? source
+      : translated;
+  }
+
   private createCueSegments(
     line: CaptionLine,
+    primaryOverride?: string,
   ): CueData[] {
     const source = line.text.trim();
     const translated =
@@ -995,7 +1040,8 @@ export class CaptionOverlay {
       translated === "" &&
       this.translationPath === "none";
     const primary =
-      useEnglish ? source : translated;
+      primaryOverride ??
+      (useEnglish ? source : translated);
 
     if (primary === "") {
       return [];
