@@ -25,6 +25,8 @@ const root = path.resolve(here, "..");
 // The overlay can take a while to reach the running state when the on-device
 // model is cold, and a fresh checkout has no bench/results directory.
 const READY_TIMEOUT_MS = 120000;
+const DRAIN_TIMEOUT_MS = 30000;
+const DRAIN_QUIET_MS = 6000;
 // Same sets run-bench.mjs validates against. An unvalidated typo is silently
 // rejected by the extension, which keeps its previous setting while the result
 // JSON claims the one that was asked for.
@@ -75,6 +77,13 @@ if (options.help) {
   process.exit(0);
 }
 
+if (
+  !Number.isFinite(options.durationSeconds) ||
+  options.durationSeconds <= 0
+) {
+  console.error("[live2] --duration must be a positive number of seconds");
+  process.exit(2);
+}
 if (!ALLOWED_MODELS.includes(options.model)) {
   console.error(
     `[live2] --model must be one of: ${ALLOWED_MODELS.join(", ")}`,
@@ -170,6 +179,7 @@ try {
   const page = pages[0] ?? (await browser.newPage());
   await page.goto(server.caseUrl, { waitUntil: "domcontentloaded" });
   await new Promise((r) => setTimeout(r, 1500));
+  console.error("[live2] fixture loaded");
 
   // A translator-only profile is a valid environment for --backend translator,
   // so only require the API the selected backend actually uses.
@@ -215,31 +225,34 @@ try {
   // Settings reach the capture path through storage, which is read independently
   // of this message, so give it a beat before toggling.
   await new Promise((r) => setTimeout(r, 2500));
+  console.error(`[live2] settings applied; ${JSON.stringify(result.builtinAi)}`);
 
-  // A cold model spends its first seconds loading and discards the audio that
-  // arrives meanwhile, so the measurement window must not start until the
-  // overlay reports the running state. Holding the fixture paused through that
-  // wait does not work here: the capture never reached running in 120s with no
-  // audio flowing. Warm up with the fixture playing instead, then rewind before
-  // the window opens, so nothing that gets measured was fed to a loading model.
-  await page.evaluate(async () => {
-    const video = document.querySelector("video");
-    video.loop = true;
-    video.currentTime = 0;
-    window.postMessage({ t: "CS_DEV_TOGGLE" }, "*");
-    await video.play();
-  });
+  // Replicates the handshake in bench/run-bench.mjs:1305-1319. The tap needs a
+  // playing video at dispatch, but WhisperSegmenter.start() begins at the oldest
+  // available ring-buffer offset (src/offscreen/segmenter.ts:299-307), so any
+  // audio that accumulates while the model loads is replayed into the measured
+  // window. Pausing as soon as the tap is acquired keeps that backlog empty.
+  //
+  // Note the status text: while the capture is running with the video paused the
+  // overlay shows the silent-input hint, not 字幕ON (src/content/overlay.ts:1851-1879),
+  // so running has to be detected from either wording.
+  const chipSays = (needles) =>
+    page.evaluate(
+      (list) =>
+        [...document.querySelectorAll("*")].some((host) => {
+          const text = host.shadowRoot?.textContent;
+          return text ? list.some((n) => text.includes(n)) : false;
+        }),
+      needles,
+    );
+  const RUNNING = ["字幕ON", "音声がありません", "音声を取得できません"];
+  const ACQUIRED = ["字幕 準備中", ...RUNNING];
 
-  const waitForRunning = async (label, timeoutMs) => {
+  const waitFor = async (label, needles, timeoutMs) => {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
-      const running = await page.evaluate(() =>
-        [...document.querySelectorAll("*")].some((host) =>
-          host.shadowRoot?.textContent?.includes("字幕ON"),
-        ),
-      );
-      if (running) {
-        console.error(`[live2] ${label}: running`);
+      if (await chipSays(needles)) {
+        console.error(`[live2] ${label}`);
         return true;
       }
       await new Promise((r) => setTimeout(r, 500));
@@ -247,35 +260,76 @@ try {
     return false;
   };
 
-  if (!(await waitForRunning("warm-up", READY_TIMEOUT_MS))) {
-    // Starting the window anyway would produce a truncated capture that still
-    // claims the full durationSeconds, and a non-empty line list would slip past
-    // the empty-capture guard.
+  await page.evaluate(async () => {
+    const video = document.querySelector("video");
+    video.loop = true;
+    video.currentTime = 0;
+    window.postMessage({ t: "CS_DEV_TOGGLE" }, "*");
+    await video.play();
+  });
+  console.error("[live2] toggled on; waiting for warm-up");
+
+  // Warm-up only completes while audio is flowing (measured: 字幕 準備中 until
+  // ~4s of playback, then 字幕ON; paused, it never leaves 準備中), so the clip has
+  // to run through it.
+  if (!(await waitFor("capture running", RUNNING, READY_TIMEOUT_MS))) {
+    // Opening the window anyway would give a truncated capture that still claims
+    // the full durationSeconds, and a non-empty line list would slip past the
+    // empty-capture guard.
     throw new Error(
       `capture never reached the running state within ${READY_TIMEOUT_MS}ms`,
     );
   }
-
-  // Seeking does not flush the tap, the recognizer, the translation queue or a
-  // cue already on screen, so a rewind would let audio from before the seek land
-  // inside the measured window. Stopping the capture to flush it is not an option
-  // either: a stop/start cycle re-initialises the model and did not come back
-  // within 120s when measured. So the clip simply runs on, uncut, into the
-  // window, and the collector is seeded with whatever is already displayed so a
-  // cue that predates the window is not recorded as its first line. The window is
-  // therefore a continuous stretch of the loop rather than a whole pass.
   result.readyBeforePlayback = true;
-  const seedState = await page.evaluate(() => {
-    const texts = [];
-    for (const host of document.querySelectorAll("*")) {
-      if (!host.shadowRoot) continue;
-      for (const el of host.shadowRoot.querySelectorAll(".caption-primary")) {
-        const text = el.textContent.trim();
-        if (text) texts.push(text);
-      }
-    }
-    return texts.join("␟");
+
+  // Those warm-up seconds are still in the capture ring, and
+  // WhisperSegmenter.start() begins at the oldest available offset
+  // (src/offscreen/segmenter.ts:299-307), so they would be emitted inside the
+  // measured window. Pause and let the backlog drain: the overlay stops changing
+  // once the recognizer has caught up with what it already holds.
+  await page.evaluate(() => {
+    document.querySelector("video").pause();
   });
+
+  const overlayState = () =>
+    page.evaluate(() => {
+      const texts = [];
+      for (const host of document.querySelectorAll("*")) {
+        if (!host.shadowRoot) continue;
+        for (const el of host.shadowRoot.querySelectorAll(".caption-primary")) {
+          const text = el.textContent.trim();
+          if (text) texts.push(text);
+        }
+      }
+      return texts.join("␟");
+    });
+
+  let quietSince = Date.now();
+  let lastSeen = await overlayState();
+  const drainDeadline = Date.now() + DRAIN_TIMEOUT_MS;
+  while (Date.now() < drainDeadline) {
+    await new Promise((r) => setTimeout(r, 1000));
+    const now = await overlayState();
+    if (now !== lastSeen) {
+      lastSeen = now;
+      quietSince = Date.now();
+    } else if (Date.now() - quietSince >= DRAIN_QUIET_MS) {
+      break;
+    }
+  }
+  result.drainMs = Date.now() - (quietSince - DRAIN_QUIET_MS);
+  console.error("[live2] backlog drained; opening the window");
+
+  await page.evaluate(async () => {
+    const video = document.querySelector("video");
+    video.currentTime = 0;
+    await video.play();
+  });
+
+  // Whatever the drain left on screen predates the window.
+  const seedState = lastSeen;
+
+
 
   await page.evaluate((initialState) => {
     window.__caps = [];
