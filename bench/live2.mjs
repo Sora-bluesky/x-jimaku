@@ -10,6 +10,9 @@
 //
 // Requires a Chrome whose profile already has the on-device model, and a pipe
 // connection: the CDP Extensions domain is not served over --remote-debugging-port.
+// Branded Chrome dropped --load-extension in 137 (Chromium and Chrome for Testing
+// still accept it), so on Canary the flag is silently ignored and loadUnpacked is
+// the only way in.
 import puppeteer from "puppeteer-core";
 import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
@@ -18,6 +21,10 @@ import { startBenchServer } from "./serve.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, "..");
+
+// The overlay can take a while to reach the running state when the on-device
+// model is cold, and a fresh checkout has no bench/results directory.
+const READY_TIMEOUT_MS = 120000;
 
 const CASES = {
   tts: { mediaFile: path.join(here, "refs", "tts-speech.wav"), contextTerms: [] },
@@ -130,7 +137,7 @@ const result = {
 const watchdog = setTimeout(() => {
   console.error("[live2] watchdog fired");
   process.exit(2);
-}, captureMs + 180000);
+}, READY_TIMEOUT_MS + captureMs + 120000);
 watchdog.unref?.();
 
 try {
@@ -172,17 +179,48 @@ try {
   // of this message, so give it a beat before toggling.
   await new Promise((r) => setTimeout(r, 2500));
 
+  // A cold model spends its first seconds loading and discards the audio that
+  // arrives meanwhile, so the measurement window must not start until the
+  // overlay reports the running state. Holding the fixture paused through that
+  // wait does not work here: the capture never reached running in 120s with no
+  // audio flowing. Warm up with the fixture playing instead, then rewind before
+  // the window opens, so nothing that gets measured was fed to a loading model.
   await page.evaluate(async () => {
     const video = document.querySelector("video");
     video.loop = true;
     video.currentTime = 0;
+    window.postMessage({ t: "CS_DEV_TOGGLE" }, "*");
     await video.play();
+  });
+
+  const readyDeadline = Date.now() + READY_TIMEOUT_MS;
+  let ready = false;
+  while (Date.now() < readyDeadline) {
+    ready = await page.evaluate(() => {
+      for (const host of document.querySelectorAll("*")) {
+        if (!host.shadowRoot) continue;
+        if (host.shadowRoot.textContent?.includes("字幕ON")) return true;
+      }
+      return false;
+    });
+    if (ready) break;
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  result.readyBeforePlayback = ready;
+  console.error(
+    ready
+      ? "[live2] capture running; starting playback"
+      : `[live2] capture not running after ${READY_TIMEOUT_MS}ms; playing anyway`,
+  );
+
+  // Reopen the clip from the top so the measured window is a whole pass.
+  await page.evaluate(() => {
+    document.querySelector("video").currentTime = 0;
   });
 
   await page.evaluate(() => {
     window.__caps = [];
     window.__lastState = "";
-    window.postMessage({ t: "CS_DEV_TOGGLE" }, "*");
     // A cue occupies two .caption-primary elements, so comparing each element
     // against the previously pushed one lets the pair alternate and records the
     // same cue on every tick. Compare the whole overlay state instead, and push
@@ -206,8 +244,13 @@ try {
   });
 
   const started = Date.now();
-  while (Date.now() - started < captureMs) {
-    await new Promise((r) => setTimeout(r, 10000));
+  const deadline = started + captureMs;
+  while (Date.now() < deadline) {
+    // Sleeping a fixed step overshoots any duration that is not a multiple of
+    // it, which would silently record more audio than durationSeconds claims.
+    await new Promise((r) =>
+      setTimeout(r, Math.min(10000, deadline - Date.now())),
+    );
     const count = await page.evaluate(() => window.__caps.length);
     console.error(
       `[live2] t+${Math.round((Date.now() - started) / 1000)}s lines=${count}`,
@@ -232,6 +275,12 @@ try {
 }
 
 const lines = result.recognition?.jaClauses ?? [];
+if (!result.error && lines.length === 0) {
+  // A missed toggle, a failed capture or a renamed overlay selector all end here
+  // with no exception, and the file would be unusable to score-ja.
+  result.error = "capture produced no caption lines";
+  console.error(`[live2] ${result.error}`);
+}
 const joined = lines.join("\n");
 const japanese = /[\u3040-\u30ff\u4e00-\u9fff]/u;
 result.gates = {
@@ -248,9 +297,10 @@ const stamp = new Date()
   .replace("T", "-")
   .slice(0, 15);
 result.generatedAt = new Date().toISOString();
+const resultsDir = path.join(here, "results");
+mkdirSync(resultsDir, { recursive: true });
 const outFile = path.join(
-  here,
-  "results",
+  resultsDir,
   `live2-${options.caseName}-${options.model}-${stamp}.json`,
 );
 writeFileSync(outFile, `${JSON.stringify(result, null, 2)}\n`, "utf8");

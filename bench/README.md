@@ -50,8 +50,9 @@ result JSON 保存・機械ゲート出力までを 1 コマンドで行う。
 - **pipe 接続**が要る。CDP の `Extensions` ドメインは `--remote-debugging-port` には出ない。
   `puppeteer.launch({ pipe: true })` + `--enable-unsafe-extension-debugging`（2 つ同時に
   検証済み・個別の要否は未切り分け）。
-- **拡張は `Extensions.loadUnpacked` で入れる**。`--load-extension` は debugging 接続下では
-  無効化されており、`chrome://version` のコマンドラインに載っていても導入数 0 になる。
+- **拡張は `Extensions.loadUnpacked` で入れる**。**ブランド版 Chrome は 137 で
+  `--load-extension` を削除した**（Chromium と Chrome for Testing には残っている）ので、
+  Canary では `chrome://version` のコマンドラインに載っていても導入数 0 になる。
   毎回 dist/ を入れ直すのでリロードボタンは不要。
 - **`puppeteer.defaultArgs()` は引数なしだと headless 既定を返す**（`--headless=new`・
   `--mute-audio`）。`ignoreDefaultArgs: true` と併用すると `headless: false` を無視して
