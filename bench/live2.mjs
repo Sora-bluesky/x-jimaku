@@ -27,6 +27,7 @@ const root = path.resolve(here, "..");
 const READY_TIMEOUT_MS = 120000;
 const DRAIN_TIMEOUT_MS = 30000;
 const DRAIN_QUIET_MS = 6000;
+const STOP_DRAIN_TIMEOUT_MS = 30000;
 // Same sets run-bench.mjs validates against. An unvalidated typo is silently
 // rejected by the extension, which keeps its previous setting while the result
 // JSON claims the one that was asked for.
@@ -198,15 +199,19 @@ try {
           });
     return out;
   });
-  const requiredApi =
+  const usable = (api) => result.builtinAi[api] === "available";
+  const backendReady =
     options.backend === "translator"
-      ? "translator"
+      ? usable("translator")
       : options.backend === "prompt-api"
-        ? "languageModel"
-        : null;
-  if (requiredApi && result.builtinAi[requiredApi] !== "available") {
+        ? usable("languageModel")
+        : // auto still needs somewhere to go: with neither API available
+          // selectBestPath falls through to "none" and the overlay emits the
+          // English source, which the capture guard cannot tell from a translation.
+          usable("translator") || usable("languageModel");
+  if (!backendReady) {
     throw new Error(
-      `${requiredApi} not ready for --backend ${options.backend}: ${JSON.stringify(result.builtinAi)}`,
+      `no translation API available for --backend ${options.backend}: ${JSON.stringify(result.builtinAi)}`,
     );
   }
 
@@ -370,9 +375,21 @@ try {
     );
   }
 
+  // Stopping runs the explicit-stop drain, and the clauses it flushes are real
+  // output for audio inside the window. Leave the sampler running until the
+  // capture actually goes idle before taking the snapshot.
+  await page.evaluate(() => {
+    window.postMessage({ t: "CS_DEV_TOGGLE" }, "*");
+  });
+  const stopDeadline = Date.now() + STOP_DRAIN_TIMEOUT_MS;
+  while (Date.now() < stopDeadline) {
+    if (!(await chipSays(RUNNING))) break;
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  await new Promise((r) => setTimeout(r, 1000));
+
   const captured = await page.evaluate(() => {
     clearInterval(window.__capTimer);
-    window.postMessage({ t: "CS_DEV_TOGGLE" }, "*");
     return window.__caps.map((t) => t.replace(/\n/g, ""));
   });
   result.recognition = { jaClauses: captured };
