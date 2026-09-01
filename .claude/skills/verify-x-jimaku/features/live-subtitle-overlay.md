@@ -1,6 +1,6 @@
 # Live subtitle overlay
 
-The core end-user feature: on a real x.com video with audio, the extension captures the tab's audio, runs it through offscreen ASR, translates the result, and renders a live Japanese subtitle bar over the video. This is the feature the bench harness cannot reach — it requires a real Chrome instance and a real x.com page, and must be verified manually.
+The core end-user feature: on a real x.com video with audio, the extension captures the tab's audio, runs it through offscreen ASR, translates the result, and renders a live Japanese subtitle bar over the video. The CfT bench (`run-bench.mjs`) cannot reach it because CfT never finishes the Translator download. `node bench/live2.mjs` (added 2026-09-01) does reach the translation and overlay stages unattended, but in real Chrome against the fixture page on `127.0.0.1:8123`, not against x.com — the x.com DOM (target selection, `対象外` badge, post-text term extraction) is still manual-only.
 
 ## Sub-features
 

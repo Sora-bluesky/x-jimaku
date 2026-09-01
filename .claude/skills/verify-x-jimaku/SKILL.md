@@ -37,6 +37,7 @@ Read-only, run before any drive:
 - A Chrome for the bench is resolvable through any of the three supported sources: a `--chrome <path>` you will pass, a set `BENCH_CHROME` env var, or `~/.cache/puppeteer/chrome/` containing at least one `chrome/win64-*` (or platform-equivalent) directory. Any one of them satisfies this check — an explicit `--chrome`/`BENCH_CHROME` does not need the cache to exist.
 - Port 8123 is not already `LISTEN`ing (the bench server binds it fixed; a stale process from a prior killed run blocks the next one).
 - `bench/refs/tts-speech.wav` exists (the `tts` case is self-contained on this file plus `tts-ja-ref.txt`/`tts-script.txt`; without it the `tts` case cannot run at all).
+- **Census:** run the enumeration in `features/README.md` → Census and confirm every `bench/*.mjs` and `bench:*` script is either driven by a feature file or on the exclusion list. An unlisted script means the map is stale; fix the map before driving.
 
 If any check fails, fix it before driving (rebuild, free the port, restore the refs directory) rather than reporting a false pass or a false failure.
 

@@ -12,7 +12,7 @@ This directory is the maintained source for verifying x-jimaku's user-facing beh
 
 ## Driving conventions
 
-- Prefer the scripted bench (`node bench/run-bench.mjs ...`) wherever a feature is reachable through it. Only the ASR pipeline (`tts`/`tibo` cases) is reachable this way today.
+- Prefer the scripted paths wherever a feature is reachable through them: `node bench/run-bench.mjs ...` for the ASR pipeline (CfT, no translation), `node bench/live2.mjs ...` for ASR → translation → overlay in real Chrome against the fixture page (no x.com DOM).
 - Every other feature is manual-only in real Chrome. State this plainly in the feature file rather than pretending a script covers it.
 - Treat every command in these files as literal — do not "improve" flags or paths while driving.
 - Capture the action and the resulting state, not just a final screenshot: for the bench, that means the full stdout table plus the result JSON path; for manual checks, a screenshot showing both the trigger (click, keypress, video state) and the resulting chip/badge/panel state.
@@ -24,6 +24,18 @@ This directory is the maintained source for verifying x-jimaku's user-facing beh
 - Record which feature ID and entry point were used with every artifact.
 - Report an unreachable path with the attempted command/action and the unmet precondition (e.g. "CfT cannot download the Translator pack, so options-page Translator diagnostics could not be exercised in the scripted profile").
 - Do not report a manual-only feature as verified because the bench passed — they exercise different code paths entirely.
+
+## Census (run before trusting this map)
+
+The map drifts when a script is added to `bench/` or `package.json` without a matching entry here — that is how `live2.mjs` was described as impossible for a day. Before driving, enumerate and reconcile:
+
+```bash
+ls bench/*.mjs; grep -o '"[a-z:-]*": *"node bench[^"]*"' package.json
+```
+
+Every `bench/*.mjs` and every `bench:*` npm script must be named in exactly one of: a feature file's `Driving it` section, or the exclusion list below. Anything unlisted is drift — stop and update the map (or the exclusion list) before reporting a feature as manual-only.
+
+Exclusions (helpers, not entry points): `bench/metrics.mjs` (scoring library used by `run-bench.mjs`), `bench/assert-smoke.mjs` (CI smoke assertion), `bench/serve.mjs` and `bench/serve-standalone.mjs` (fixture servers started by the harnesses or for the manual fallback), `bench/score-ja.mjs` (translation-quality scoring, see `bench/README.md`). The npm scripts `bench:smoke` and `bench:quality` are aliases of the two `run-bench.mjs` commands in `bench-offline-e2e.md`.
 
 ## Feature entry contract
 
