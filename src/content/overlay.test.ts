@@ -16,6 +16,10 @@ import {
   INITIALIZATION_PROGRESS_CEILING,
 } from "../shared/initialization-progress";
 import {
+  MAX_LINE_UNITS,
+  wrapCueText,
+} from "./cue-text";
+import {
   CaptionOverlay,
   CUE_MINIMUM_DISPLAY_MS,
 } from "./overlay";
@@ -563,6 +567,56 @@ describe(
         );
         expect(onCaptionFadeOut)
           .toHaveBeenCalledOnce();
+      },
+    );
+
+    it(
+      "surfaces every line of a cue that wraps past two lines",
+      () => {
+        const overlay = createOverlay({});
+        // wrapCueText breaks this 28-unit part into three lines because the
+        // boundary rules refuse the positions near the budget. The old display
+        // had two line slots with overflow hidden, so the third one vanished.
+        const threeLineText =
+          "おネち5ナbた1）6c オネz0と3そ4たく0 2ア pてせ、ぬ c ）、";
+        const expected = wrapCueText(
+          threeLineText,
+          MAX_LINE_UNITS,
+        ).split("\n");
+
+        expect(
+          expected.length,
+        ).toBeGreaterThan(2);
+
+        showFinal(
+          overlay,
+          1,
+          threeLineText,
+        );
+
+        // A cue splits its dwell across its lines, so sampling once per dwell
+        // steps over the middle one. Sample both slots at a fraction of it.
+        const seen = new Set<string>();
+        const step = Math.ceil(
+          CUE_MINIMUM_DISPLAY_MS / 10,
+        );
+
+        for (
+          let elapsed = 0;
+          elapsed <=
+            CUE_MINIMUM_DISPLAY_MS * 2;
+          elapsed += step
+        ) {
+          for (const slot of getBlockLines()) {
+            if (slot !== "") seen.add(slot);
+          }
+
+          vi.advanceTimersByTime(step);
+        }
+
+        for (const line of expected) {
+          expect([...seen]).toContain(line);
+        }
       },
     );
 
