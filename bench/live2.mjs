@@ -25,6 +25,11 @@ const root = path.resolve(here, "..");
 // The overlay can take a while to reach the running state when the on-device
 // model is cold, and a fresh checkout has no bench/results directory.
 const READY_TIMEOUT_MS = 120000;
+// Same sets run-bench.mjs validates against. An unvalidated typo is silently
+// rejected by the extension, which keeps its previous setting while the result
+// JSON claims the one that was asked for.
+const ALLOWED_MODELS = ["tiny", "base", "small", "turbo"];
+const ALLOWED_BACKENDS = ["auto", "translator", "prompt-api"];
 
 const CASES = {
   tts: { mediaFile: path.join(here, "refs", "tts-speech.wav"), contextTerms: [] },
@@ -68,6 +73,19 @@ if (options.help) {
       "                           [--duration 95] [--chrome <exe>] [--profile <dir>] [--extension <dir>]",
   );
   process.exit(0);
+}
+
+if (!ALLOWED_MODELS.includes(options.model)) {
+  console.error(
+    `[live2] --model must be one of: ${ALLOWED_MODELS.join(", ")}`,
+  );
+  process.exit(2);
+}
+if (!ALLOWED_BACKENDS.includes(options.backend)) {
+  console.error(
+    `[live2] --backend must be one of: ${ALLOWED_BACKENDS.join(", ")}`,
+  );
+  process.exit(2);
 }
 
 const definition = CASES[options.caseName];
@@ -153,13 +171,32 @@ try {
   await page.goto(server.caseUrl, { waitUntil: "domcontentloaded" });
   await new Promise((r) => setTimeout(r, 1500));
 
+  // A translator-only profile is a valid environment for --backend translator,
+  // so only require the API the selected backend actually uses.
   result.builtinAi = await page.evaluate(async () => {
-    if (typeof LanguageModel === "undefined") return { languageModel: "missing" };
-    return { languageModel: await LanguageModel.availability() };
+    const out = {};
+    out.languageModel =
+      typeof LanguageModel === "undefined"
+        ? "missing"
+        : await LanguageModel.availability();
+    out.translator =
+      typeof Translator === "undefined"
+        ? "missing"
+        : await Translator.availability({
+            sourceLanguage: "en",
+            targetLanguage: "ja",
+          });
+    return out;
   });
-  if (result.builtinAi.languageModel !== "available") {
+  const requiredApi =
+    options.backend === "translator"
+      ? "translator"
+      : options.backend === "prompt-api"
+        ? "languageModel"
+        : null;
+  if (requiredApi && result.builtinAi[requiredApi] !== "available") {
     throw new Error(
-      `on-device model not ready: ${JSON.stringify(result.builtinAi)}`,
+      `${requiredApi} not ready for --backend ${options.backend}: ${JSON.stringify(result.builtinAi)}`,
     );
   }
 
@@ -193,34 +230,56 @@ try {
     await video.play();
   });
 
-  const readyDeadline = Date.now() + READY_TIMEOUT_MS;
-  let ready = false;
-  while (Date.now() < readyDeadline) {
-    ready = await page.evaluate(() => {
-      for (const host of document.querySelectorAll("*")) {
-        if (!host.shadowRoot) continue;
-        if (host.shadowRoot.textContent?.includes("字幕ON")) return true;
+  const waitForRunning = async (label, timeoutMs) => {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const running = await page.evaluate(() =>
+        [...document.querySelectorAll("*")].some((host) =>
+          host.shadowRoot?.textContent?.includes("字幕ON"),
+        ),
+      );
+      if (running) {
+        console.error(`[live2] ${label}: running`);
+        return true;
       }
-      return false;
-    });
-    if (ready) break;
-    await new Promise((r) => setTimeout(r, 500));
-  }
-  result.readyBeforePlayback = ready;
-  console.error(
-    ready
-      ? "[live2] capture running; starting playback"
-      : `[live2] capture not running after ${READY_TIMEOUT_MS}ms; playing anyway`,
-  );
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    return false;
+  };
 
-  // Reopen the clip from the top so the measured window is a whole pass.
-  await page.evaluate(() => {
-    document.querySelector("video").currentTime = 0;
+  if (!(await waitForRunning("warm-up", READY_TIMEOUT_MS))) {
+    // Starting the window anyway would produce a truncated capture that still
+    // claims the full durationSeconds, and a non-empty line list would slip past
+    // the empty-capture guard.
+    throw new Error(
+      `capture never reached the running state within ${READY_TIMEOUT_MS}ms`,
+    );
+  }
+
+  // Seeking does not flush the tap, the recognizer, the translation queue or a
+  // cue already on screen, so a rewind would let audio from before the seek land
+  // inside the measured window. Stopping the capture to flush it is not an option
+  // either: a stop/start cycle re-initialises the model and did not come back
+  // within 120s when measured. So the clip simply runs on, uncut, into the
+  // window, and the collector is seeded with whatever is already displayed so a
+  // cue that predates the window is not recorded as its first line. The window is
+  // therefore a continuous stretch of the loop rather than a whole pass.
+  result.readyBeforePlayback = true;
+  const seedState = await page.evaluate(() => {
+    const texts = [];
+    for (const host of document.querySelectorAll("*")) {
+      if (!host.shadowRoot) continue;
+      for (const el of host.shadowRoot.querySelectorAll(".caption-primary")) {
+        const text = el.textContent.trim();
+        if (text) texts.push(text);
+      }
+    }
+    return texts.join("␟");
   });
 
-  await page.evaluate(() => {
+  await page.evaluate((initialState) => {
     window.__caps = [];
-    window.__lastState = "";
+    window.__lastState = initialState;
     // A cue occupies two .caption-primary elements, so comparing each element
     // against the previously pushed one lets the pair alternate and records the
     // same cue on every tick. Compare the whole overlay state instead, and push
@@ -241,7 +300,7 @@ try {
       window.__lastState = state;
       window.__caps.push(...texts);
     }, 300);
-  });
+  }, seedState);
 
   const started = Date.now();
   const deadline = started + captureMs;
