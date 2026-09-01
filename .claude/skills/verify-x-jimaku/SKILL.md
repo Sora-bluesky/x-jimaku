@@ -42,11 +42,11 @@ If any check fails, fix it before driving (rebuild, free the port, restore the r
 
 ## Drive
 
-Harness: `node bench/run-bench.mjs --case <tts|tibo> --model <tiny|base|small|turbo> --duration <seconds>`.
+Harness: `node bench/run-bench.mjs --case <tts|tts2|tibo> --model <tiny|base|small|turbo> --duration <seconds>`.
 
 - Chrome resolution order: `--chrome <path>` → env `BENCH_CHROME` → auto-discovery under `~/.cache/puppeteer/chrome/**` (this machine has `win64-149.0.7827.22`, so no override is normally needed).
 - Every run gets a fresh `mkdtemp` profile loaded with `--load-extension` pointed at `dist/` — never the user's real Chrome profile. Runs do not share state and cannot corrupt a manual session.
-- `--model` defaults to `base`, `--duration` defaults to `90` (seconds), `--backend` defaults to `auto` (values: `auto`/`translator`/`prompt-api`). Unknown arguments exit with code `2` (argument error), distinct from a run failure (exit `1`).
+- `--model` defaults to `base`, `--duration` defaults to `90` (seconds), `--backend` defaults to `prompt-api` (values: `auto`/`translator`/`prompt-api`; `DEFAULT_BACKEND`, `bench/run-bench.mjs:37`). Unknown arguments exit with code `2` (argument error), distinct from a run failure (exit `1`).
 - Add `--trace` to capture the offscreen document's console output — it is written to a `.trace.log` file next to the result JSON (path echoed on stderr as `[bench] trace: <path>`), not inline. Use this whenever a run needs debugging, not just on the smoke pass.
 
 Standard invocations:
@@ -54,11 +54,13 @@ Standard invocations:
 - **Smoke (fast, use for "does it still run"):** `node bench/run-bench.mjs --case tts --model tiny --duration 30`
 - **Quality observation (use for ASR metric review):** `node bench/run-bench.mjs --case tts --model base --duration 90`
 
-The `tts` case is self-contained (`bench/refs/tts-speech.wav`, 14.1s at 22050Hz / 608KB, plus reference text) and is the case to reach for by default. The `tibo` case needs additional material fetched into `bench/work/` (gitignored) first — do not attempt it without confirming that material is present.
+The `tts` case is self-contained (`bench/refs/tts-speech.wav`, 14.1s at 22050Hz / 608KB, plus reference text) and is the case to reach for by default. The `tts2` case (added 2026-08-30) is also self-contained (`bench/refs/tts2-speech.wav` / `tts2-script.txt` / `tts2-ja-ref.txt`) and carries a hard-coded proper-noun list (`Roman`, `NASA Goddard`, `Kennedy Space Center`, `coronagraph` — `bench/run-bench.mjs:397-420`) so `properNounRecall` is actually scored there, unlike `tts` where it is `null`. There is no CLI flag to supply terms — the list lives in `loadCase`. The `tibo` case needs additional material fetched into `bench/work/` (gitignored) first — do not attempt it without confirming that material is present.
+
+Translation quality is measured separately, because Chrome for Testing ships no built-in AI: `node bench/live2.mjs [--case tts|tts2] [--duration 95]` runs the whole real-Chrome capture unattended (`bench/live2.mjs`), installing the current `dist/` over CDP and printing the mechanical gates. `node bench/serve-standalone.mjs [tts|tts2]` starts only the fixture server for the manual fallback used to check against Chrome Stable. Both bind the same fixed port 8123 and conflict with a concurrent `run-bench.mjs`. Procedure and prerequisites: `bench/README.md` (live2 節).
 
 Only one bench run at a time: the server binds `127.0.0.1:8123` fixed, so a second concurrent invocation fails on port conflict rather than running in parallel.
 
-**Known transient (observed 2026-08-27, 1 of 4 runs):** the run can die at startup with `Error: Execution context is not available in detached frame or worker "chrome-extension://.../background.js"` from `evaluateInServiceWorker` → `waitForCaptureRunning` (`run-bench.mjs:890/840`) — the MV3 service worker restarted under the harness's feet. Exit code is `1` and no result JSON is written. On exactly this signature, retry once; two consecutive failures of any signature are a FAIL to report, not a thing to retry past. Run the harness from the repo root — a wrong cwd fails with `MODULE_NOT_FOUND` (exit `1`), which is an operator error, not a harness failure.
+**Known transient (observed 2026-08-27, 1 of 4 runs):** the run can die at startup with `Error: Execution context is not available in detached frame or worker "chrome-extension://.../background.js"` from `evaluateInServiceWorker` → `waitForCaptureRunning` (`run-bench.mjs:911/864`) — the MV3 service worker restarted under the harness's feet. Exit code is `1` and no result JSON is written. On exactly this signature, retry once; two consecutive failures of any signature are a FAIL to report, not a thing to retry past. Run the harness from the repo root — a wrong cwd fails with `MODULE_NOT_FOUND` (exit `1`), which is an operator error, not a harness failure.
 
 ## Evidence
 

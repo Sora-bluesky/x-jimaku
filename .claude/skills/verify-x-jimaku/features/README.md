@@ -31,8 +31,8 @@ Each feature file starts with an H1 title and one paragraph describing the user-
 
 ## Features
 
-- [Bench offline E2E](./bench-offline-e2e.md) — the only scriptable path: replays a fixed audio file through the real offscreen ASR pipeline and scores it against a reference transcript.
-- [Live subtitle overlay](./live-subtitle-overlay.md) — the manual-only real-Chrome + x.com path: capture → ASR → translation → on-page Japanese subtitle bar, and why it cannot be automated.
+- [Bench offline E2E](./bench-offline-e2e.md) — the only scriptable path: replays a fixed audio fixture (`tts`, or `tts2` for proper-noun recall) through the real offscreen ASR pipeline and scores it against a reference transcript.
+- [Live subtitle overlay](./live-subtitle-overlay.md) — the manual-only real-Chrome + x.com path: capture → ASR → sentence assembly → translation (with post-text proper-noun masking) → on-page Japanese subtitle bar, and why it cannot be automated.
 - [Toggle controls](./toggle-controls.md) — the toolbar icon and `Ctrl+Shift+9` shortcut that turn subtitles on/off per tab, and the chip states a user sees.
-- [Model selection](./model-selection.md) — choosing the ASR model (tiny/base/small/turbo) in the options page and the WebGPU→WASM fallback.
-- [Options page](./options-page.md) — the English-original-text display setting and the Translator diagnostics panel.
+- [Model selection](./model-selection.md) — choosing the ASR model (tiny/base/small/turbo) in the options page, the environment-based model recommendation hint, and the WebGPU→WASM fallback.
+- [Options page](./options-page.md) — display settings (English original, tentative dimming), pipeline settings (source language, translation backend), translation-model preparation, and the Translator diagnostics panel.
