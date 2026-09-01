@@ -5,14 +5,15 @@ description: "Drive and verify x-jimaku, a Chrome MV3 extension that live-transc
 
 # Verify x-jimaku
 
-x-jimaku is a Chrome MV3 extension (offscreen ASR via `@huggingface/transformers`, content-script overlay, Chrome Translator API) that overlays live Japanese subtitles on X.com video audio. This skill drives the one scriptable verification path — the offline bench harness — and documents the manual real-Chrome path the harness cannot reach.
+x-jimaku is a Chrome MV3 extension (offscreen ASR via `@huggingface/transformers`, content-script overlay, Chrome Translator API) that overlays live Japanese subtitles on X.com video audio. This skill drives the two scriptable verification paths — the CfT bench for ASR and the unattended real-Chrome `live2` run for translation and the overlay — and documents the manual x.com path neither reaches.
 
-Two verification tiers exist and neither substitutes for the other:
+Three verification tiers exist and none substitutes for another:
 
 1. **Scripted (this skill drives it):** `bench/run-bench.mjs` — a Puppeteer-driven, disposable-profile harness that loads `dist/` and replays a self-contained audio fixture through the real ASR pipeline. No manual step required. Proves ASR quality (WER, proper-noun recall, fragment rate) end to end.
-2. **Manual only (documented, not automatable):** real Chrome + x.com playback. Required for anything the bench cannot reach — see `features/live-subtitle-overlay.md` for why (Chrome for Testing's Translator pack download never completes, so translation quality and the on-page overlay must be eyeballed in the user's real Chrome).
+2. **Scripted, real Chrome (this skill drives it):** `bench/live2.mjs` — installs `dist/` into a real-Chrome profile over CDP, replays a fixture through ASR → translation → overlay, and prints mechanical gates (`englishPassthrough`, `wrongSenseRoma`, `unresolvedPlaceholders`, `romanKept`). Proves the translation path and the overlay DOM against the fixture page, not against x.com. Prerequisites and PASS shape: `bench/README.md` (live2 節).
+3. **Manual only (documented, not automatable):** real Chrome + x.com playback. Required for anything the bench cannot reach — see `features/live-subtitle-overlay.md` for why (Chrome for Testing's Translator pack download never completes, so translation quality and the on-page overlay must be eyeballed in the user's real Chrome).
 
-Never report "verified" for translation quality or overlay UI based on the bench run alone — it exercises tts/tibo ASR only, not the Translator path or the DOM overlay.
+Never report "verified" for translation quality or overlay UI based on the CfT bench alone — it exercises tts/tibo ASR only. A live2 pass covers translation and the overlay on the fixture page; the x.com-specific behaviors (target selection, `対象外`, post-text term extraction) still need tier 3.
 
 ## Launch
 
@@ -68,6 +69,7 @@ Only one bench run at a time: the server binds `127.0.0.1:8123` fixed, so a seco
 - **PASS is structural, not threshold-based:** (1) process exit code `0`, (2) stderr contains a `[bench] result: <path>` line (the metrics table goes to stdout; the result path goes to stderr), (3) the JSON file at that path exists, parses, and its `metrics` object has numeric `wer`, `werFiltered`, `fragmentRate` (from `bench/metrics.mjs`'s `computeMetrics`) — `properNounRecall` is `null`/`n/a` when the reference has no proper nouns to score (confirmed: a `tts` run with `properNounTotal: 0`), so treat a `null` there as expected, not a failure, (4) `metrics.clauseStats.count` is at least 1 — a zero-clause result means the fixture produced no transcript and the run did not exercise anything. Verified 2026-08-27: `node bench/run-bench.mjs --case tts --model tiny --duration 30` exited `0`, wrote `bench/results/tts-tiny-20260827-140331.json` with `metrics: {wer, werFiltered, fragmentRate, clauseStats.count: 6, properNounRecall: null, properNounTotal: 0}`.
 - **No quality thresholds exist in code.** Do not invent a WER/recall cutoff and call it a gate. Record the observed metrics (also echoed as a markdown table on stdout) as a data point; a baseline only becomes meaningful once several runs accumulate. Report numbers, not verdicts, until the user sets a threshold.
 - Result JSON lands at `bench/results/<case>-<model>-<YYYYMMDD-HHMMSS>.json` — this is timestamped and additive. Never overwrite or delete a prior result to "clean up."
+- For live2, evidence is the JSON `live2.mjs` prints at the end (`outFile` path plus the `gates` object with numeric values) and the result file under `bench/results/live2-*.json`. Gates are observations, not thresholds, except `unresolvedPlaceholders`, which must be `0`.
 - For the manual real-Chrome path, evidence is a screenshot or screen recording showing the overlay chip states (`字幕 準備中…N%` → `字幕ON`, or `対象外` on a non-target video) against actual x.com playback, per `features/live-subtitle-overlay.md`. A bench pass is not evidence for this path.
 
 ## Cleanup

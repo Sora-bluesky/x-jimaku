@@ -35,7 +35,7 @@ ls bench/*.mjs; grep -o '"[a-z:-]*": *"node bench[^"]*"' package.json
 
 Every `bench/*.mjs` and every `bench:*` npm script must be named in exactly one of: a feature file's `Driving it` section, or the exclusion list below. Anything unlisted is drift — stop and update the map (or the exclusion list) before reporting a feature as manual-only.
 
-Exclusions (helpers, not entry points): `bench/metrics.mjs` (scoring library used by `run-bench.mjs`), `bench/assert-smoke.mjs` (CI smoke assertion), `bench/serve.mjs` and `bench/serve-standalone.mjs` (fixture servers started by the harnesses or for the manual fallback), `bench/score-ja.mjs` (translation-quality scoring, see `bench/README.md`). The npm scripts `bench:smoke` and `bench:quality` are aliases of the two `run-bench.mjs` commands in `bench-offline-e2e.md`.
+Exclusions (libraries and CI-only helpers, never run by a verifier): `bench/metrics.mjs` (scoring library used by `run-bench.mjs`), `bench/assert-smoke.mjs` (CI smoke assertion), `bench/serve.mjs` (fixture server started by the harnesses). Entry points a verifier runs — `run-bench.mjs`, `live2.mjs`, `score-ja.mjs`, `serve-standalone.mjs` — must each have a `Driving it` bullet in a feature file. The npm scripts `bench:smoke` and `bench:quality` are aliases of the two `run-bench.mjs` commands in `bench-offline-e2e.md`.
 
 ## Feature entry contract
 

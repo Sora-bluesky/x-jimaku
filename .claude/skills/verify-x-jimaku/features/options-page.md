@@ -28,11 +28,13 @@ Preconditions:
 
 - **English original toggle.** Check "英語原文も表示". Toggle subtitles on for an x.com video. Confirm the subtitle bar now shows both the English source and the Japanese translation, not just Japanese.
 - **Toggle off.** Uncheck "英語原文も表示", then **restart the capture** (toggle subtitles off and back on for the tab) before checking. The overlay snapshots `showOriginal` at capture start (`CaptionOverlay` holds it as a fixed field, `src/content/overlay.ts:124`), so unchecking mid-capture leaves the current overlay showing English — that is correct behavior, not a failure. After the restart, confirm the subtitle bar is Japanese-only.
+- **Tentative dimming.** Check "暫定を薄字で表示", start a capture on an x.com video and confirm interim text appears in a dimmed `.caption-tentative` line (`src/content/overlay.ts:341`, style at `:2892`) before each final line replaces it. Uncheck it, restart the capture, and confirm no dimmed interim line appears while finals still arrive. Capture one screenshot of each state.
+- **Prepare translation model.** Click "翻訳モデルを準備する". The status line must go to `翻訳モデルを準備しています…` and then `翻訳モデルの準備が完了しました。` (`src/options/index.ts:607-682`). A failure message instead is a finding, not a skip. On Chrome for Testing this hangs (Gotchas) — run it in real Chrome only.
 - **Pipeline settings.** Change "音声の言語" and "翻訳エンジン" and confirm both persist across an options-page reload (they save on `change` via `saveSelectedSettings`, like the model picker). Restore the previous values afterwards — `translationBackend` in particular redirects every future capture (see `live-subtitle-overlay.md`'s translation-path recipe and its restore step).
 - **Run diagnostics.** Click "診断を実行". This runs the background/offscreen diagnostics snapshot only (`runBackgroundDiagnostics`, `src/options/index.ts:787-854`, wired at `:268-273`). The WebGPU result is rendered automatically at page load (`optionsWebGpuPromise` at `src/options/index.ts:192`, rendered in its `.then` at `:251-266`), not by this button.
 - **Translator probe.** Click the separate Translator button ("Options page Translator診断" → `runOptionsTranslatorProbe`, `src/options/index.ts:856-956`, wired at `:275-280`) to get the Translator status for the options-page context.
 - **Retrieve saved diagnostics.** Click "保存済み診断を取得" without re-running. Confirm it returns the last diagnostics result rather than blocking on a fresh probe.
-- **Proof.** Screenshot the diagnostics panel after clicking both "診断を実行" and the Translator probe (their results populate separately), plus a screenshot of the subtitle bar with the English-original toggle on.
+- **Proof.** Screenshots of the dimmed and non-dimmed interim states and of the completed preparation status line, plus: screenshot the diagnostics panel after clicking both "診断を実行" and the Translator probe (their results populate separately), plus a screenshot of the subtitle bar with the English-original toggle on.
 
 ## Gotchas
 
