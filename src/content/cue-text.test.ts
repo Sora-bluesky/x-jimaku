@@ -261,6 +261,67 @@ describe("splitCueText", () => {
       }
     },
   );
+
+  // A cue is NOT guaranteed to wrap into at most two lines. When the boundary
+  // rules refuse the positions near the budget, wrapCueText breaks early and
+  // spills into a third line, e.g. the 28-unit part
+  // "おネち5ナbた1）6c オネz0と3そ4たく0 2ア pてせ、ぬ c ）、" wraps to
+  // ["おネち5ナbた1）6c オネz0と3", "そ4たく0 2ア ", "pてせ、ぬ c ）、"].
+  // The display slot is two lines tall with overflow hidden, so before the
+  // append buffer a third line was dropped without a trace. What has to hold is
+  // the per-line budget, which is what this pins; the append path is what makes
+  // every line reach the screen, and overlay.test.ts covers that.
+  it(
+    "keeps every wrapped line within the unit budget across the boundary corpus",
+    () => {
+      const random =
+        createSeededRandom(0x71c0ffee);
+      const corpus = [
+        `https://${"a".repeat(72)}`,
+        "カ".repeat(40),
+      ];
+
+      for (
+        let index = 0;
+        index < 200;
+        index += 1
+      ) {
+        corpus.push(
+          createRandomText(
+            random,
+            1 +
+              Math.floor(
+                random() * 120,
+              ),
+          ),
+        );
+      }
+
+      for (const text of corpus) {
+        for (
+          const part
+          of splitCueText(text)
+        ) {
+          const lines = wrapCueText(
+            part,
+            MAX_LINE_UNITS,
+          ).split("\n");
+
+          expect(
+            lines.length,
+          ).toBeGreaterThan(0);
+
+          for (const line of lines) {
+            expect(
+              displayUnits(line.trimEnd()),
+            ).toBeLessThanOrEqual(
+              MAX_LINE_UNITS,
+            );
+          }
+        }
+      }
+    },
+  );
 });
 
 describe(

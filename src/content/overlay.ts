@@ -40,6 +40,7 @@ const HOST_ID = "xjsub-host";
 export const CUE_ACCELERATION_THRESHOLD = 2;
 const CUE_DROP_WARNING_INTERVAL_MS = 5_000;
 const MAX_ORIGINAL_CHARS = 140;
+const MAX_LEDGER_ENTRIES = 400;
 const PRIMARY_LINE_HEIGHT = 1.16;
 const ORIGINAL_FONT_SCALE = 0.68;
 const ORIGINAL_LINE_HEIGHT = 1.18;
@@ -82,6 +83,7 @@ interface ActiveCue {
   data: CueData;
   shownAt: number;
   element: HTMLDivElement;
+  lineCount: number;
 }
 
 interface SuspendedCaptionTimer {
@@ -121,6 +123,17 @@ export class CaptionOverlay {
     HTMLDivElement;
   private readonly cueContainer:
     HTMLDivElement;
+  private readonly cueElement:
+    HTMLDivElement;
+  private readonly primaryLines:
+    readonly [
+      HTMLDivElement,
+      HTMLDivElement,
+    ];
+  private readonly originalLine:
+    HTMLDivElement;
+  private readonly captionLedger:
+    HTMLDivElement;
   private readonly tentativeLine:
     HTMLDivElement;
   private readonly targetChip:
@@ -147,6 +160,9 @@ export class CaptionOverlay {
   private readonly waitingCues: CueData[] = [];
   private readonly cueTextSnapshots =
     new WeakMap<Element, string>();
+  private readonly pendingLines: string[] = [];
+  private blockLines:
+    [string, string] = ["", ""];
 
   private targetVideo:
     | HTMLVideoElement
@@ -282,6 +298,42 @@ export class CaptionOverlay {
     this.cueContainer.className =
       "cue-container";
 
+    this.cueElement =
+      document.createElement("div");
+    this.cueElement.className =
+      "caption-cue";
+
+    this.primaryLines = [
+      document.createElement("div"),
+      document.createElement("div"),
+    ];
+
+    for (const line of this.primaryLines) {
+      line.className = "caption-primary";
+    }
+
+    this.originalLine =
+      document.createElement("div");
+    this.originalLine.className =
+      "caption-original";
+
+    this.cueElement.append(
+      ...this.primaryLines,
+      this.originalLine,
+    );
+    this.cueContainer.append(
+      this.cueElement,
+    );
+    this.cueTextSnapshots.set(
+      this.cueElement,
+      "",
+    );
+
+    this.captionLedger =
+      document.createElement("div");
+    this.captionLedger.className =
+      "caption-ledger";
+
     this.tentativeLine =
       document.createElement("div");
     this.tentativeLine.className =
@@ -329,6 +381,7 @@ export class CaptionOverlay {
     shadow.append(
       style,
       this.captionStack,
+      this.captionLedger,
       this.targetChip,
       this.otherLayer,
     );
@@ -410,6 +463,10 @@ export class CaptionOverlay {
       0,
       this.waitingCues.length,
     );
+    this.pendingLines.splice(
+      0,
+      this.pendingLines.length,
+    );
     this.activeCue = null;
     this.tentativeId = null;
     this.tentativeAt = null;
@@ -419,7 +476,8 @@ export class CaptionOverlay {
     this.acceleratedUntilDrained = false;
     this.captionBarEnabled = false;
 
-    this.cueContainer.replaceChildren();
+    this.resetDisplayBlock();
+    this.captionLedger.replaceChildren();
     this.tentativeLine.textContent = "";
     this.captionLine.classList.add(
       "is-empty",
@@ -557,6 +615,7 @@ export class CaptionOverlay {
     return (
       this.activeCue !== null ||
       this.waitingCues.length > 0 ||
+      this.pendingLines.length > 0 ||
       this.pendingFinals.size > 0 ||
       this.tentativeLine.textContent !== ""
     );
@@ -917,6 +976,7 @@ export class CaptionOverlay {
     this.cancelCaptionFade();
 
     for (const cue of cues) {
+      this.appendLedgerEntry(cue.primaryText);
       this.waitingCues.push(cue);
       this.enforceQueueDiscipline();
       this.tryAdvanceCue();
@@ -968,6 +1028,24 @@ export class CaptionOverlay {
           ),
       }),
     );
+  }
+
+  private appendLedgerEntry(
+    text: string,
+  ): void {
+    const entry =
+      document.createElement("div");
+    entry.textContent = text;
+    this.captionLedger.append(entry);
+
+    while (
+      this.captionLedger.childElementCount >
+      MAX_LEDGER_ENTRIES
+    ) {
+      this.captionLedger
+        .firstElementChild
+        ?.remove();
+    }
   }
 
   private receiveTentative(
@@ -1219,17 +1297,6 @@ export class CaptionOverlay {
       return;
     }
 
-    if (this.waitingCues.length === 0) {
-      this.acceleratedUntilDrained =
-        retainAccelerationUntilDrained(
-          this.acceleratedUntilDrained,
-          this.waitingCues.length,
-        );
-      this.cancelCueAdvance();
-      this.scheduleCaptionFade();
-      return;
-    }
-
     const displayDurationMs =
       cueDisplayDurationMs(
         this.acceleratedUntilDrained,
@@ -1239,8 +1306,35 @@ export class CaptionOverlay {
     const elapsed =
       performance.now() -
       this.activeCue.shownAt;
-    const remaining =
-      displayDurationMs - elapsed;
+    const hasPendingLine =
+      this.pendingLines.length > 0;
+    let remaining: number;
+
+    if (hasPendingLine) {
+      const shownLineCount =
+        this.activeCue.lineCount -
+        this.pendingLines.length;
+
+      remaining =
+        displayDurationMs *
+          shownLineCount /
+          this.activeCue.lineCount -
+        elapsed;
+    } else {
+      if (this.waitingCues.length === 0) {
+        this.acceleratedUntilDrained =
+          retainAccelerationUntilDrained(
+            this.acceleratedUntilDrained,
+            this.waitingCues.length,
+          );
+        this.cancelCueAdvance();
+        this.scheduleCaptionFade();
+        return;
+      }
+
+      remaining =
+        displayDurationMs - elapsed;
+    }
 
     if (remaining > 0) {
       if (this.cueAdvanceTimerId === null) {
@@ -1249,6 +1343,20 @@ export class CaptionOverlay {
             this.cueAdvanceTimerId = null;
             this.tryAdvanceCue();
           }, Math.ceil(remaining));
+      }
+      return;
+    }
+
+    if (hasPendingLine) {
+      const nextLine =
+        this.pendingLines.shift();
+
+      if (nextLine !== undefined) {
+        this.appendLine(
+          nextLine,
+          this.activeCue.data.originalText,
+        );
+        this.tryAdvanceCue();
       }
       return;
     }
@@ -1266,66 +1374,79 @@ export class CaptionOverlay {
     this.cancelCueAdvance();
     this.cancelCaptionFade();
 
-    const element =
-      this.createCueElement(cue);
+    const [
+      firstLine = "",
+      ...remainingLines
+    ] = cue.formattedPrimary.split("\n");
 
-    this.cueContainer.replaceChildren(
-      element,
+    this.pendingLines.splice(
+      0,
+      this.pendingLines.length,
+      ...remainingLines,
     );
+    this.cueElement.dataset.cueId =
+      cue.cueId;
+    this.cueElement.dataset.primaryText =
+      cue.primaryText;
     this.activeCue = {
       data: cue,
       shownAt: performance.now(),
-      element,
+      element: this.cueElement,
+      lineCount:
+        remainingLines.length + 1,
     };
 
+    this.appendLine(
+      firstLine,
+      cue.originalText,
+    );
     this.captionLine.classList.remove(
       "is-empty",
       "is-fading",
     );
-
     this.updateCaptionVisibility();
-
-    if (this.waitingCues.length > 0) {
-      this.tryAdvanceCue();
-    } else {
-      this.acceleratedUntilDrained =
-        retainAccelerationUntilDrained(
-          this.acceleratedUntilDrained,
-          this.waitingCues.length,
-        );
-      this.scheduleCaptionFade();
-    }
+    this.tryAdvanceCue();
   }
 
-  private createCueElement(
-    cue: CueData,
-  ): HTMLDivElement {
-    const element =
-      document.createElement("div");
-    element.className = "caption-cue";
-    element.dataset.cueId = cue.cueId;
+  private appendLine(
+    text: string,
+    originalText: string,
+  ): void {
+    const nextLines:
+      [string, string] = [
+        this.blockLines[1],
+        text,
+      ];
+    const expectedText =
+      nextLines[0] +
+      nextLines[1] +
+      originalText;
 
-    const primary =
-      document.createElement("div");
-    primary.className =
-      "caption-primary";
-    primary.textContent =
-      cue.formattedPrimary;
-
-    const original =
-      document.createElement("div");
-    original.className =
-      "caption-original";
-    original.textContent =
-      cue.originalText;
-
-    element.append(primary, original);
     this.cueTextSnapshots.set(
-      element,
-      element.textContent ?? "",
+      this.cueElement,
+      expectedText,
     );
+    this.blockLines = nextLines;
+    this.primaryLines[0].textContent =
+      nextLines[0];
+    this.primaryLines[1].textContent =
+      nextLines[1];
+    this.originalLine.textContent =
+      originalText;
+  }
 
-    return element;
+  private resetDisplayBlock(): void {
+    this.cueTextSnapshots.set(
+      this.cueElement,
+      "",
+    );
+    this.blockLines = ["", ""];
+    this.primaryLines[0].textContent = "";
+    this.primaryLines[1].textContent = "";
+    this.originalLine.textContent = "";
+    delete this.cueElement.dataset.cueId;
+    delete this.cueElement.dataset
+      .primaryText;
   }
 
   private inspectCueMutations(
@@ -1420,7 +1541,8 @@ export class CaptionOverlay {
 
   private updateCaptionVisibility(): void {
     const visible =
-      this.activeCue !== null ||
+      this.blockLines[0] !== "" ||
+      this.blockLines[1] !== "" ||
       this.tentativeLine.textContent !== "";
 
     this.captionLine.classList.toggle(
@@ -2085,6 +2207,13 @@ export class CaptionOverlay {
       `${verticalPadding}px`,
     );
     this.captionStack.style.setProperty(
+      "--primary-line-slot",
+      `${
+        fontSize *
+        PRIMARY_LINE_HEIGHT
+      }px`,
+    );
+    this.captionStack.style.setProperty(
       "--primary-slot",
       `${
         fontSize *
@@ -2190,6 +2319,7 @@ export class CaptionOverlay {
         this.tentativeLine.textContent === ""
       ) ||
       this.waitingCues.length > 0 ||
+      this.pendingLines.length > 0 ||
       this.captionFadeTimerId !== null ||
       this.captionRemovalTimerId !== null ||
       this.suspendedCaptionFade !== null ||
@@ -2233,7 +2363,8 @@ export class CaptionOverlay {
         if (
           this.captionRevision !==
             expiringRevision ||
-          this.waitingCues.length > 0
+          this.waitingCues.length > 0 ||
+          this.pendingLines.length > 0
         ) {
           return;
         }
@@ -2281,14 +2412,15 @@ export class CaptionOverlay {
         if (
           this.captionRevision !==
             expiringRevision ||
-          this.waitingCues.length > 0
+          this.waitingCues.length > 0 ||
+          this.pendingLines.length > 0
         ) {
           return;
         }
 
         this.activeCue = null;
         this.clearTentative();
-        this.cueContainer.replaceChildren();
+        this.resetDisplayBlock();
         this.resetCaptionFadeVisualState();
         this.captionLine.classList.add(
           "is-empty",
@@ -2580,6 +2712,7 @@ function getOverlayStyles(): string {
     .caption-stack {
       --bar-padding-x: 12px;
       --bar-padding-y: 6px;
+      --primary-line-slot: 24px;
       --primary-slot: 48px;
       --original-slot: 0px;
       --tentative-slot: 0px;
@@ -2667,12 +2800,12 @@ function getOverlayStyles(): string {
 
     .caption-primary {
       display: block;
-      flex: 0 0 var(--primary-slot);
+      flex: 0 0 var(--primary-line-slot);
       width: 100%;
       min-width: 0;
-      height: var(--primary-slot);
-      min-height: var(--primary-slot);
-      max-height: var(--primary-slot);
+      height: var(--primary-line-slot);
+      min-height: var(--primary-line-slot);
+      max-height: var(--primary-line-slot);
       margin: 0;
       padding: 0;
       overflow: hidden;
@@ -2704,6 +2837,10 @@ function getOverlayStyles(): string {
       text-shadow:
         0 1px 2px rgba(0, 0, 0, 0.9);
       white-space: nowrap;
+    }
+
+    .caption-ledger {
+      display: none;
     }
 
     .caption-tentative {

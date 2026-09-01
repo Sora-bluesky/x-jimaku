@@ -9,6 +9,10 @@ import {
   vi,
 } from "vitest";
 import {
+  CAPTION_FADE_MS,
+  CAPTION_VISIBLE_MS,
+} from "../shared/explicit-stop-drain";
+import {
   INITIALIZATION_PROGRESS_CEILING,
 } from "../shared/initialization-progress";
 import {
@@ -31,12 +35,20 @@ let activeOverlay:
   | CaptionOverlay
   | null = null;
 
-function createOverlay(): CaptionOverlay {
+function createOverlay(
+  options: {
+    showOriginal?: boolean;
+    onCaptionFadeOut?: () => void;
+  } = {},
+): CaptionOverlay {
   const overlay = new CaptionOverlay({
     getTargetVideo: () => null,
-    showOriginal: false,
-    onCaptionFadeOut: () => {
-    },
+    showOriginal:
+      options.showOriginal ?? false,
+    onCaptionFadeOut:
+      options.onCaptionFadeOut ??
+      (() => {
+      }),
   });
 
   activeOverlay = overlay;
@@ -62,8 +74,11 @@ function requireElement<T extends Element>(
 }
 
 function getOverlayDom(): {
+  host: HTMLDivElement;
   captionStack: HTMLDivElement;
   cueContainer: HTMLDivElement;
+  captionLedger: HTMLDivElement;
+  tentativeLine: HTMLDivElement;
   targetChip: HTMLDivElement;
 } {
   const host =
@@ -83,6 +98,7 @@ function getOverlayDom(): {
   }
 
   return {
+    host,
     captionStack:
       requireElement<HTMLDivElement>(
         shadow,
@@ -93,12 +109,60 @@ function getOverlayDom(): {
         shadow,
         ".cue-container",
       ),
+    captionLedger:
+      requireElement<HTMLDivElement>(
+        shadow,
+        ".caption-ledger",
+      ),
+    tentativeLine:
+      requireElement<HTMLDivElement>(
+        shadow,
+        ".caption-tentative",
+      ),
     targetChip:
       requireElement<HTMLDivElement>(
         shadow,
         ".target-chip",
       ),
   };
+}
+
+function getBlockLines():
+  [string, string] {
+  const { cueContainer } =
+    getOverlayDom();
+  const lines = cueContainer
+    .querySelectorAll<HTMLDivElement>(
+      ".caption-primary",
+    );
+
+  expect(lines).toHaveLength(2);
+
+  return [
+    lines[0]?.textContent ?? "",
+    lines[1]?.textContent ?? "",
+  ];
+}
+
+function showFinal(
+  overlay: CaptionOverlay,
+  id: number,
+  ja: string,
+  text: string = `source-${id}`,
+): void {
+  overlay.showCaption({
+    id,
+    text,
+    ja,
+    final: true,
+    at: "2026-09-01T00:00:00.000Z",
+  });
+}
+
+async function flushCueMutations():
+  Promise<void> {
+  await Promise.resolve();
+  await Promise.resolve();
 }
 
 beforeEach(() => {
@@ -181,10 +245,13 @@ describe(
           captionStack.textContent,
         ).not.toContain("Raw caption");
         expect(
-          cueContainer.querySelector(
+          cueContainer.querySelectorAll(
             ".caption-cue",
           ),
-        ).toBeNull();
+        ).toHaveLength(1);
+        expect(getBlockLines()).toEqual(
+          ["", ""],
+        );
 
         overlay.showCaption({
           id: 1,
@@ -324,7 +391,9 @@ describe(
         ).toHaveLength(1);
         expect(
           cueContainer.textContent,
-        ).toBe("次の字幕");
+        ).toBe(
+          "最初の字幕次の字幕",
+        );
         expect(
           requireElement<HTMLDivElement>(
             cueContainer,
@@ -338,12 +407,436 @@ describe(
 
         expect(
           cueContainer.textContent,
-        ).toBe("次の字幕");
+        ).toBe(
+          "最初の字幕次の字幕",
+        );
         expect(
           cueContainer.querySelectorAll(
             ".caption-cue",
           ),
         ).toHaveLength(1);
+      },
+    );
+  },
+);
+
+describe(
+  "CaptionOverlay append display buffer",
+  () => {
+    it(
+      "keeps the previous bottom line when new clauses arrive",
+      () => {
+        const overlay = createOverlay();
+
+        showFinal(overlay, 1, "A");
+        expect(getBlockLines()).toEqual(
+          ["", "A"],
+        );
+
+        showFinal(overlay, 2, "B");
+        vi.advanceTimersByTime(
+          CUE_MINIMUM_DISPLAY_MS,
+        );
+        expect(getBlockLines()).toEqual(
+          ["A", "B"],
+        );
+
+        showFinal(overlay, 3, "C");
+        vi.advanceTimersByTime(
+          CUE_MINIMUM_DISPLAY_MS,
+        );
+        expect(getBlockLines()).toEqual(
+          ["B", "C"],
+        );
+      },
+    );
+
+    it(
+      "scrolls every line of a long clause within the existing cue dwell budget",
+      () => {
+        const overlay = createOverlay();
+        const snapshots:
+          Array<[string, string]> = [];
+
+        showFinal(
+          overlay,
+          1,
+          "あ".repeat(50),
+        );
+        snapshots.push(getBlockLines());
+
+        vi.advanceTimersByTime(
+          CUE_MINIMUM_DISPLAY_MS / 2,
+        );
+        snapshots.push(getBlockLines());
+
+        vi.advanceTimersByTime(
+          CUE_MINIMUM_DISPLAY_MS / 2,
+        );
+        snapshots.push(getBlockLines());
+
+        vi.advanceTimersByTime(
+          CUE_MINIMUM_DISPLAY_MS / 2,
+        );
+        snapshots.push(getBlockLines());
+
+        vi.advanceTimersByTime(
+          CUE_MINIMUM_DISPLAY_MS / 2 - 1,
+        );
+        showFinal(overlay, 2, "次");
+        vi.advanceTimersByTime(1);
+        snapshots.push(getBlockLines());
+
+        for (
+          let index = 1;
+          index < snapshots.length;
+          index += 1
+        ) {
+          expect(
+            snapshots[index]?.[0],
+          ).toBe(
+            snapshots[index - 1]?.[1],
+          );
+        }
+
+        expect(
+          snapshots.every(
+            ([top, bottom]) =>
+              top !== "" || bottom !== "",
+          ),
+        ).toBe(true);
+        expect(
+          getOverlayDom()
+            .cueContainer
+            .querySelector<HTMLElement>(
+              ".caption-cue",
+            )
+            ?.dataset.cueId,
+        ).toBe("2:0");
+      },
+    );
+
+    it(
+      "holds the last block through silence and clears it after fade",
+      () => {
+        const onCaptionFadeOut = vi.fn();
+        const overlay = createOverlay({
+          onCaptionFadeOut,
+        });
+
+        showFinal(overlay, 1, "A");
+        vi.advanceTimersByTime(
+          CAPTION_VISIBLE_MS - 1,
+        );
+
+        expect(getBlockLines()).toEqual(
+          ["", "A"],
+        );
+        expect(
+          getOverlayDom()
+            .captionStack
+            .querySelector(
+              ".caption-line",
+            )
+            ?.classList.contains(
+              "is-fading",
+            ),
+        ).toBe(false);
+
+        vi.advanceTimersByTime(1);
+        expect(
+          getOverlayDom()
+            .captionStack
+            .querySelector(
+              ".caption-line",
+            )
+            ?.classList.contains(
+              "is-fading",
+            ),
+        ).toBe(true);
+
+        vi.advanceTimersByTime(
+          CAPTION_FADE_MS,
+        );
+        expect(getBlockLines()).toEqual(
+          ["", ""],
+        );
+        expect(onCaptionFadeOut)
+          .toHaveBeenCalledOnce();
+      },
+    );
+
+    it(
+      "shows a line pending at stop before drain completion",
+      () => {
+        const onCaptionFadeOut = vi.fn();
+        const overlay = createOverlay({
+          onCaptionFadeOut,
+        });
+
+        showFinal(
+          overlay,
+          1,
+          "あ".repeat(20),
+        );
+        const first = getBlockLines();
+
+        expect(first[0]).toBe("");
+        expect(first[1]).not.toBe("");
+        expect(
+          overlay.hasPendingCaption(),
+        ).toBe(true);
+
+        vi.advanceTimersByTime(
+          CUE_MINIMUM_DISPLAY_MS / 2,
+        );
+
+        expect(getBlockLines()[0]).toBe(
+          first[1],
+        );
+        expect(onCaptionFadeOut)
+          .not.toHaveBeenCalled();
+
+        vi.advanceTimersByTime(
+          CAPTION_VISIBLE_MS +
+          CAPTION_FADE_MS,
+        );
+
+        expect(onCaptionFadeOut)
+          .toHaveBeenCalledOnce();
+        expect(
+          overlay.hasPendingCaption(),
+        ).toBe(false);
+      },
+    );
+
+    it(
+      "clears displayed, pending, and ledger state for a new capture",
+      () => {
+        const overlay = createOverlay();
+
+        showFinal(
+          overlay,
+          1,
+          "あ".repeat(20),
+        );
+        expect(
+          getOverlayDom()
+            .captionLedger
+            .children.length,
+        ).toBe(1);
+
+        overlay.clear();
+        vi.advanceTimersByTime(
+          CUE_MINIMUM_DISPLAY_MS,
+        );
+
+        expect(getBlockLines()).toEqual(
+          ["", ""],
+        );
+        expect(
+          getOverlayDom()
+            .captionLedger
+            .children.length,
+        ).toBe(0);
+        expect(
+          overlay.hasPendingCaption(),
+        ).toBe(false);
+      },
+    );
+
+    it(
+      "keeps tentative text outside the committed block",
+      () => {
+        const overlay = createOverlay();
+
+        overlay.showCaption({
+          id: 1,
+          text: "draft",
+          final: false,
+          at: "2026-09-01T00:00:00.000Z",
+        });
+
+        expect(getBlockLines()).toEqual(
+          ["", ""],
+        );
+        expect(
+          getOverlayDom()
+            .tentativeLine.textContent,
+        ).toBe("draft");
+
+        showFinal(overlay, 1, "確定");
+
+        expect(getBlockLines()).toEqual(
+          ["", "確定"],
+        );
+        expect(
+          getOverlayDom()
+            .tentativeLine.textContent,
+        ).toBe("");
+      },
+    );
+
+    it(
+      "updates one original line and starts empty after reconstruction",
+      () => {
+        const overlay = createOverlay({
+          showOriginal: true,
+        });
+
+        showFinal(
+          overlay,
+          1,
+          "A",
+          "Original one",
+        );
+        showFinal(
+          overlay,
+          2,
+          "B",
+          "Original two",
+        );
+        vi.advanceTimersByTime(
+          CUE_MINIMUM_DISPLAY_MS,
+        );
+
+        const { cueContainer } =
+          getOverlayDom();
+        expect(
+          cueContainer.querySelectorAll(
+            ".caption-original",
+          ),
+        ).toHaveLength(1);
+        expect(
+          requireElement<HTMLDivElement>(
+            cueContainer,
+            ".caption-original",
+          ).textContent,
+        ).toBe("Original two");
+
+        overlay.destroy();
+        createOverlay({
+          showOriginal: false,
+        });
+
+        expect(getBlockLines()).toEqual(
+          ["", ""],
+        );
+      },
+    );
+
+    it(
+      "keeps queue drops while scrolling the retained cues",
+      () => {
+        const overlay = createOverlay();
+        const symbols = [
+          "一", "二", "三", "四",
+          "五", "六", "七", "八",
+        ];
+
+        symbols.forEach(
+          (symbol, index) => {
+            showFinal(
+              overlay,
+              index + 1,
+              symbol.repeat(14),
+            );
+          },
+        );
+
+        expect(
+          getOverlayDom()
+            .host.dataset.cueDrops,
+        ).toBe("1");
+
+        vi.advanceTimersByTime(1_000);
+
+        expect(
+          getOverlayDom()
+            .cueContainer
+            .querySelector<HTMLElement>(
+              ".caption-cue",
+            )
+            ?.dataset.cueId,
+        ).toBe("3:0");
+      },
+    );
+
+    it(
+      "freezes a pending line while playback is paused",
+      () => {
+        const overlay = createOverlay();
+
+        showFinal(
+          overlay,
+          1,
+          "あ".repeat(20),
+        );
+        const first = getBlockLines();
+
+        vi.advanceTimersByTime(500);
+        overlay.setPlaybackPaused(true);
+        vi.advanceTimersByTime(1_000);
+
+        expect(getBlockLines()).toEqual(
+          first,
+        );
+
+        overlay.setPlaybackPaused(false);
+        vi.advanceTimersByTime(249);
+        expect(getBlockLines()).toEqual(
+          first,
+        );
+
+        vi.advanceTimersByTime(1);
+        expect(getBlockLines()[0]).toBe(
+          first[1],
+        );
+      },
+    );
+
+    it(
+      "allows intended appends but reports a direct text rewrite",
+      async () => {
+        const overlay = createOverlay({
+          showOriginal: true,
+        });
+
+        showFinal(
+          overlay,
+          1,
+          "あ".repeat(20),
+          "Original",
+        );
+        await flushCueMutations();
+
+        const {
+          host,
+          cueContainer,
+        } = getOverlayDom();
+
+        expect(
+          host.dataset.cueMutations,
+        ).toBe("0");
+
+        vi.advanceTimersByTime(
+          CUE_MINIMUM_DISPLAY_MS / 2,
+        );
+        await flushCueMutations();
+
+        expect(
+          host.dataset.cueMutations,
+        ).toBe("0");
+
+        requireElement<HTMLDivElement>(
+          cueContainer,
+          ".caption-original",
+        ).textContent = "Rewritten";
+        await flushCueMutations();
+
+        expect(
+          host.dataset.cueMutations,
+        ).toBe("1");
       },
     );
   },

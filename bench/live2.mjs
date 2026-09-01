@@ -298,15 +298,15 @@ try {
 
   const overlayState = () =>
     page.evaluate(() => {
-      const texts = [];
+      const blocks = [];
       for (const host of document.querySelectorAll("*")) {
         if (!host.shadowRoot) continue;
-        for (const el of host.shadowRoot.querySelectorAll(".caption-primary")) {
-          const text = el.textContent.trim();
-          if (text) texts.push(text);
-        }
+        const lines = [
+          ...host.shadowRoot.querySelectorAll(".caption-primary"),
+        ].map((el) => el.textContent.trim());
+        if (lines.length === 2) blocks.push(lines);
       }
-      return texts.join("␟");
+      return blocks.map((lines) => lines.join("␟")).join("␞");
     });
 
   let quietSince = Date.now();
@@ -331,35 +331,80 @@ try {
     await video.play();
   });
 
-  // Whatever the drain left on screen predates the window.
-  const seedState = lastSeen;
+  await page.evaluate(() => {
+    window.__blocks = [];
+    window.__sampledCaps = [];
+    window.__ledger = [];
+    window.__ledgerSeen = new WeakSet();
+    window.__lastSampledCueId = "";
 
+    for (const host of document.querySelectorAll("*")) {
+      const root = host.shadowRoot;
+      if (!root) continue;
 
+      for (const entry of root.querySelectorAll(".caption-ledger > *")) {
+        window.__ledgerSeen.add(entry);
+      }
 
-  await page.evaluate((initialState) => {
-    window.__caps = [];
-    window.__lastState = initialState;
-    // A cue occupies two .caption-primary elements, so comparing each element
-    // against the previously pushed one lets the pair alternate and records the
-    // same cue on every tick. Compare the whole overlay state instead, and push
-    // only when it actually changes; a cue that recurs on a later loop pass is a
-    // genuine new state and is still recorded.
+      const cue = root.querySelector(".caption-cue");
+      if (cue?.dataset.cueId) {
+        window.__lastSampledCueId = cue.dataset.cueId;
+      }
+    }
+
+    // The append model keeps one persistent cue with two ordered line elements.
+    // Sample the pair on every tick for the scroll and blank-gap gates.
     window.__capTimer = setInterval(() => {
-      const texts = [];
+      let block = ["", ""];
+      let cueId = "";
+      let primaryText = "";
+
       for (const host of document.querySelectorAll("*")) {
-        if (!host.shadowRoot) continue;
-        for (const el of host.shadowRoot.querySelectorAll(".caption-primary")) {
-          const text = el.textContent.trim();
-          if (text) texts.push(text);
+        const root = host.shadowRoot;
+        if (!root) continue;
+        const cue = root.querySelector(".caption-cue");
+        if (!cue) continue;
+
+        const lines = [
+          ...cue.querySelectorAll(":scope > .caption-primary"),
+        ].map((el) => el.textContent.trim());
+        if (lines.length !== 2) continue;
+
+        block = lines;
+        cueId = cue.dataset.cueId ?? "";
+        primaryText = cue.dataset.primaryText ?? "";
+        break;
+      }
+
+      window.__blocks.push(block);
+
+      // Mirror the ledger as it grows. Reading it once at the end loses
+      // everything, because stopping the capture destroys the overlay and the
+      // ledger element with it.
+      for (const host of document.querySelectorAll("*")) {
+        const root = host.shadowRoot;
+        if (!root) continue;
+        for (const entry of root.querySelectorAll(".caption-ledger > *")) {
+          if (window.__ledgerSeen.has(entry)) continue;
+          window.__ledgerSeen.add(entry);
+          const text = entry.textContent.trim();
+          if (text) window.__ledger.push(text);
         }
       }
-      if (texts.length === 0) return;
-      const state = texts.join("␟");
-      if (state === window.__lastState) return;
-      window.__lastState = state;
-      window.__caps.push(...texts);
+
+      // This cue-level value preserves the former sampled collector for one
+      // release while recognition.jaClauses moves to the deterministic ledger.
+      if (
+        cueId !== ""
+        && cueId !== window.__lastSampledCueId
+      ) {
+        window.__lastSampledCueId = cueId;
+        if (primaryText !== "") {
+          window.__sampledCaps.push(primaryText);
+        }
+      }
     }, 300);
-  }, seedState);
+  });
 
   const started = Date.now();
   const deadline = started + captureMs;
@@ -369,9 +414,9 @@ try {
     await new Promise((r) =>
       setTimeout(r, Math.min(10000, deadline - Date.now())),
     );
-    const count = await page.evaluate(() => window.__caps.length);
+    const count = await page.evaluate(() => window.__blocks.length);
     console.error(
-      `[live2] t+${Math.round((Date.now() - started) / 1000)}s lines=${count}`,
+      `[live2] t+${Math.round((Date.now() - started) / 1000)}s samples=${count}`,
     );
   }
 
@@ -390,9 +435,27 @@ try {
 
   const captured = await page.evaluate(() => {
     clearInterval(window.__capTimer);
-    return window.__caps.map((t) => t.replace(/\n/g, ""));
+
+    return {
+      ledgerClauses: window.__ledger,
+      sampledClauses: window.__sampledCaps,
+      blocks: window.__blocks,
+    };
   });
-  result.recognition = { jaClauses: captured };
+  result.recognition = {
+    jaClauses: captured.ledgerClauses,
+    sampledJaClauses: captured.sampledClauses,
+  };
+  result.display = {
+    blocks: captured.blocks,
+  };
+  result.collectionComparison = {
+    ledgerClauses: captured.ledgerClauses.length,
+    sampledClauses: captured.sampledClauses.length,
+    exactMatch:
+      JSON.stringify(captured.ledgerClauses)
+      === JSON.stringify(captured.sampledClauses),
+  };
 } catch (error) {
   result.error = String(error);
   console.error(`[live2] ${result.error}`);
@@ -413,12 +476,58 @@ if (!result.error && lines.length === 0) {
 }
 const joined = lines.join("\n");
 const japanese = /[\u3040-\u30ff\u4e00-\u9fff]/u;
+const blocks = result.display?.blocks ?? [];
+let blockScrollViolations = 0;
+let blockResets = 0;
+let blockBlankGaps = 0;
+let firstNonEmpty = -1;
+let lastNonEmpty = -1;
+
+for (let index = 0; index < blocks.length; index += 1) {
+  const block = blocks[index];
+  const previous = blocks[index - 1];
+  const nonEmpty = block[0] !== "" || block[1] !== "";
+
+  if (nonEmpty) {
+    if (firstNonEmpty === -1) firstNonEmpty = index;
+    lastNonEmpty = index;
+  }
+
+  // The block legitimately empties after the caption fade and at stop, and the
+  // next line then starts with an empty top slot. That is a reset, not a broken
+  // scroll, so count it separately and only flag a non-empty top that fails to
+  // carry the previous bottom line.
+  if (
+    previous
+    && (previous[0] !== block[0] || previous[1] !== block[1])
+    && previous[1] !== ""
+  ) {
+    if (block[0] === "") {
+      blockResets += 1;
+    } else if (block[0] !== previous[1]) {
+      blockScrollViolations += 1;
+    }
+  }
+}
+
+if (firstNonEmpty !== -1) {
+  for (let index = firstNonEmpty; index <= lastNonEmpty; index += 1) {
+    const block = blocks[index];
+    if (block[0] === "" && block[1] === "") {
+      blockBlankGaps += 1;
+    }
+  }
+}
+
 result.gates = {
   lines: lines.length,
   englishPassthrough: lines.filter((l) => !japanese.test(l)).length,
   wrongSenseRoma: (joined.match(/ローマ(?!ン)/gu) ?? []).length,
   unresolvedPlaceholders: (joined.match(/%%/gu) ?? []).length,
   romanKept: (joined.match(/(?<![A-Za-z])Roman(?![A-Za-z])/gu) ?? []).length,
+  blockScrollViolations,
+  blockResets,
+  blockBlankGaps,
 };
 
 const stamp = new Date()
