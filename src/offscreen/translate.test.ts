@@ -54,7 +54,8 @@ function createDeferred<T>(): Deferred<T> {
 function createGateEngine(
   backend:
     | "translator"
-    | "prompt-api" = "translator",
+    | "prompt-api"
+    | "auto" = "translator",
 ) {
   const onSettled = vi.fn();
   const onTranslated = vi.fn();
@@ -451,6 +452,197 @@ describe("normalizeLanguageModelResponse", () => {
       ),
     ).toBe("こんにちは");
   });
+});
+
+describe("TranslationEngine initialization", () => {
+  it(
+    "prepares an available path without creating a downloadable Translator",
+    async () => {
+      const translatorAvailability =
+        vi.fn(
+          async () => "downloadable",
+        );
+      const translatorCreate =
+        vi.fn(async () => ({
+          translate: vi.fn(
+            async () => "unused",
+          ),
+          destroy: vi.fn(),
+        }));
+      const languageModelCreate =
+        vi.fn(async () => ({
+          clone: vi.fn(),
+          destroy: vi.fn(),
+        }));
+
+      vi.stubGlobal("Translator", {
+        availability:
+          translatorAvailability,
+        create: translatorCreate,
+      });
+      vi.stubGlobal("LanguageModel", {
+        availability: vi.fn(
+          async () => "available",
+        ),
+        create: languageModelCreate,
+      });
+
+      const gate =
+        createGateEngine("auto");
+
+      await gate.engine.initialize();
+
+      expect(translatorAvailability)
+        .toHaveBeenCalledOnce();
+      expect(translatorCreate)
+        .not.toHaveBeenCalled();
+      expect(languageModelCreate)
+        .toHaveBeenCalledOnce();
+      expect(gate.engine.getPath())
+        .toBe("language-model");
+      expect(gate.onPathChanged)
+        .toHaveBeenCalledWith(
+          "language-model",
+        );
+
+      gate.engine.destroy();
+    },
+  );
+
+  it(
+    "shares in-flight preparation with initialize callers and a clause",
+    async () => {
+      vi.useFakeTimers();
+      const availability =
+        createDeferred<"downloadable">();
+      const availabilityCheck =
+        vi.fn(
+          () => availability.promise,
+        );
+      const create = vi.fn();
+
+      vi.stubGlobal("Translator", {
+        availability: availabilityCheck,
+        create,
+      });
+
+      const gate = createGateEngine();
+      const initialization =
+        gate.engine.initialize();
+
+      expect(gate.engine.initialize())
+        .toBe(initialization);
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(availabilityCheck)
+        .toHaveBeenCalledOnce();
+
+      gate.engine.enqueue({
+        id: 1,
+        text: "wait for preparation",
+        final: true,
+        at: "2026-09-02T00:00:01.000Z",
+      });
+
+      await vi.advanceTimersByTimeAsync(
+        TRANSLATION_DEADLINE_MS,
+      );
+
+      expect(availabilityCheck)
+        .toHaveBeenCalledOnce();
+      expect(create).not.toHaveBeenCalled();
+      expect(gate.onSettled)
+        .toHaveBeenCalledWith([1]);
+
+      gate.engine.destroy();
+      availability.resolve("downloadable");
+      await initialization;
+    },
+  );
+
+  it(
+    "destroys a Translator created after initialization is cancelled",
+    async () => {
+      const translator = {
+        translate: vi.fn(
+          async () => "unused",
+        ),
+        destroy: vi.fn(),
+      };
+      const created =
+        createDeferred<typeof translator>();
+      const create =
+        vi.fn(() => created.promise);
+
+      vi.stubGlobal("Translator", {
+        availability: vi.fn(
+          async () => "available",
+        ),
+        create,
+      });
+
+      const gate = createGateEngine();
+      const initialization =
+        gate.engine.initialize();
+
+      await vi.waitFor(() => {
+        expect(create)
+          .toHaveBeenCalledOnce();
+      });
+
+      gate.engine.destroy();
+      created.resolve(translator);
+      await initialization;
+
+      expect(translator.destroy)
+        .toHaveBeenCalledOnce();
+      expect(gate.engine.getPath())
+        .toBeNull();
+      expect(gate.onPathChanged)
+        .not.toHaveBeenCalled();
+    },
+  );
+
+  it(
+    "does not block recognizer startup on preparation",
+    async () => {
+      const availability =
+        createDeferred<"downloadable">();
+      const availabilityCheck =
+        vi.fn(
+          () => availability.promise,
+        );
+      const order: string[] = [];
+
+      vi.stubGlobal("Translator", {
+        availability: availabilityCheck,
+        create: vi.fn(),
+      });
+
+      const gate = createGateEngine();
+      const initialization =
+        gate.engine
+          .initialize()
+          .then(() => {
+            order.push("translation");
+          });
+      const recognizerStarted =
+        Promise.resolve().then(() => {
+          order.push("recognizer");
+        });
+
+      await recognizerStarted;
+
+      expect(availabilityCheck)
+        .toHaveBeenCalledOnce();
+      expect(order)
+        .toEqual(["recognizer"]);
+
+      gate.engine.destroy();
+      availability.resolve("downloadable");
+      await initialization;
+    },
+  );
 });
 
 describe(

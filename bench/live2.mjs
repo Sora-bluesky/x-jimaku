@@ -747,12 +747,23 @@ const firstFinalSample =
       sample.stackDisplayed
       && sample.hasPrimaryText,
   );
+const firstJapaneseSample =
+  samples.find(
+    (sample) =>
+      sample.stackDisplayed
+      && (
+        japanese.test(sample.line0)
+        || japanese.test(sample.line1)
+      ),
+  );
 const firstCaptionMs =
   sampleDelayMs(firstCaptionSample);
 const firstTentativeMs =
   sampleDelayMs(firstTentativeSample);
 const firstFinalMs =
   sampleDelayMs(firstFinalSample);
+const firstJapaneseMs =
+  sampleDelayMs(firstJapaneseSample);
 const tentativeToFinalMs =
   firstTentativeMs !== null
   && firstFinalMs !== null
@@ -849,6 +860,7 @@ result.gates = {
   firstCaptionMs,
   firstTentativeMs,
   firstFinalMs,
+  firstJapaneseMs,
   tentativeToFinalMs,
   finalIntervalMsP50,
   finalIntervalMsP90,

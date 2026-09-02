@@ -60,6 +60,7 @@ interface QueuedTranslation
 }
 
 interface TranslationAttempt {
+  kind: "clause";
   generation: number;
   line: QueuedTranslation;
   timeoutId:
@@ -67,6 +68,31 @@ interface TranslationAttempt {
     | null;
   stale: boolean;
 }
+
+interface TranslationPreparationAttempt {
+  kind: "preparation";
+}
+
+type PathSelectionAttempt =
+  | TranslationAttempt
+  | TranslationPreparationAttempt;
+
+type TranslationInitialization =
+  | {
+      status: "idle";
+    }
+  | {
+      status: "preparing";
+      attempt: TranslationPreparationAttempt;
+      promise: Promise<void>;
+    }
+  | {
+      status: "settled";
+      promise: Promise<void>;
+    }
+  | {
+      status: "cancelled";
+    };
 
 type TranslationDevLogEvent =
   Omit<
@@ -174,6 +200,10 @@ export class TranslationEngine {
   private activeAttempt:
     | TranslationAttempt
     | null = null;
+  private initialization:
+    TranslationInitialization = {
+      status: "idle",
+    };
 
   constructor(
     options: TranslationEngineOptions,
@@ -182,7 +212,65 @@ export class TranslationEngine {
   }
 
   initialize(): Promise<void> {
-    return Promise.resolve();
+    const initialization =
+      this.initialization;
+
+    if (
+      initialization.status ===
+        "preparing" ||
+      initialization.status === "settled"
+    ) {
+      return initialization.promise;
+    }
+
+    if (
+      this.destroyed ||
+      initialization.status === "cancelled"
+    ) {
+      return Promise.resolve();
+    }
+
+    if (this.path !== null) {
+      const promise = Promise.resolve();
+
+      this.initialization = {
+        status: "settled",
+        promise,
+      };
+      return promise;
+    }
+
+    const attempt:
+      TranslationPreparationAttempt = {
+        kind: "preparation",
+      };
+    const promise: Promise<void> =
+      Promise.resolve()
+        .then(() =>
+          this.selectBestPath(attempt)
+        )
+        .finally(() => {
+          const current =
+            this.initialization;
+
+          if (
+            current.status ===
+              "preparing" &&
+            current.attempt === attempt
+          ) {
+            this.initialization = {
+              status: "settled",
+              promise: current.promise,
+            };
+          }
+        });
+
+    this.initialization = {
+      status: "preparing",
+      attempt,
+      promise,
+    };
+    return promise;
   }
 
   enqueue(
@@ -295,6 +383,9 @@ export class TranslationEngine {
     }
 
     this.destroyed = true;
+    this.initialization = {
+      status: "cancelled",
+    };
     this.activeAttempt = null;
     this.processing = false;
     this.queue.splice(0, this.queue.length);
@@ -334,6 +425,7 @@ export class TranslationEngine {
     }
 
     const attempt: TranslationAttempt = {
+      kind: "clause",
       generation: ++this.generation,
       line,
       timeoutId: null,
@@ -362,11 +454,27 @@ export class TranslationEngine {
     const { line } = attempt;
 
     try {
-      if (
-        line.skipTranslation !== true &&
-        this.path === null
-      ) {
-        await this.selectBestPath(attempt);
+      if (line.skipTranslation !== true) {
+        const initialization =
+          this.initialization;
+
+        if (
+          this.path === null &&
+          initialization.status ===
+            "preparing"
+        ) {
+          await initialization.promise.catch(
+            () => undefined,
+          );
+        }
+
+        if (!this.isAttemptCurrent(attempt)) {
+          return;
+        }
+
+        if (this.path === null) {
+          await this.selectBestPath(attempt);
+        }
       }
 
       if (!this.isAttemptCurrent(attempt)) {
@@ -449,8 +557,20 @@ export class TranslationEngine {
   }
 
   private isAttemptCurrent(
-    attempt: TranslationAttempt,
+    attempt: PathSelectionAttempt,
   ): boolean {
+    if (attempt.kind === "preparation") {
+      const initialization =
+        this.initialization;
+
+      return (
+        !this.destroyed &&
+        initialization.status ===
+          "preparing" &&
+        initialization.attempt === attempt
+      );
+    }
+
     return (
       !this.destroyed &&
       !attempt.stale &&
@@ -1179,7 +1299,7 @@ export class TranslationEngine {
   }
 
   private async selectBestPath(
-    attempt: TranslationAttempt,
+    attempt: PathSelectionAttempt,
   ): Promise<void> {
     if (!this.isAttemptCurrent(attempt)) {
       return;
@@ -1284,7 +1404,7 @@ export class TranslationEngine {
   }
 
   private async prepareOffscreenTranslator(
-    attempt: TranslationAttempt,
+    attempt: PathSelectionAttempt,
   ): Promise<boolean> {
     if (!this.isAttemptCurrent(attempt)) {
       return false;
@@ -1387,7 +1507,7 @@ export class TranslationEngine {
   }
 
   private async prepareContentTranslator(
-    attempt: TranslationAttempt,
+    attempt: PathSelectionAttempt,
   ): Promise<boolean> {
     if (!this.isAttemptCurrent(attempt)) {
       return false;
@@ -1421,7 +1541,7 @@ export class TranslationEngine {
   }
 
   private async prepareLanguageModel(
-    attempt: TranslationAttempt,
+    attempt: PathSelectionAttempt,
   ): Promise<boolean> {
     if (!this.isAttemptCurrent(attempt)) {
       return false;
@@ -1533,7 +1653,7 @@ export class TranslationEngine {
 
   private setPath(
     path: TranslationPath,
-    attempt: TranslationAttempt,
+    attempt: PathSelectionAttempt,
   ): void {
     if (
       !this.isAttemptCurrent(attempt) ||
