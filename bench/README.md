@@ -42,6 +42,18 @@ fixture サーバ起動・Chrome 起動・拡張インストール・設定投�
 result JSON 保存・機械ゲート出力までを 1 コマンドで行う。
 `--case tts|tts2` / `--model` / `--backend` / `--chrome` / `--profile` / `--extension` で切替。
 
+A-6-5 は次の値で表示を判定する。
+
+| 名前 | 合格条件 |
+|---|---|
+| `pageLineReuse` | `0`。連続するページが同じ非空行を共有しない。 |
+| `nonEmptyPageTransitions` | `1` 以上。`0` は `insufficient` として終了コード `1` にする。 |
+| `twoPageCuesObserved` | 同じ cue でページ `0` と `1` を観測した件数。合否には使わない。 |
+| `slotCountViolations` | `0`。`.caption-primary` は常に2個。 |
+| `cueIdMissing` | `0`。採取した表示サンプルに `cueId` がある。 |
+| `pageIdMissing` | `0`。採取した表示サンプルに `pageId` がある。 |
+| `stopDrainTimedOut` | `false`。明示停止から45秒後もチップが `RUNNING` なら `true` とし、終了コード `1` にする。 |
+
 成立条件（いずれか欠けると無音で失敗するので消さないこと）:
 
 - **モデル入りプロファイル**が要る。既定は `%TEMP%` 配下の `x-jimaku-builtin-ai-nano`

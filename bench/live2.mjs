@@ -14,7 +14,7 @@
 // still accept it), so on Canary the flag is silently ignored and loadUnpacked is
 // the only way in.
 import puppeteer from "puppeteer-core";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { startBenchServer } from "./serve.mjs";
@@ -27,7 +27,7 @@ const root = path.resolve(here, "..");
 const READY_TIMEOUT_MS = 120000;
 const DRAIN_TIMEOUT_MS = 30000;
 const DRAIN_QUIET_MS = 6000;
-const STOP_DRAIN_TIMEOUT_MS = 30000;
+const STOP_DRAIN_TIMEOUT_MS = 45000;
 // Same sets run-bench.mjs validates against. An unvalidated typo is silently
 // rejected by the extension, which keeps its previous setting while the result
 // JSON claims the one that was asked for.
@@ -40,17 +40,46 @@ const CASES = {
     mediaFile: path.join(here, "refs", "tts2-speech.wav"),
     contextTerms: ["Roman", "NASA Goddard", "Kennedy Space Center", "coronagraph"],
   },
+  // Real speech from an X post, kept because it reproduces recognizer
+  // repetition loops that the synthetic fixtures never trigger.
+  theo: {
+    mediaFile: path.join(here, "refs", "theo-speech.wav"),
+    contextTerms: ["Anthropic", "Claude", "Opus", "Theo"],
+  },
+  theo2: {
+    mediaFile: path.join(here, "refs", "theo2-speech.wav"),
+    contextTerms: ["Anthropic", "Claude", "Opus", "Theo"],
+  },
+  // Real speech with 35s of digital silence spliced into the middle, to
+  // exercise the recognizer's behaviour when a stream goes quiet.
+  theosil: {
+    mediaFile: path.join(here, "refs", "theosil-speech.wav"),
+    contextTerms: ["Anthropic", "Claude", "Opus", "Theo"],
+  },
 };
 
 function parseArgs(argv) {
+  const chromeFromEnvironment =
+    typeof process.env.BENCH_CHROME === "string"
+    && process.env.BENCH_CHROME.trim()
+      ? process.env.BENCH_CHROME.trim()
+      : null;
+  const profileFromEnvironment =
+    typeof process.env.BENCH_PROFILE === "string"
+    && process.env.BENCH_PROFILE.trim()
+      ? process.env.BENCH_PROFILE.trim()
+      : null;
   const options = {
     caseName: "tts2",
     model: "base",
     backend: "prompt-api",
     durationSeconds: 95,
     chromePath:
-      "C:\\Users\\sorab\\AppData\\Local\\Google\\Chrome SxS\\Application\\chrome.exe",
-    profile: "C:\\Users\\sorab\\AppData\\Local\\Temp\\x-jimaku-builtin-ai-nano",
+      chromeFromEnvironment
+      ?? "C:\\Users\\sorab\\AppData\\Local\\Google\\Chrome SxS\\Application\\chrome.exe",
+    profile:
+      profileFromEnvironment
+      ?? "C:\\Users\\sorab\\AppData\\Local\\Temp\\x-jimaku-builtin-ai-nano",
     extension: path.join(root, "dist"),
   };
   for (let i = 0; i < argv.length; i += 1) {
@@ -94,6 +123,19 @@ if (!ALLOWED_MODELS.includes(options.model)) {
 if (!ALLOWED_BACKENDS.includes(options.backend)) {
   console.error(
     `[live2] --backend must be one of: ${ALLOWED_BACKENDS.join(", ")}`,
+  );
+  process.exit(2);
+}
+
+options.chromePath = path.resolve(
+  options.chromePath.trim(),
+);
+options.profile = path.resolve(
+  options.profile.trim(),
+);
+if (!existsSync(options.chromePath)) {
+  console.error(
+    `[live2] --chrome does not exist: ${options.chromePath}`,
   );
   process.exit(2);
 }
@@ -332,11 +374,9 @@ try {
   });
 
   await page.evaluate(() => {
-    window.__blocks = [];
-    window.__sampledCaps = [];
+    window.__samples = [];
     window.__ledger = [];
     window.__ledgerSeen = new WeakSet();
-    window.__lastSampledCueId = "";
 
     for (const host of document.querySelectorAll("*")) {
       const root = host.shadowRoot;
@@ -345,19 +385,12 @@ try {
       for (const entry of root.querySelectorAll(".caption-ledger > *")) {
         window.__ledgerSeen.add(entry);
       }
-
-      const cue = root.querySelector(".caption-cue");
-      if (cue?.dataset.cueId) {
-        window.__lastSampledCueId = cue.dataset.cueId;
-      }
     }
 
-    // The append model keeps one persistent cue with two ordered line elements.
-    // Sample the pair on every tick for the scroll and blank-gap gates.
+    // Page mode keeps two fixed slots and replaces both when the page changes.
+    // Record page identity with the two slot values on every visible sample.
     window.__capTimer = setInterval(() => {
-      let block = ["", ""];
-      let cueId = "";
-      let primaryText = "";
+      let sample = null;
 
       for (const host of document.querySelectorAll("*")) {
         const root = host.shadowRoot;
@@ -368,15 +401,26 @@ try {
         const lines = [
           ...cue.querySelectorAll(":scope > .caption-primary"),
         ].map((el) => el.textContent.trim());
-        if (lines.length !== 2) continue;
-
-        block = lines;
-        cueId = cue.dataset.cueId ?? "";
-        primaryText = cue.dataset.primaryText ?? "";
+        sample = {
+          cueId: cue.dataset.cueId ?? "",
+          pageId: cue.dataset.pageId ?? "",
+          line0: lines[0] ?? "",
+          line1: lines[1] ?? "",
+          slotCountViolation: lines.length !== 2,
+        };
         break;
       }
 
-      window.__blocks.push(block);
+      if (
+        sample !== null
+        && (
+          sample.slotCountViolation
+          || sample.line0 !== ""
+          || sample.line1 !== ""
+        )
+      ) {
+        window.__samples.push(sample);
+      }
 
       // Mirror the ledger as it grows. Reading it once at the end loses
       // everything, because stopping the capture destroys the overlay and the
@@ -391,18 +435,6 @@ try {
           if (text) window.__ledger.push(text);
         }
       }
-
-      // This cue-level value preserves the former sampled collector for one
-      // release while recognition.jaClauses moves to the deterministic ledger.
-      if (
-        cueId !== ""
-        && cueId !== window.__lastSampledCueId
-      ) {
-        window.__lastSampledCueId = cueId;
-        if (primaryText !== "") {
-          window.__sampledCaps.push(primaryText);
-        }
-      }
     }, 300);
   });
 
@@ -414,7 +446,7 @@ try {
     await new Promise((r) =>
       setTimeout(r, Math.min(10000, deadline - Date.now())),
     );
-    const count = await page.evaluate(() => window.__blocks.length);
+    const count = await page.evaluate(() => window.__samples.length);
     console.error(
       `[live2] t+${Math.round((Date.now() - started) / 1000)}s samples=${count}`,
     );
@@ -431,6 +463,7 @@ try {
     if (!(await chipSays(RUNNING))) break;
     await new Promise((r) => setTimeout(r, 500));
   }
+  result.stopDrainTimedOut = await chipSays(RUNNING);
   await new Promise((r) => setTimeout(r, 1000));
 
   const captured = await page.evaluate(() => {
@@ -438,24 +471,21 @@ try {
 
     return {
       ledgerClauses: window.__ledger,
-      sampledClauses: window.__sampledCaps,
-      blocks: window.__blocks,
+      samples: window.__samples,
     };
   });
   result.recognition = {
     jaClauses: captured.ledgerClauses,
-    sampledJaClauses: captured.sampledClauses,
   };
   result.display = {
-    blocks: captured.blocks,
+    samples: captured.samples,
   };
-  result.collectionComparison = {
-    ledgerClauses: captured.ledgerClauses.length,
-    sampledClauses: captured.sampledClauses.length,
-    exactMatch:
-      JSON.stringify(captured.ledgerClauses)
-      === JSON.stringify(captured.sampledClauses),
-  };
+
+  if (result.stopDrainTimedOut) {
+    throw new Error(
+      `capture remained RUNNING after ${STOP_DRAIN_TIMEOUT_MS}ms stop drain`,
+    );
+  }
 } catch (error) {
   result.error = String(error);
   console.error(`[live2] ${result.error}`);
@@ -476,48 +506,95 @@ if (!result.error && lines.length === 0) {
 }
 const joined = lines.join("\n");
 const japanese = /[\u3040-\u30ff\u4e00-\u9fff]/u;
-const blocks = result.display?.blocks ?? [];
-let blockScrollViolations = 0;
-let blockResets = 0;
-let blockBlankGaps = 0;
-let firstNonEmpty = -1;
-let lastNonEmpty = -1;
+const samples = result.display?.samples ?? [];
+const pageBlocks = [];
+let slotCountViolations = 0;
+let cueIdMissing = 0;
+let pageIdMissing = 0;
 
-for (let index = 0; index < blocks.length; index += 1) {
-  const block = blocks[index];
-  const previous = blocks[index - 1];
-  const nonEmpty = block[0] !== "" || block[1] !== "";
-
-  if (nonEmpty) {
-    if (firstNonEmpty === -1) firstNonEmpty = index;
-    lastNonEmpty = index;
+for (const sample of samples) {
+  if (sample.slotCountViolation) {
+    slotCountViolations += 1;
+  }
+  if (sample.cueId === "") {
+    cueIdMissing += 1;
+  }
+  if (sample.pageId === "") {
+    pageIdMissing += 1;
   }
 
-  // The block legitimately empties after the caption fade and at stop, and the
-  // next line then starts with an empty top slot. That is a reset, not a broken
-  // scroll, so count it separately and only flag a non-empty top that fails to
-  // carry the previous bottom line.
+  const previous =
+    pageBlocks[pageBlocks.length - 1];
   if (
     previous
-    && (previous[0] !== block[0] || previous[1] !== block[1])
-    && previous[1] !== ""
+    && previous.cueId === sample.cueId
+    && previous.pageId === sample.pageId
+    && previous.line0 === sample.line0
+    && previous.line1 === sample.line1
   ) {
-    if (block[0] === "") {
-      blockResets += 1;
-    } else if (block[0] !== previous[1]) {
-      blockScrollViolations += 1;
-    }
+    continue;
+  }
+
+  pageBlocks.push({
+    cueId: sample.cueId,
+    pageId: sample.pageId,
+    line0: sample.line0,
+    line1: sample.line1,
+    lines: [sample.line0, sample.line1].filter(
+      (line) => line !== "",
+    ),
+  });
+}
+
+result.display = {
+  ...(result.display ?? {}),
+  blocks: pageBlocks,
+};
+
+let pageLineReuse = 0;
+let nonEmptyPageTransitions = 0;
+const pageIdsByCue = new Map();
+
+for (let index = 0; index < pageBlocks.length; index += 1) {
+  const block = pageBlocks[index];
+  const previous = pageBlocks[index - 1];
+
+  if (block.cueId !== "") {
+    const pageIds =
+      pageIdsByCue.get(block.cueId)
+      ?? new Set();
+    pageIds.add(block.pageId);
+    pageIdsByCue.set(block.cueId, pageIds);
+  }
+
+  if (!previous) {
+    continue;
+  }
+
+  const previousLines = new Set(previous.lines);
+  if (
+    block.lines.some(
+      (line) => previousLines.has(line),
+    )
+  ) {
+    pageLineReuse += 1;
+  }
+
+  if (
+    previous.cueId !== block.cueId
+    && previous.lines.length > 0
+    && block.lines.length > 0
+  ) {
+    nonEmptyPageTransitions += 1;
   }
 }
 
-if (firstNonEmpty !== -1) {
-  for (let index = firstNonEmpty; index <= lastNonEmpty; index += 1) {
-    const block = blocks[index];
-    if (block[0] === "" && block[1] === "") {
-      blockBlankGaps += 1;
-    }
-  }
-}
+const twoPageCuesObserved =
+  [...pageIdsByCue.values()].filter(
+    (pageIds) =>
+      pageIds.has("0")
+      && pageIds.has("1"),
+  ).length;
 
 result.gates = {
   lines: lines.length,
@@ -525,10 +602,49 @@ result.gates = {
   wrongSenseRoma: (joined.match(/ローマ(?!ン)/gu) ?? []).length,
   unresolvedPlaceholders: (joined.match(/%%/gu) ?? []).length,
   romanKept: (joined.match(/(?<![A-Za-z])Roman(?![A-Za-z])/gu) ?? []).length,
-  blockScrollViolations,
-  blockResets,
-  blockBlankGaps,
+  pageLineReuse,
+  nonEmptyPageTransitions,
+  twoPageCuesObserved,
+  slotCountViolations,
+  cueIdMissing,
+  pageIdMissing,
+  stopDrainTimedOut:
+    result.stopDrainTimedOut ?? false,
 };
+
+const failedDisplayGates = [
+  pageLineReuse !== 0
+    ? "pageLineReuse"
+    : null,
+  slotCountViolations !== 0
+    ? "slotCountViolations"
+    : null,
+  cueIdMissing !== 0
+    ? "cueIdMissing"
+    : null,
+  pageIdMissing !== 0
+    ? "pageIdMissing"
+    : null,
+  result.gates.stopDrainTimedOut
+    ? "stopDrainTimedOut"
+    : null,
+].filter(Boolean);
+
+if (
+  !result.error
+  && nonEmptyPageTransitions === 0
+) {
+  result.error =
+    "display gate insufficient: no non-empty cue transition observed";
+  console.error(`[live2] ${result.error}`);
+} else if (
+  !result.error
+  && failedDisplayGates.length > 0
+) {
+  result.error =
+    `display gate failed: ${failedDisplayGates.join(", ")}`;
+  console.error(`[live2] ${result.error}`);
+}
 
 const stamp = new Date()
   .toISOString()
