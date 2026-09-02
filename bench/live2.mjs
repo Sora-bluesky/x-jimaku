@@ -267,7 +267,7 @@ try {
       sourceLang: "en",
       translationBackend: options.backend,
       showOriginal: false,
-      showTentative: false,
+      showTentative: true,
     },
   );
   // Settings reach the capture path through storage, which is read independently
@@ -417,19 +417,25 @@ try {
           root
             .querySelector(".caption-tentative")
             ?.textContent.trim() ?? "";
+        const hasPrimaryText =
+          lines.some((line) => line !== "");
+        const hasTentativeText =
+          tentative !== "";
         sample = {
           sampledAtMs: Date.now(),
           cueId: cue.dataset.cueId ?? "",
           pageId: cue.dataset.pageId ?? "",
           line0: lines[0] ?? "",
           line1: lines[1] ?? "",
+          hasPrimaryText,
+          hasTentativeText,
           slotCountViolation: lines.length !== 2,
           stackDisplayed:
             getComputedStyle(captionStack)
               .display !== "none",
           blank:
-            lines.every((line) => line === "")
-            && tentative === "",
+            !hasPrimaryText
+            && !hasTentativeText,
         };
         break;
       }
@@ -664,20 +670,49 @@ const blankBarSamples =
       block.stackDisplayed
       && block.blank,
   ).length;
+function sampleDelayMs(sample) {
+  if (
+    captureRunningAtMs === null
+    || sample === undefined
+  ) {
+    return null;
+  }
+
+  return Math.max(
+    0,
+    sample.sampledAtMs
+      - captureRunningAtMs,
+  );
+}
+
 const firstCaptionSample =
   samples.find(
     (sample) =>
       sample.stackDisplayed
       && !sample.blank,
   );
+const firstTentativeSample =
+  samples.find(
+    (sample) =>
+      sample.stackDisplayed
+      && sample.hasTentativeText,
+  );
+const firstFinalSample =
+  samples.find(
+    (sample) =>
+      sample.stackDisplayed
+      && sample.hasPrimaryText,
+  );
 const firstCaptionMs =
-  captureRunningAtMs !== null
-  && firstCaptionSample !== undefined
-    ? Math.max(
-        0,
-        firstCaptionSample.sampledAtMs
-          - captureRunningAtMs,
-      )
+  sampleDelayMs(firstCaptionSample);
+const firstTentativeMs =
+  sampleDelayMs(firstTentativeSample);
+const firstFinalMs =
+  sampleDelayMs(firstFinalSample);
+const tentativeToFinalMs =
+  firstTentativeMs !== null
+  && firstFinalMs !== null
+    ? firstFinalMs - firstTentativeMs
     : null;
 const nonEmptyPageBlocks =
   pageBlocks.filter(
@@ -719,9 +754,9 @@ function percentileMs(values, quantile) {
   );
 }
 
-const captionGapMsP50 =
+const finalIntervalMsP50 =
   percentileMs(captionGapMs, 0.5);
-const captionGapMsP90 =
+const finalIntervalMsP90 =
   percentileMs(captionGapMs, 0.9);
 
 result.gates = {
@@ -735,8 +770,11 @@ result.gates = {
   twoPageCuesObserved,
   blankBarSamples,
   firstCaptionMs,
-  captionGapMsP50,
-  captionGapMsP90,
+  firstTentativeMs,
+  firstFinalMs,
+  tentativeToFinalMs,
+  finalIntervalMsP50,
+  finalIntervalMsP90,
   slotCountViolations,
   cueIdMissing,
   pageIdMissing,

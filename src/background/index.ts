@@ -11,7 +11,6 @@ import {
   type ContentScriptProbeResultMessage,
   type CsDrainCompleteMessage,
   type CsEosMessage,
-  type CsMediaChangedMessage,
   type CsPcmMessage,
   type CsPingMessage,
   type CsPongMessage,
@@ -70,6 +69,9 @@ import {
   createCaptionReplay,
   createRecognitionRelays,
 } from "./caption-replay";
+import {
+  handleContentMediaChanged,
+} from "./content-media-change";
 import {
   SilentInputTracker,
 } from "./silent-input-tracker";
@@ -1156,6 +1158,8 @@ function handleContentPortConnected(
       ) {
         void stateInitialization.then(() => {
           handleContentMediaChanged(
+            captureState,
+            silentInputTracker,
             tabId,
             message,
           );
@@ -1714,24 +1718,6 @@ function relayContentDrainComplete(
       error,
     );
   }
-}
-
-function handleContentMediaChanged(
-  tabId: number,
-  message: CsMediaChangedMessage,
-): void {
-  if (
-    captureState.status !== "running" ||
-    captureState.tabId !== tabId ||
-    captureState.requestId !==
-      message.requestId
-  ) {
-    return;
-  }
-
-  silentInputTracker.mediaChanged(
-    message.requestId,
-  );
 }
 
 function handleContentTapState(

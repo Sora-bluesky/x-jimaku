@@ -7,6 +7,12 @@ import {
   vi,
 } from "vitest";
 import {
+  createCaptureState,
+} from "../shared/state";
+import {
+  handleContentMediaChanged,
+} from "./content-media-change";
+import {
   SILENT_INPUT_HINT_DELAY_MS,
   SILENT_INPUT_LEVEL_STALE_MS,
   SILENT_INPUT_RMS_THRESHOLD,
@@ -145,7 +151,7 @@ describe("SilentInputTracker", () => {
   );
 
   it(
-    "restarts the ten-second quiet window after a seek",
+    "restarts the ten-second quiet window after matching CS_MEDIA_CHANGED",
     () => {
       const {
         tracker,
@@ -153,7 +159,18 @@ describe("SilentInputTracker", () => {
       } = createTracker();
 
       keepQuietLevelFresh(tracker, 9_000);
-      tracker.mediaChanged(REQUEST_ID);
+      handleContentMediaChanged(
+        createCaptureState("running", {
+          requestId: REQUEST_ID,
+          tabId: 7,
+        }),
+        tracker,
+        7,
+        {
+          t: "CS_MEDIA_CHANGED",
+          requestId: REQUEST_ID,
+        },
+      );
       keepQuietLevelFresh(tracker, 9_000);
 
       expect(isHintVisible()).toBe(false);
