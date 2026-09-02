@@ -42,17 +42,26 @@ fixture サーバ起動・Chrome 起動・拡張インストール・設定投�
 result JSON 保存・機械ゲート出力までを 1 コマンドで行う。
 `--case tts|tts2` / `--model` / `--backend` / `--chrome` / `--profile` / `--extension` で切替。
 
-A-6-5 は次の値で表示を判定する。
+A-6-5 は次の値で表示を判定または観測する。
 
-| 名前 | 合格条件 |
+| 名前 | 判定・観測内容 |
 |---|---|
 | `pageLineReuse` | `0`。連続するページが同じ非空行を共有しない。 |
 | `nonEmptyPageTransitions` | `1` 以上。`0` は `insufficient` として終了コード `1` にする。 |
 | `twoPageCuesObserved` | 同じ cue でページ `0` と `1` を観測した件数。合否には使わない。 |
+| `blankBarSamples` | `.caption-stack` が表示中かつ空だった連続区間数。合否には使わない。値の上昇は、その区間が増えたことを示す。 |
+| `firstCaptionMs` | キャプチャーが `running` と報告してから、表示中の最初の非空サンプルまでの時間。合否には使わない。 |
+| `captionGapMsP50` | 連続する非空ページ遷移の間隔の中央値。合否には使わない。間隔を算出できない場合は `null`。 |
+| `captionGapMsP90` | 連続する非空ページ遷移の間隔の90パーセンタイル。合否には使わない。間隔を算出できない場合は `null`。 |
 | `slotCountViolations` | `0`。`.caption-primary` は常に2個。 |
 | `cueIdMissing` | `0`。採取した表示サンプルに `cueId` がある。 |
 | `pageIdMissing` | `0`。採取した表示サンプルに `pageId` がある。 |
 | `stopDrainTimedOut` | `false`。明示停止から45秒後もチップが `RUNNING` なら `true` とし、終了コード `1` にする。 |
+
+時間値はページ側の `Date.now()` を300msごとのサンプルに記録して算出する。
+`firstCaptionMs` には `running` 検出後の一時停止、滞留排出、動画の巻き戻しも含まれる。
+これらは文字が画面へ届いた時刻をキャプチャー開始および前後の表示と比較する値である。
+発話時刻を取得できないため、発話から字幕表示までの遅延は測定しない。
 
 成立条件（いずれか欠けると無音で失敗するので消さないこと）:
 

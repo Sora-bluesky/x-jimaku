@@ -203,6 +203,7 @@ const result = {
   durationSeconds: options.durationSeconds,
   collection: "live2 unattended (CDP Extensions.loadUnpacked + autoplay)",
 };
+let captureRunningAtMs = null;
 
 const watchdog = setTimeout(() => {
   console.error("[live2] watchdog fired");
@@ -299,12 +300,14 @@ try {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       if (await chipSays(needles)) {
+        const observedAtMs =
+          await page.evaluate(() => Date.now());
         console.error(`[live2] ${label}`);
-        return true;
+        return observedAtMs;
       }
       await new Promise((r) => setTimeout(r, 500));
     }
-    return false;
+    return null;
   };
 
   await page.evaluate(async () => {
@@ -319,7 +322,13 @@ try {
   // Warm-up only completes while audio is flowing (measured: 字幕 準備中 until
   // ~4s of playback, then 字幕ON; paused, it never leaves 準備中), so the clip has
   // to run through it.
-  if (!(await waitFor("capture running", RUNNING, READY_TIMEOUT_MS))) {
+  captureRunningAtMs =
+    await waitFor(
+      "capture running",
+      RUNNING,
+      READY_TIMEOUT_MS,
+    );
+  if (captureRunningAtMs === null) {
     // Opening the window anyway would give a truncated capture that still claims
     // the full durationSeconds, and a non-empty line list would slip past the
     // empty-capture guard.
@@ -388,37 +397,44 @@ try {
     }
 
     // Page mode keeps two fixed slots and replaces both when the page changes.
-    // Record page identity with the two slot values on every visible sample.
+    // Record page identity, stack state, and time on every sample.
     window.__capTimer = setInterval(() => {
       let sample = null;
 
       for (const host of document.querySelectorAll("*")) {
         const root = host.shadowRoot;
         if (!root) continue;
-        const cue = root.querySelector(".caption-cue");
-        if (!cue) continue;
+        const captionStack =
+          root.querySelector(".caption-stack");
+        const cue =
+          root.querySelector(".caption-cue");
+        if (!captionStack || !cue) continue;
 
         const lines = [
           ...cue.querySelectorAll(":scope > .caption-primary"),
         ].map((el) => el.textContent.trim());
+        const tentative =
+          root
+            .querySelector(".caption-tentative")
+            ?.textContent.trim() ?? "";
         sample = {
+          sampledAtMs: Date.now(),
           cueId: cue.dataset.cueId ?? "",
           pageId: cue.dataset.pageId ?? "",
           line0: lines[0] ?? "",
           line1: lines[1] ?? "",
           slotCountViolation: lines.length !== 2,
+          stackDisplayed:
+            getComputedStyle(captionStack)
+              .display !== "none",
+          blank:
+            lines.every((line) => line === "")
+            && tentative === "",
         };
         break;
       }
 
-      if (
-        sample !== null
-        && (
-          sample.slotCountViolation
-          || sample.line0 !== ""
-          || sample.line1 !== ""
-        )
-      ) {
+      if (sample !== null) {
         window.__samples.push(sample);
       }
 
@@ -507,20 +523,65 @@ if (!result.error && lines.length === 0) {
 const joined = lines.join("\n");
 const japanese = /[\u3040-\u30ff\u4e00-\u9fff]/u;
 const samples = result.display?.samples ?? [];
+const displayBlocks = [];
 const pageBlocks = [];
 let slotCountViolations = 0;
 let cueIdMissing = 0;
 let pageIdMissing = 0;
 
 for (const sample of samples) {
+  const hasPageText =
+    sample.line0 !== ""
+    || sample.line1 !== "";
+
   if (sample.slotCountViolation) {
     slotCountViolations += 1;
   }
-  if (sample.cueId === "") {
+  if (
+    (hasPageText || sample.slotCountViolation)
+    && sample.cueId === ""
+  ) {
     cueIdMissing += 1;
   }
-  if (sample.pageId === "") {
+  if (
+    (hasPageText || sample.slotCountViolation)
+    && sample.pageId === ""
+  ) {
     pageIdMissing += 1;
+  }
+
+  const previousDisplay =
+    displayBlocks[displayBlocks.length - 1];
+  if (
+    !previousDisplay
+    || previousDisplay.cueId !== sample.cueId
+    || previousDisplay.pageId !== sample.pageId
+    || previousDisplay.line0 !== sample.line0
+    || previousDisplay.line1 !== sample.line1
+    || previousDisplay.slotCountViolation
+      !== sample.slotCountViolation
+    || previousDisplay.stackDisplayed
+      !== sample.stackDisplayed
+    || previousDisplay.blank !== sample.blank
+  ) {
+    displayBlocks.push({
+      sampledAtMs: sample.sampledAtMs,
+      cueId: sample.cueId,
+      pageId: sample.pageId,
+      line0: sample.line0,
+      line1: sample.line1,
+      slotCountViolation:
+        sample.slotCountViolation,
+      stackDisplayed: sample.stackDisplayed,
+      blank: sample.blank,
+    });
+  }
+
+  if (
+    !sample.stackDisplayed
+    || (!hasPageText && !sample.slotCountViolation)
+  ) {
+    continue;
   }
 
   const previous =
@@ -536,6 +597,7 @@ for (const sample of samples) {
   }
 
   pageBlocks.push({
+    sampledAtMs: sample.sampledAtMs,
     cueId: sample.cueId,
     pageId: sample.pageId,
     line0: sample.line0,
@@ -596,6 +658,72 @@ const twoPageCuesObserved =
       && pageIds.has("1"),
   ).length;
 
+const blankBarSamples =
+  displayBlocks.filter(
+    (block) =>
+      block.stackDisplayed
+      && block.blank,
+  ).length;
+const firstCaptionSample =
+  samples.find(
+    (sample) =>
+      sample.stackDisplayed
+      && !sample.blank,
+  );
+const firstCaptionMs =
+  captureRunningAtMs !== null
+  && firstCaptionSample !== undefined
+    ? Math.max(
+        0,
+        firstCaptionSample.sampledAtMs
+          - captureRunningAtMs,
+      )
+    : null;
+const nonEmptyPageBlocks =
+  pageBlocks.filter(
+    (block) => block.lines.length > 0,
+  );
+const captionGapMs =
+  nonEmptyPageBlocks
+    .slice(1)
+    .map(
+      (block, index) =>
+        Math.max(
+          0,
+          block.sampledAtMs
+            - nonEmptyPageBlocks[index]
+              .sampledAtMs,
+        ),
+    );
+
+function percentileMs(values, quantile) {
+  if (values.length === 0) {
+    return null;
+  }
+
+  const sorted =
+    [...values].sort((left, right) =>
+      left - right
+    );
+  const position =
+    (sorted.length - 1) * quantile;
+  const lowerIndex = Math.floor(position);
+  const upperIndex = Math.ceil(position);
+  const lower = sorted[lowerIndex];
+  const upper = sorted[upperIndex];
+
+  return Math.round(
+    lower
+      + (upper - lower)
+        * (position - lowerIndex),
+  );
+}
+
+const captionGapMsP50 =
+  percentileMs(captionGapMs, 0.5);
+const captionGapMsP90 =
+  percentileMs(captionGapMs, 0.9);
+
 result.gates = {
   lines: lines.length,
   englishPassthrough: lines.filter((l) => !japanese.test(l)).length,
@@ -605,6 +733,10 @@ result.gates = {
   pageLineReuse,
   nonEmptyPageTransitions,
   twoPageCuesObserved,
+  blankBarSamples,
+  firstCaptionMs,
+  captionGapMsP50,
+  captionGapMsP90,
   slotCountViolations,
   cueIdMissing,
   pageIdMissing,

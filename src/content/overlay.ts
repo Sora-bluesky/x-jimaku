@@ -1718,6 +1718,13 @@ export class CaptionOverlay {
       "is-empty",
       !visible,
     );
+    // The bar paints its own background, and the layout pass shows it whenever
+    // capture is on and the target is visible. Without this the viewer keeps a
+    // black box over the video through every gap between captions.
+    this.captionStack.classList.toggle(
+      "is-blank",
+      !visible,
+    );
 
     if (
       !visible &&
@@ -2597,6 +2604,7 @@ export class CaptionOverlay {
         this.captionLine.classList.add(
           "is-empty",
         );
+        this.updateCaptionVisibility();
         this.updateLayout();
         this.options.onCaptionFadeOut?.();
       }, Math.ceil(normalizedDelay));
@@ -2941,6 +2949,17 @@ function getOverlayStyles(): string {
     .caption-line.is-empty,
     .caption-line.is-fading {
       opacity: 0;
+    }
+
+    .caption-stack.is-blank {
+      background: transparent;
+      transition:
+        background-color
+        var(
+          --caption-fade-duration,
+          ${CAPTION_FADE_MS}ms
+        )
+        ease;
     }
 
     .cue-container {

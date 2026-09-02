@@ -604,6 +604,46 @@ describe(
     );
 
     it(
+      "A-6-5 marks the caption stack blank before and after visible text",
+      () => {
+        const overlay = createOverlay();
+
+        overlay.setTranslationPath(null);
+
+        const { captionStack } =
+          getOverlayDom();
+
+        expect(
+          captionStack.classList.contains(
+            "is-blank",
+          ),
+        ).toBe(true);
+
+        showFinal(overlay, 1, "A");
+
+        expect(
+          captionStack.classList.contains(
+            "is-blank",
+          ),
+        ).toBe(false);
+
+        vi.advanceTimersByTime(
+          CAPTION_VISIBLE_MS +
+            CAPTION_FADE_MS,
+        );
+
+        expect(getBlockLines()).toEqual(
+          ["", ""],
+        );
+        expect(
+          captionStack.classList.contains(
+            "is-blank",
+          ),
+        ).toBe(true);
+      },
+    );
+
+    it(
       "renders a three-line cue as two dwell-separated pages",
       () => {
         const overlay = createOverlay();
