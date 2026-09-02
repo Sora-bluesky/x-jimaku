@@ -85,12 +85,71 @@ beforeEach(() => {
 
 describe("handleOffscreenDevLog", () => {
   it(
-    "does not print on a non-development origin",
+    "posts a structured entry on the development origin",
+    () => {
+      const originalLocation = location;
+      const data = {
+        kind: "passthrough" as const,
+        requestId: "request-63",
+        lineId: 1,
+      };
+      const postMessage = vi
+        .spyOn(window, "postMessage")
+        .mockImplementation(() => {
+        });
+      const info = vi
+        .spyOn(console, "info")
+        .mockImplementation(() => {
+        });
+
+      try {
+        vi.stubGlobal("location", {
+          origin: "http://127.0.0.1:8123",
+        });
+
+        handleOffscreenDevLog({
+          t: "OFF_DEV_LOG",
+          level: "info",
+          tag: "translate",
+          message:
+            "Translator line rescue exhausted; passing through original",
+          data,
+        });
+
+        expect(postMessage).toHaveBeenCalledWith(
+          {
+            t: "OFF_DEV_LOG",
+            level: "info",
+            tag: "translate",
+            message:
+              "Translator line rescue exhausted; passing through original",
+            data,
+            timestampMs: expect.any(Number),
+          },
+          "http://127.0.0.1:8123",
+        );
+      } finally {
+        vi.stubGlobal(
+          "location",
+          originalLocation,
+        );
+        postMessage.mockRestore();
+        info.mockRestore();
+      }
+    },
+  );
+
+  it(
+    "does not post or print on a non-development origin",
     () => {
       expect(location.origin).not.toBe(
         "http://127.0.0.1:8123",
       );
 
+      const postMessage = vi
+        .spyOn(window, "postMessage")
+        .mockImplementation(() => {
+        });
       const methods = [
         vi
           .spyOn(console, "info")
@@ -118,6 +177,9 @@ describe("handleOffscreenDevLog", () => {
           lineId: 1,
         },
       });
+
+      expect(postMessage).not.toHaveBeenCalled();
+      postMessage.mockRestore();
 
       for (const method of methods) {
         expect(method).not.toHaveBeenCalled();

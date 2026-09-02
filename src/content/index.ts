@@ -413,6 +413,14 @@ export function handleOffscreenDevLog(
     return;
   }
 
+  window.postMessage(
+    {
+      ...message,
+      timestampMs: performance.now(),
+    },
+    DEV_ORIGIN,
+  );
+
   const details =
     message.data === undefined
       ? []

@@ -62,6 +62,19 @@ A-6-5 は次の値で表示を判定または観測する。
 | `pageIdMissing` | `0`。採取した表示サンプルに `pageId` がある。 |
 | `stopDrainTimedOut` | `false`。明示停止から45秒後もチップが `RUNNING` なら `true` とし、終了コード `1` にする。 |
 
+診断ログは次の観測値として保存する。いずれも合否判定には使わない。
+
+| JSONフィールド | 内容 |
+|---|---|
+| `diagnostics.devLog[]` | `OFF_DEV_LOG`の`t`、`level`、`tag`、`message`、`data`を受信内容のまま保存する。 |
+| `diagnostics.devLog[].timestampMs` | `handleOffscreenDevLog`が`performance.now()`で付ける単調増加時刻。 |
+| `diagnostics.devLog[].arrivalMs` | `replayStartedAtMs`を0としたページ到着時刻。単位はミリ秒。 |
+| `gates.devLogQueueDrop`、`gates.devLogRescueFailure`、`gates.devLogPassthrough` | `data.kind`が`queue-drop`、`rescue-failure`、`passthrough`だった件数。 |
+| `gates.devLogOther` | 既知の3種類以外または`data.kind`がない診断ログの件数。 |
+| `gates.englishPassthrough` | 表示台帳の文字列のうち、日本語文字を1文字も含まない件数。 |
+
+`devLogQueueDrop`が増えた場合、検証に失敗したのではなく、翻訳処理の負荷が高い間に句が破棄されている。
+
 時間値はページ側の `Date.now()` を300msごとのサンプルと動画の再生開始時に記録して算出する。
 `live2` はtentative段階を観測するため、採取時だけ `showTentative` を `true` にする。
 `captureToReplayMs` には `running` 検出後の一時停止、滞留排出、動画の巻き戻しが含まれる。

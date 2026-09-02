@@ -202,6 +202,9 @@ const result = {
   backend: options.backend,
   durationSeconds: options.durationSeconds,
   collection: "live2 unattended (CDP Extensions.loadUnpacked + autoplay)",
+  diagnostics: {
+    devLog: [],
+  },
 };
 let captureRunningAtMs = null;
 let replayStartedAtMs = null;
@@ -379,6 +382,25 @@ try {
 
   replayStartedAtMs =
     await page.evaluate(async () => {
+      window.__devLog = [];
+      window.addEventListener(
+        "message",
+        (event) => {
+          if (
+            event.source !== window
+            || event.origin !== location.origin
+            || event.data?.t !== "OFF_DEV_LOG"
+          ) {
+            return;
+          }
+
+          window.__devLog.push({
+            ...event.data,
+            arrivedAtMs: Date.now(),
+          });
+        },
+      );
+
       const video = document.querySelector("video");
       video.currentTime = 0;
       await video.play();
@@ -495,10 +517,19 @@ try {
     clearInterval(window.__capTimer);
 
     return {
+      devLog: window.__devLog,
       ledgerClauses: window.__ledger,
       samples: window.__samples,
     };
   });
+  result.diagnostics.devLog =
+    captured.devLog.map(
+      ({ arrivedAtMs, ...entry }) => ({
+        ...entry,
+        arrivalMs:
+          arrivedAtMs - replayStartedAtMs,
+      }),
+    );
   result.recognition = {
     jaClauses: captured.ledgerClauses,
   };
@@ -772,9 +803,41 @@ const finalIntervalMsP50 =
 const finalIntervalMsP90 =
   percentileMs(captionGapMs, 0.9);
 
+const devLogKindCounts = {
+  "queue-drop": 0,
+  "rescue-failure": 0,
+  passthrough: 0,
+  other: 0,
+};
+for (
+  const entry
+  of result.diagnostics.devLog
+) {
+  const kind = entry.data?.kind;
+
+  if (
+    Object.hasOwn(
+      devLogKindCounts,
+      kind,
+    )
+  ) {
+    devLogKindCounts[kind] += 1;
+  } else {
+    devLogKindCounts.other += 1;
+  }
+}
+
 result.gates = {
   lines: lines.length,
   englishPassthrough: lines.filter((l) => !japanese.test(l)).length,
+  devLogQueueDrop:
+    devLogKindCounts["queue-drop"],
+  devLogRescueFailure:
+    devLogKindCounts["rescue-failure"],
+  devLogPassthrough:
+    devLogKindCounts.passthrough,
+  devLogOther:
+    devLogKindCounts.other,
   wrongSenseRoma: (joined.match(/ローマ(?!ン)/gu) ?? []).length,
   unresolvedPlaceholders: (joined.match(/%%/gu) ?? []).length,
   romanKept: (joined.match(/(?<![A-Za-z])Roman(?![A-Za-z])/gu) ?? []).length,
