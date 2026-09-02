@@ -42,6 +42,14 @@ fixture サーバ起動・Chrome 起動・拡張インストール・設定投�
 result JSON 保存・機械ゲート出力までを 1 コマンドで行う。
 `--case tts|tts2` / `--model` / `--backend` / `--chrome` / `--profile` / `--extension` で切替。
 
+翻訳経路の報告時刻と準備時間は次の3値で観測する。いずれも巻き戻した動画の再生開始を0とし、再生前なら負数になる。`gates` オブジェクトへ保存するが、合否には使わない。
+
+| 名前 | 観測内容 |
+|---|---|
+| `pathFirstReportedMs` | 最初の `SW_TRANSLATION_STATE` がページへ到着した時刻。経路が `none` の報告しかない場合も値を持ち、報告が一度もない場合は `null`。 |
+| `pathReadyMs` | `path` が存在し、値が `none` ではない最初の `SW_TRANSLATION_STATE` がページへ到着した時刻。利用可能な経路の報告がない場合は `null`。 |
+| `pathReadyToFirstJapaneseMs` | `firstJapaneseMs - pathReadyMs`。どちらかを観測できない場合は `null`。利用可能な経路が早く報告されたのに日本語字幕が遅い場合、遅延箇所は後段の句の締切処理か `assembler` にある。利用可能な経路の報告自体が遅い場合、遅延箇所はモデル側にあり、句を並べ替えても短縮できない。 |
+
 A-6-5 は次の値で表示を判定または観測する。
 
 | 名前 | 判定・観測内容 |
@@ -69,6 +77,10 @@ A-6-5 は次の値で表示を判定または観測する。
 | `diagnostics.devLog[]` | `OFF_DEV_LOG`の`t`、`level`、`tag`、`message`、`data`を受信内容のまま保存する。 |
 | `diagnostics.devLog[].timestampMs` | `handleOffscreenDevLog`が`performance.now()`で付ける単調増加時刻。 |
 | `diagnostics.devLog[].arrivalMs` | `replayStartedAtMs`を0としたページ到着時刻。単位はミリ秒。 |
+| `diagnostics.translationState[]` | ページへ転送された `SW_TRANSLATION_STATE` を受信内容のまま保存する。 |
+| `diagnostics.translationState[].timestampMs` | content script がページへ転送するときに `performance.now()` で付ける単調増加時刻。 |
+| `diagnostics.translationState[].arrivalMs` | `replayStartedAtMs`を0としたページ到着時刻。単位はミリ秒。 |
+| `diagnostics.translationPaths` | 報告された `path` を初出順に並べ、重複を除いた配列。`path` がない報告は含めない。 |
 | `gates.devLogQueueDrop`、`gates.devLogRescueFailure`、`gates.devLogPassthrough` | `data.kind`が`queue-drop`、`rescue-failure`、`passthrough`だった件数。 |
 | `gates.devLogOther` | 既知の3種類以外または`data.kind`がない診断ログの件数。 |
 | `gates.englishPassthrough` | 表示台帳の文字列のうち、日本語文字を1文字も含まない件数。 |

@@ -734,6 +734,21 @@ function connectBackgroundPort(): void {
           ensureOverlay().setTranslationPath(
             message.path,
           );
+
+          // The bench needs to know when a path becomes usable; the only
+          // other signal carrying a path is the rescue-failure log, which
+          // fires when translation has already gone wrong.
+          if (location.origin === DEV_ORIGIN) {
+            window.postMessage(
+              {
+                ...message,
+                timestampMs:
+                  performance.now(),
+              },
+              DEV_ORIGIN,
+            );
+          }
+
           return;
         }
 

@@ -204,6 +204,8 @@ const result = {
   collection: "live2 unattended (CDP Extensions.loadUnpacked + autoplay)",
   diagnostics: {
     devLog: [],
+    translationState: [],
+    translationPaths: [],
   },
 };
 let captureRunningAtMs = null;
@@ -278,6 +280,39 @@ try {
   // of this message, so give it a beat before toggling.
   await new Promise((r) => setTimeout(r, 2500));
   console.error(`[live2] settings applied; ${JSON.stringify(result.builtinAi)}`);
+
+  await page.evaluate(() => {
+    window.__devLog = [];
+    window.__translationState = [];
+    window.addEventListener(
+      "message",
+      (event) => {
+        if (
+          event.source !== window
+          || event.origin !== location.origin
+        ) {
+          return;
+        }
+
+        const arrivedAtMs = Date.now();
+
+        if (event.data?.t === "OFF_DEV_LOG") {
+          window.__devLog.push({
+            ...event.data,
+            arrivedAtMs,
+          });
+          return;
+        }
+
+        if (event.data?.t === "SW_TRANSLATION_STATE") {
+          window.__translationState.push({
+            ...event.data,
+            arrivedAtMs,
+          });
+        }
+      },
+    );
+  });
 
   // Replicates the handshake in bench/run-bench.mjs:1305-1319. The tap needs a
   // playing video at dispatch, but WhisperSegmenter.start() begins at the oldest
@@ -383,23 +418,6 @@ try {
   replayStartedAtMs =
     await page.evaluate(async () => {
       window.__devLog = [];
-      window.addEventListener(
-        "message",
-        (event) => {
-          if (
-            event.source !== window
-            || event.origin !== location.origin
-            || event.data?.t !== "OFF_DEV_LOG"
-          ) {
-            return;
-          }
-
-          window.__devLog.push({
-            ...event.data,
-            arrivedAtMs: Date.now(),
-          });
-        },
-      );
 
       const video = document.querySelector("video");
       video.currentTime = 0;
@@ -518,6 +536,8 @@ try {
 
     return {
       devLog: window.__devLog,
+      translationState:
+        window.__translationState,
       ledgerClauses: window.__ledger,
       samples: window.__samples,
     };
@@ -530,6 +550,21 @@ try {
           arrivedAtMs - replayStartedAtMs,
       }),
     );
+  result.diagnostics.translationState =
+    captured.translationState.map(
+      ({ arrivedAtMs, ...entry }) => ({
+        ...entry,
+        arrivalMs:
+          arrivedAtMs - replayStartedAtMs,
+      }),
+    );
+  result.diagnostics.translationPaths = [
+    ...new Set(
+      result.diagnostics.translationState
+        .map((entry) => entry.path)
+        .filter((path) => typeof path === "string"),
+    ),
+  ];
   result.recognition = {
     jaClauses: captured.ledgerClauses,
   };
@@ -764,6 +799,21 @@ const firstFinalMs =
   sampleDelayMs(firstFinalSample);
 const firstJapaneseMs =
   sampleDelayMs(firstJapaneseSample);
+const translationState =
+  result.diagnostics.translationState;
+const pathFirstReportedMs =
+  translationState[0]?.arrivalMs ?? null;
+const pathReadyMs =
+  translationState.find(
+    (entry) =>
+      typeof entry.path === "string"
+      && entry.path !== "none",
+  )?.arrivalMs ?? null;
+const pathReadyToFirstJapaneseMs =
+  pathReadyMs !== null
+  && firstJapaneseMs !== null
+    ? firstJapaneseMs - pathReadyMs
+    : null;
 const tentativeToFinalMs =
   firstTentativeMs !== null
   && firstFinalMs !== null
@@ -857,10 +907,13 @@ result.gates = {
   twoPageCuesObserved,
   blankBarSamples,
   captureToReplayMs,
+  pathFirstReportedMs,
+  pathReadyMs,
   firstCaptionMs,
   firstTentativeMs,
   firstFinalMs,
   firstJapaneseMs,
+  pathReadyToFirstJapaneseMs,
   tentativeToFinalMs,
   finalIntervalMsP50,
   finalIntervalMsP90,
