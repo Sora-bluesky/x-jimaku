@@ -166,4 +166,28 @@ describe("drain message compatibility", () => {
       }),
     ).toBe(true);
   });
+
+  it("A-6-4(b'''') validates fallback at the recognition boundary", () => {
+    const base = {
+      t: "OFF_RECOG",
+      id: 1,
+      text: "fallback",
+      final: true,
+      at: "2026-09-02T00:00:00.000Z",
+    };
+
+    expect(
+      isM1Message({
+        ...base,
+        fallback: true,
+      }),
+    ).toBe(true);
+    expect(isM1Message(base)).toBe(true);
+    expect(
+      isM1Message({
+        ...base,
+        fallback: "yes",
+      }),
+    ).toBe(false);
+  });
 });

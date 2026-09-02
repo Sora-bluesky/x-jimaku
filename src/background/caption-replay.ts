@@ -1,18 +1,45 @@
-export interface CaptionReplayLine {
-  id: number;
-  text: string;
-  ja?: string;
-  final: boolean;
-  at: string;
+import type {
+  RecognitionPayload,
+  SwCaptionMessage,
+  SwRecognitionMessage,
+} from "../shared/messages";
+
+export interface CaptionReplayLine
+  extends RecognitionPayload {
 }
 
-export interface CaptionReplayPayload {
-  t: "SW_CAPTION";
-  id: number;
-  text: string;
-  ja?: string;
-  final: boolean;
-  at: string;
+export type CaptionReplayPayload =
+  SwCaptionMessage;
+
+export function createRecognitionRelays(
+  line: RecognitionPayload,
+): {
+  recognition: SwRecognitionMessage;
+  caption: SwCaptionMessage;
+} {
+  const payload = {
+    id: line.id,
+    text: line.text,
+    final: line.final,
+    at: line.at,
+    ...(line.ja === undefined
+      ? {}
+      : { ja: line.ja }),
+    ...(line.fallback === undefined
+      ? {}
+      : { fallback: line.fallback }),
+  };
+
+  return {
+    recognition: {
+      t: "SW_RECOG",
+      ...payload,
+    },
+    caption: {
+      t: "SW_CAPTION",
+      ...payload,
+    },
+  };
 }
 
 export function createCaptionReplay(
@@ -23,14 +50,9 @@ export function createCaptionReplay(
     .sort((left, right) =>
       left.id - right.id
     )
-    .map((line) => ({
-      t: "SW_CAPTION",
-      id: line.id,
-      text: line.text,
-      final: line.final,
-      at: line.at,
-      ...(line.ja === undefined
-        ? {}
-        : { ja: line.ja }),
-    }));
+    .map(
+      (line) =>
+        createRecognitionRelays(line)
+          .caption,
+    );
 }

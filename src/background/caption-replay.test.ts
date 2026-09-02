@@ -5,6 +5,7 @@ import {
 } from "vitest";
 import {
   createCaptionReplay,
+  createRecognitionRelays,
   type CaptionReplayLine,
 } from "./caption-replay";
 
@@ -17,6 +18,38 @@ interface ReplayCase {
 }
 
 describe("createCaptionReplay", () => {
+  it("A-6-4(b'''') preserves fallback in both live relays", () => {
+    expect(
+      createRecognitionRelays({
+        id: 9,
+        text: "original",
+        ja: "original",
+        fallback: true,
+        final: true,
+        at: "2026-09-02T00:00:00.000Z",
+      }),
+    ).toEqual({
+      recognition: {
+        t: "SW_RECOG",
+        id: 9,
+        text: "original",
+        ja: "original",
+        fallback: true,
+        final: true,
+        at: "2026-09-02T00:00:00.000Z",
+      },
+      caption: {
+        t: "SW_CAPTION",
+        id: 9,
+        text: "original",
+        ja: "original",
+        fallback: true,
+        final: true,
+        at: "2026-09-02T00:00:00.000Z",
+      },
+    });
+  });
+
   it.each<ReplayCase>([
     {
       name:

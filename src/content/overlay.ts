@@ -103,6 +103,7 @@ export interface CaptionLine {
   final: boolean;
   at: string;
   ja?: string;
+  fallback?: boolean;
 }
 
 export type CaptionOverlayStatus =
@@ -167,6 +168,11 @@ export class CaptionOverlay {
   private readonly cueTextSnapshots =
     new WeakMap<Element, string>();
   private lastAcceptedPrimary = "";
+  private lastAcceptedSource = "";
+  private lastAcceptedKind:
+    | "translated"
+    | "fallback"
+    | null = null;
 
   private targetVideo:
     | HTMLVideoElement
@@ -232,6 +238,7 @@ export class CaptionOverlay {
     | null = null;
   private restoreCaptionOpacityOnResume =
     false;
+  private drainMode = false;
 
   private frameId: number | null = null;
   private stableFrameCount = 0;
@@ -477,6 +484,9 @@ export class CaptionOverlay {
     this.captionBarEnabled = false;
 
     this.lastAcceptedPrimary = "";
+    this.lastAcceptedSource = "";
+    this.lastAcceptedKind = null;
+    this.drainMode = false;
     this.resetDisplayBlock();
     this.captionLedger.replaceChildren();
     this.tentativeLine.textContent = "";
@@ -509,7 +519,11 @@ export class CaptionOverlay {
       this.pendingFinals.clear();
 
       for (const line of pending) {
-        this.acceptCommittedClause(line);
+        this.acceptCommittedClause({
+          ...line,
+          ja: line.text,
+          fallback: true,
+        });
       }
     }
 
@@ -537,7 +551,8 @@ export class CaptionOverlay {
   setPlaybackPaused(paused: boolean): void {
     if (
       this.destroyed ||
-      this.playbackPaused === paused
+      this.playbackPaused === paused ||
+      (paused && this.drainMode)
     ) {
       return;
     }
@@ -548,6 +563,25 @@ export class CaptionOverlay {
     }
 
     this.resumeCaptionDisplay();
+  }
+
+  beginDrain(): void {
+    if (
+      this.destroyed ||
+      this.drainMode
+    ) {
+      return;
+    }
+
+    this.drainMode = true;
+
+    if (this.playbackPaused) {
+      this.resumeCaptionDisplay();
+    }
+  }
+
+  endDrain(): void {
+    this.drainMode = false;
   }
 
   clearPlaybackFreezeOnSeek(): void {
@@ -615,10 +649,13 @@ export class CaptionOverlay {
   hasPendingCaption(): boolean {
     return (
       this.hasUnrenderedActiveCuePage() ||
-      this.activeCue !== null ||
       this.waitingCues.length > 0 ||
       this.pendingFinals.size > 0 ||
-      this.tentativeLine.textContent !== ""
+      this.activeCue !== null ||
+      this.tentativeLine.textContent !== "" ||
+      this.deferredTentative !== null ||
+      this.suspendedCaptionFade !== null ||
+      this.suspendedCaptionRemoval !== null
     );
   }
 
@@ -666,6 +703,7 @@ export class CaptionOverlay {
     this.deferredTentative = null;
     this.deferredTentativeClearThroughId =
       null;
+    this.drainMode = false;
     this.playbackPaused = false;
     this.playbackPausedAt = null;
     this.targetVideo = null;
@@ -771,7 +809,8 @@ export class CaptionOverlay {
         this.activeCue === null &&
         this.tentativeLine.textContent === ""
       ) ||
-      this.waitingCues.length > 0
+      this.waitingCues.length > 0 ||
+      this.pendingFinals.size > 0
     ) {
       this.suspendedCaptionFade = null;
       this.suspendedCaptionRemoval = null;
@@ -939,15 +978,22 @@ export class CaptionOverlay {
         );
       }
 
+      this.cancelCaptionFade();
       return;
     }
 
     this.pendingFinals.delete(line.id);
+    this.cancelCaptionFade();
     this.acceptCommittedClause({
       ...line,
       text,
       final: true,
-      ...(ja === "" ? {} : { ja }),
+      ...(ja === ""
+        ? {
+            ja: text,
+            fallback: true,
+          }
+        : { ja }),
     });
   }
 
@@ -979,33 +1025,66 @@ export class CaptionOverlay {
     // appended.
     const fullPrimary =
       this.resolvePrimaryText(line);
+    const source = line.text.trim();
+    const kind =
+      line.fallback === true
+        ? "fallback"
+        : "translated";
+    const isRevision =
+      this.lastAcceptedSource !== "" &&
+      source.startsWith(
+        this.lastAcceptedSource,
+      );
     let primary = fullPrimary;
+    let sourceDiff = false;
 
-    if (
-      this.lastAcceptedPrimary !== "" &&
-      primary.startsWith(
-        this.lastAcceptedPrimary,
-      )
-    ) {
-      primary = primary
-        .slice(
-          this.lastAcceptedPrimary.length,
-        )
-        .trimStart();
+    if (isRevision) {
+      if (
+        this.lastAcceptedKind ===
+          "translated" &&
+        kind === "translated"
+      ) {
+        if (
+          this.lastAcceptedPrimary !== "" &&
+          primary.startsWith(
+            this.lastAcceptedPrimary,
+          )
+        ) {
+          primary = primary
+            .slice(
+              this.lastAcceptedPrimary.length,
+            )
+            .trimStart();
+        }
+      } else {
+        primary = source
+          .slice(
+            this.lastAcceptedSource.length,
+          )
+          .trimStart();
+        sourceDiff = true;
+      }
     }
 
     if (fullPrimary !== "") {
       this.lastAcceptedPrimary = fullPrimary;
     }
 
+    if (source !== "") {
+      this.lastAcceptedSource = source;
+      this.lastAcceptedKind = kind;
+    }
+
     const cues =
       this.createCueSegments(
         line,
         primary,
+        sourceDiff,
       );
 
     if (cues.length === 0) {
       this.acceptedFinalIds.add(line.id);
+      this.scheduleCaptionFade();
       return;
     }
 
@@ -1040,6 +1119,7 @@ export class CaptionOverlay {
   private createCueSegments(
     line: CaptionLine,
     primaryOverride?: string,
+    suppressOriginal = false,
   ): CueData[] {
     const source = line.text.trim();
     const translated =
@@ -1059,9 +1139,13 @@ export class CaptionOverlay {
       primary,
       MAX_CUE_UNITS,
     );
+    const fallback =
+      line.fallback === true ||
+      useEnglish;
     const original =
       this.showOriginal &&
-      !useEnglish &&
+      !suppressOriginal &&
+      !fallback &&
       translated !== source
         ? clampTail(
             source,
@@ -1075,6 +1159,7 @@ export class CaptionOverlay {
         sourceIds: [line.id],
         primaryText: part,
         originalText: original,
+        fallback,
         formattedPrimary:
           wrapCueText(
             part,
@@ -2393,6 +2478,7 @@ export class CaptionOverlay {
         this.tentativeLine.textContent === ""
       ) ||
       this.waitingCues.length > 0 ||
+      this.pendingFinals.size > 0 ||
       this.hasUnrenderedActiveCuePage() ||
       this.captionFadeTimerId !== null ||
       this.captionRemovalTimerId !== null ||
@@ -2438,6 +2524,7 @@ export class CaptionOverlay {
           this.captionRevision !==
             expiringRevision ||
           this.waitingCues.length > 0 ||
+          this.pendingFinals.size > 0 ||
           this.hasUnrenderedActiveCuePage()
         ) {
           return;
@@ -2487,6 +2574,7 @@ export class CaptionOverlay {
           this.captionRevision !==
             expiringRevision ||
           this.waitingCues.length > 0 ||
+          this.pendingFinals.size > 0 ||
           this.hasUnrenderedActiveCuePage()
         ) {
           return;

@@ -67,6 +67,7 @@ import {
 } from "../shared/explicit-stop-drain";
 import {
   createCaptionReplay,
+  createRecognitionRelays,
 } from "./caption-replay";
 
 const OFFSCREEN_DOCUMENT_PATH =
@@ -3314,16 +3315,10 @@ function handleOffscreenRecognition(
     return;
   }
 
-  const relayed: SwRecognitionMessage = {
-    t: "SW_RECOG",
-    id: message.id,
-    text: message.text,
-    final: message.final,
-    at: message.at,
-    ...(message.ja === undefined
-      ? {}
-      : { ja: message.ja }),
-  };
+  const {
+    recognition: relayed,
+    caption,
+  } = createRecognitionRelays(message);
 
   recognitionLines.set(
     relayed.id,
@@ -3346,17 +3341,6 @@ function handleOffscreenRecognition(
   if (content === undefined) {
     return;
   }
-
-  const caption: SwCaptionMessage = {
-    t: "SW_CAPTION",
-    id: message.id,
-    text: message.text,
-    final: message.final,
-    at: message.at,
-    ...(message.ja === undefined
-      ? {}
-      : { ja: message.ja }),
-  };
 
   postCaption(content, caption);
 }

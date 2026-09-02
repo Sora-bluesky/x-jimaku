@@ -12,11 +12,29 @@ import {
 import {
   MAX_CONTEXT_TERMS,
 } from "../shared/messages";
+import {
+  createCaptureState,
+} from "../shared/state";
+import {
+  CUE_MINIMUM_DISPLAY_MS,
+} from "./overlay";
 
 let extractPostContextTerms:
   typeof import("./index").extractPostContextTerms;
 let handleOffscreenDevLog:
   typeof import("./index").handleOffscreenDevLog;
+let handleCaptureState:
+  typeof import("./index").handleCaptureState;
+let ensureOverlay:
+  typeof import("./index").ensureOverlay;
+
+class ResizeObserverStub {
+  observe(): void {
+  }
+
+  disconnect(): void {
+  }
+}
 
 function setPostText(text: string): void {
   document.body.innerHTML =
@@ -52,6 +70,8 @@ beforeAll(async () => {
   ({
     extractPostContextTerms,
     handleOffscreenDevLog,
+    handleCaptureState,
+    ensureOverlay,
   } = await import("./index"));
 });
 
@@ -105,6 +125,88 @@ describe("handleOffscreenDevLog", () => {
       }
     },
   );
+});
+
+describe("explicit-stop overlay lifecycle", () => {
+  it("A-6-4(c') destroys timed-out drain state before the next capture", () => {
+    vi.useFakeTimers();
+    vi.stubGlobal(
+      "ResizeObserver",
+      ResizeObserverStub,
+    );
+    vi.stubGlobal(
+      "requestAnimationFrame",
+      vi.fn((): number => 1),
+    );
+    vi.stubGlobal(
+      "cancelAnimationFrame",
+      vi.fn(),
+    );
+
+    try {
+      handleCaptureState(
+        createCaptureState("starting", {
+          requestId: "request-old",
+        }),
+      );
+      const first = ensureOverlay();
+      first.beginDrain();
+
+      handleCaptureState(
+        createCaptureState("idle", {
+          requestId: "request-old",
+        }),
+      );
+
+      expect(
+        document.querySelector(
+          "#xjsub-host",
+        ),
+      ).toBeNull();
+
+      handleCaptureState(
+        createCaptureState("starting", {
+          requestId: "request-new",
+        }),
+      );
+      const second = ensureOverlay();
+
+      expect(second).not.toBe(first);
+
+      second.showCaption({
+        id: 1,
+        text: "source",
+        ja:
+          "おネち5ナbた1）6c オネz0と3そ4たく0 2ア pてせ、ぬ c ）、",
+        final: true,
+        at: "2026-09-02T00:00:00.000Z",
+      });
+      second.setPlaybackPaused(true);
+      vi.advanceTimersByTime(
+        CUE_MINIMUM_DISPLAY_MS,
+      );
+
+      const host =
+        document.querySelector(
+          "#xjsub-host",
+        );
+      const cue =
+        host?.shadowRoot?.querySelector<
+          HTMLElement
+        >(".caption-cue");
+
+      expect(cue?.dataset.pageId).toBe(
+        "0",
+      );
+    } finally {
+      handleCaptureState(
+        createCaptureState("idle", {
+          requestId: "request-new",
+        }),
+      );
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe("extractPostContextTerms", () => {

@@ -11,6 +11,7 @@ import {
   stripBalancedWrappingPair,
   stripCodeFence,
   stripTranslationLabel,
+  TRANSLATION_DEADLINE_MS,
   TRANSLATOR_CREATE_TIMEOUT_MS,
   TranslationEngine,
 } from "./translate";
@@ -18,16 +19,24 @@ import {
 interface Deferred<T> {
   promise: Promise<T>;
   resolve(value: T): void;
+  reject(error: unknown): void;
 }
 
 function createDeferred<T>(): Deferred<T> {
   let resolve:
     | ((value: T) => void)
     | undefined;
+  let reject:
+    | ((error: unknown) => void)
+    | undefined;
 
   const promise = new Promise<T>(
-    (promiseResolve) => {
+    (
+      promiseResolve,
+      promiseReject,
+    ) => {
       resolve = promiseResolve;
+      reject = promiseReject;
     },
   );
 
@@ -36,6 +45,42 @@ function createDeferred<T>(): Deferred<T> {
     resolve(value) {
       resolve?.(value);
     },
+    reject(error) {
+      reject?.(error);
+    },
+  };
+}
+
+function createGateEngine(
+  backend:
+    | "translator"
+    | "prompt-api" = "translator",
+) {
+  const onSettled = vi.fn();
+  const onTranslated = vi.fn();
+  const onPathChanged = vi.fn();
+  const engine =
+    new TranslationEngine({
+      backend,
+      getContext: () => ({
+        recentPairs: [],
+        properNouns: [],
+      }),
+      requestContentTranslation:
+        vi.fn(async () => ({
+          available: false,
+          ja: "",
+        })),
+      onSettled,
+      onTranslated,
+      onPathChanged,
+    });
+
+  return {
+    engine,
+    onSettled,
+    onTranslated,
+    onPathChanged,
   };
 }
 
@@ -886,6 +931,355 @@ describe(
     );
   },
 );
+
+describe("TranslationEngine terminal protocol", () => {
+  it("A-6-4(b') settles drop, destroy, and drain timeout in id order", async () => {
+    vi.useFakeTimers();
+    const never =
+      new Promise<string>(() => {
+      });
+
+    installTranslator(() => never);
+    const first = createGateEngine();
+
+    first.engine.enqueue({
+      id: 1,
+      text: "one",
+      final: true,
+      at: "2026-09-02T00:00:01.000Z",
+    });
+    first.engine.enqueue({
+      id: 2,
+      text: "two",
+      final: true,
+      at: "2026-09-02T00:00:02.000Z",
+    });
+    first.engine.enqueue({
+      id: 3,
+      text: "three",
+      final: true,
+      at: "2026-09-02T00:00:03.000Z",
+    });
+
+    expect(first.onSettled.mock.calls)
+      .toEqual([[[2]]]);
+
+    first.engine.destroy();
+
+    expect(first.onSettled.mock.calls)
+      .toEqual([
+        [[2]],
+        [[1, 3]],
+      ]);
+
+    installTranslator(() => never);
+    const timed = createGateEngine();
+    timed.engine.enqueue({
+      id: 4,
+      text: "four",
+      final: true,
+      at: "2026-09-02T00:00:04.000Z",
+    });
+    const drain = timed.engine.drain();
+
+    await vi.advanceTimersByTimeAsync(
+      TRANSLATOR_CREATE_TIMEOUT_MS,
+    );
+
+    await expect(drain).resolves.toBe(
+      false,
+    );
+    expect(timed.onSettled)
+      .toHaveBeenCalledWith([4]);
+  });
+
+  it("A-6-4(b''') settles null result and none-path queue splice", async () => {
+    const gate = createGateEngine();
+
+    gate.engine.enqueue({
+      id: 1,
+      text: "one",
+      final: true,
+      at: "2026-09-02T00:00:01.000Z",
+    });
+    gate.engine.enqueue(
+      {
+        id: 2,
+        text: "two",
+        final: true,
+        at: "2026-09-02T00:00:02.000Z",
+      },
+      { stopFlush: true },
+    );
+    gate.engine.enqueue(
+      {
+        id: 3,
+        text: "three",
+        final: true,
+        at: "2026-09-02T00:00:03.000Z",
+      },
+      { stopFlush: true },
+    );
+
+    await vi.waitFor(() => {
+      expect(gate.onPathChanged)
+        .toHaveBeenCalledWith("none");
+    });
+
+    expect(gate.onSettled.mock.calls)
+      .toEqual([
+        [[2, 3]],
+        [[1]],
+      ]);
+  });
+
+  it.each([
+    "translate",
+    "selectBestPath",
+    "create",
+  ] as const)(
+    "A-6-4(b'''-2) releases a hung %s attempt and processes id 2",
+    async (hangAt) => {
+      vi.useFakeTimers();
+      const never =
+        new Promise<string>(() => {
+        });
+      let backend:
+        | "translator"
+        | "prompt-api" = "translator";
+
+      if (hangAt === "translate") {
+        let callCount = 0;
+        installTranslator(async () => {
+          callCount += 1;
+          return callCount === 1
+            ? never
+            : "二";
+        });
+      } else {
+        backend = "prompt-api";
+        installTranslator(async () => "二");
+
+        if (
+          hangAt === "selectBestPath"
+        ) {
+          const availability = vi
+            .fn()
+            .mockImplementationOnce(
+              () => never,
+            )
+            .mockResolvedValue(
+              "unavailable",
+            );
+
+          vi.stubGlobal("LanguageModel", {
+            availability,
+            create: vi.fn(),
+          });
+        } else {
+          vi.stubGlobal("LanguageModel", {
+            availability: vi.fn(
+              async () => "available",
+            ),
+            create: vi.fn(
+              () => never,
+            ),
+          });
+        }
+      }
+
+      const gate =
+        createGateEngine(backend);
+
+      gate.engine.enqueue({
+        id: 1,
+        text: "hung",
+        final: true,
+        at: "2026-09-02T00:00:01.000Z",
+      });
+
+      await vi.advanceTimersByTimeAsync(
+        TRANSLATION_DEADLINE_MS - 1_000,
+      );
+
+      gate.engine.enqueue({
+        id: 2,
+        text: "next",
+        final: true,
+        at: "2026-09-02T00:00:02.000Z",
+      });
+
+      await vi.advanceTimersByTimeAsync(
+        1_000,
+      );
+
+      await vi.waitFor(() => {
+        expect(gate.onTranslated)
+          .toHaveBeenCalledWith(
+            expect.objectContaining({
+              id: 2,
+            }),
+            "二",
+          );
+      });
+
+      expect(gate.onSettled)
+        .toHaveBeenCalledWith([1]);
+      expect(
+        (
+          gate.engine as unknown as {
+            processing: boolean;
+          }
+        ).processing,
+      ).toBe(false);
+
+      gate.engine.destroy();
+    },
+  );
+
+  it.each([
+    "success",
+    "failure",
+  ] as const)(
+    "A-6-4(b'''-3) ignores stale late %s without mutating engine state",
+    async (lateKind) => {
+      vi.useFakeTimers();
+      const late = createDeferred<string>();
+      const secondPrompt =
+        new Promise<string>(() => {
+        });
+      const firstClone = {
+        prompt: vi.fn(
+          () => late.promise,
+        ),
+        destroy: vi.fn(),
+      };
+      const secondClone = {
+        prompt: vi.fn(
+          () => secondPrompt,
+        ),
+        destroy: vi.fn(),
+      };
+      const base = {
+        clone: vi.fn()
+          .mockResolvedValueOnce(
+            firstClone,
+          )
+          .mockResolvedValueOnce(
+            secondClone,
+          ),
+        destroy: vi.fn(),
+      };
+
+      vi.stubGlobal("LanguageModel", {
+        availability: vi.fn(
+          async () => "available",
+        ),
+        create: vi.fn(
+          async () => base,
+        ),
+      });
+
+      const gate =
+        createGateEngine("prompt-api");
+
+      gate.engine.enqueue({
+        id: 1,
+        text: "late",
+        final: true,
+        at: "2026-09-02T00:00:01.000Z",
+      });
+
+      await vi.advanceTimersByTimeAsync(
+        TRANSLATION_DEADLINE_MS - 1_000,
+      );
+
+      gate.engine.enqueue({
+        id: 2,
+        text: "current",
+        final: true,
+        at: "2026-09-02T00:00:02.000Z",
+      });
+
+      await vi.advanceTimersByTimeAsync(
+        1_000,
+      );
+      await vi.waitFor(() => {
+        expect(base.clone)
+          .toHaveBeenCalledTimes(2);
+      });
+
+      const internal =
+        gate.engine as unknown as {
+          recentHistory: unknown[];
+          languageModel: unknown;
+          languageModelClone: unknown;
+          path: unknown;
+          queue: unknown[];
+          processing: boolean;
+          drainResolvers: Set<unknown>;
+        };
+      const drain = gate.engine.drain();
+      const snapshot = {
+        history: [...internal.recentHistory],
+        model: internal.languageModel,
+        clone: internal.languageModelClone,
+        path: internal.path,
+        queueLength: internal.queue.length,
+        processing: internal.processing,
+        drainWaiters:
+          internal.drainResolvers.size,
+        pathCalls:
+          gate.onPathChanged.mock.calls
+            .length,
+      };
+
+      if (lateKind === "success") {
+        late.resolve("遅延");
+      } else {
+        late.reject(
+          new Error("late failure"),
+        );
+      }
+
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(internal.recentHistory)
+        .toEqual(snapshot.history);
+      expect(internal.languageModel)
+        .toBe(snapshot.model);
+      expect(internal.languageModelClone)
+        .toBe(snapshot.clone);
+      expect(internal.path)
+        .toBe(snapshot.path);
+      expect(internal.queue)
+        .toHaveLength(
+          snapshot.queueLength,
+        );
+      expect(internal.processing)
+        .toBe(snapshot.processing);
+      expect(internal.drainResolvers.size)
+        .toBe(snapshot.drainWaiters);
+      expect(gate.onPathChanged)
+        .toHaveBeenCalledTimes(
+          snapshot.pathCalls,
+        );
+      expect(gate.onTranslated)
+        .not.toHaveBeenCalled();
+      expect(gate.onSettled.mock.calls)
+        .toEqual([[[1]]]);
+      expect(firstClone.destroy)
+        .not.toHaveBeenCalled();
+      expect(secondClone.destroy)
+        .not.toHaveBeenCalled();
+      expect(base.destroy)
+        .not.toHaveBeenCalled();
+
+      gate.engine.destroy();
+      await drain;
+    },
+  );
+});
 
 describe("TranslationEngine drain", () => {
   it("delivers the final clause before a successful drain completes", async () => {

@@ -162,6 +162,38 @@ function getPageId(): string | undefined {
   ).dataset.pageId;
 }
 
+function getOriginalText(): string {
+  return requireElement<HTMLDivElement>(
+    getOverlayDom().cueContainer,
+    ".caption-original",
+  ).textContent ?? "";
+}
+
+function getLedgerTexts(): string[] {
+  return [
+    ...getOverlayDom()
+      .captionLedger.children,
+  ].map(
+    (entry) => entry.textContent ?? "",
+  );
+}
+
+function getWaitingCues(
+  overlay: CaptionOverlay,
+): Array<{
+  sourceIds: readonly number[];
+  fallback?: boolean;
+}> {
+  return (
+    overlay as unknown as {
+      waitingCues: Array<{
+        sourceIds: readonly number[];
+        fallback?: boolean;
+      }>;
+    }
+  ).waitingCues;
+}
+
 function expectLinesExactlyOnce(
   pages:
     readonly (
@@ -672,7 +704,12 @@ describe(
       () => {
         const overlay = createOverlay({});
 
-        showFinal(overlay, 1, "これは途中まで");
+        showFinal(
+          overlay,
+          1,
+          "これは途中まで",
+          "This is a sentence that",
+        );
         vi.advanceTimersByTime(
           CUE_MINIMUM_DISPLAY_MS,
         );
@@ -680,6 +717,7 @@ describe(
           overlay,
           2,
           "これは途中まで届いた文です。",
+          "This is a sentence that arrived.",
         );
 
         const seen = new Set<string>();
@@ -961,6 +999,300 @@ describe(
           "",
         ]);
         expect(getPageId()).toBe("1");
+      },
+    );
+
+    it(
+      "A-6-4(a) waits for the remaining page and fade before completing drain",
+      () => {
+        const onCaptionFadeOut = vi.fn();
+        const overlay = createOverlay({
+          onCaptionFadeOut,
+        });
+
+        showFinal(
+          overlay,
+          1,
+          THREE_LINE_TEXT,
+        );
+        overlay.beginDrain();
+
+        vi.advanceTimersByTime(
+          CUE_MINIMUM_DISPLAY_MS - 1,
+        );
+        expect(getPageId()).toBe("0");
+        expect(onCaptionFadeOut)
+          .not.toHaveBeenCalled();
+
+        vi.advanceTimersByTime(1);
+        expect(getPageId()).toBe("1");
+        expect(onCaptionFadeOut)
+          .not.toHaveBeenCalled();
+
+        vi.advanceTimersByTime(
+          CAPTION_VISIBLE_MS +
+          CAPTION_FADE_MS,
+        );
+        expect(onCaptionFadeOut)
+          .toHaveBeenCalledOnce();
+        expect(
+          overlay.hasPendingCaption(),
+        ).toBe(false);
+      },
+    );
+
+    it(
+      "A-6-4(b) waits for fallback and normalizes both none arrival orders",
+      () => {
+        for (
+          const order of [
+            "fallback-first",
+            "none-first",
+          ] as const
+        ) {
+          const onCaptionFadeOut = vi.fn();
+          const overlay = createOverlay({
+            showOriginal: true,
+            onCaptionFadeOut,
+          });
+
+          overlay.setTranslationPath(
+            "language-model",
+          );
+          overlay.showCaption({
+            id: 40,
+            text: "Original caption",
+            final: true,
+            at: "2026-09-02T00:00:00.000Z",
+          });
+          overlay.beginDrain();
+
+          expect(onCaptionFadeOut)
+            .not.toHaveBeenCalled();
+          expect(
+            overlay.hasPendingCaption(),
+          ).toBe(true);
+
+          const fallback = {
+            id: 40,
+            text: "Original caption",
+            ja: "Original caption",
+            fallback: true,
+            final: true,
+            at: "2026-09-02T00:00:00.001Z",
+          };
+
+          if (order === "none-first") {
+            overlay.setTranslationPath(
+              "none",
+            );
+            overlay.showCaption(fallback);
+          } else {
+            overlay.showCaption(fallback);
+            overlay.setTranslationPath(
+              "none",
+            );
+          }
+
+          expect(getBlockLines()).toEqual([
+            "Original caption",
+            "",
+          ]);
+          expect(getOriginalText()).toBe("");
+          expect(getLedgerTexts()).toEqual([
+            "Original caption",
+          ]);
+
+          vi.advanceTimersByTime(
+            CAPTION_VISIBLE_MS +
+            CAPTION_FADE_MS,
+          );
+          expect(onCaptionFadeOut)
+            .toHaveBeenCalledOnce();
+
+          overlay.destroy();
+        }
+      },
+    );
+
+    it(
+      "A-6-4(b''''') uses source watermark and keeps fallback queue kinds separate",
+      () => {
+        const overlay = createOverlay({
+          showOriginal: true,
+        });
+        overlay.setTranslationPath(
+          "language-model",
+        );
+
+        overlay.showCaption({
+          id: 1,
+          text: "A B",
+          ja: "ja1",
+          final: true,
+          at: "2026-09-02T00:00:01.000Z",
+        });
+        overlay.showCaption({
+          id: 2,
+          text: "A B C D",
+          ja: "A B C D",
+          fallback: true,
+          final: true,
+          at: "2026-09-02T00:00:02.000Z",
+        });
+        overlay.showCaption({
+          id: 3,
+          text: "A B C D E F",
+          ja: "ja3",
+          final: true,
+          at: "2026-09-02T00:00:03.000Z",
+        });
+
+        expect(getBlockLines()).toEqual([
+          "ja1",
+          "",
+        ]);
+        expect(getOriginalText()).toBe(
+          "A B",
+        );
+        expect(getLedgerTexts()).toEqual([
+          "ja1",
+          "C D",
+          "E F",
+        ]);
+
+        vi.advanceTimersByTime(
+          CUE_MINIMUM_DISPLAY_MS,
+        );
+        expect(getBlockLines()).toEqual([
+          "C D",
+          "",
+        ]);
+        expect(getOriginalText()).toBe("");
+
+        vi.advanceTimersByTime(
+          CUE_MINIMUM_DISPLAY_MS,
+        );
+        expect(getBlockLines()).toEqual([
+          "E F",
+          "",
+        ]);
+        expect(getOriginalText()).toBe("");
+
+        overlay.destroy();
+        const queued = createOverlay();
+        showFinal(
+          queued,
+          10,
+          "active",
+          "root",
+        );
+        showFinal(
+          queued,
+          11,
+          "日本語",
+          "base",
+        );
+
+        let source = "base";
+
+        for (
+          let id = 12;
+          id <= 19;
+          id += 1
+        ) {
+          source += String
+            .fromCharCode(96 + id)
+            .repeat(14);
+          queued.showCaption({
+            id,
+            text: source,
+            ja: source,
+            fallback: true,
+            final: true,
+            at:
+              `2026-09-02T00:00:${id}.000Z`,
+          });
+
+          if (id === 12) {
+            expect(
+              getWaitingCues(queued)
+                .slice(0, 2)
+                .map((cue) => ({
+                  ids: cue.sourceIds,
+                  fallback: cue.fallback,
+                })),
+            ).toEqual([
+              {
+                ids: [11],
+                fallback: false,
+              },
+              {
+                ids: [12],
+                fallback: true,
+              },
+            ]);
+          }
+        }
+
+        expect(
+          getWaitingCues(queued).length,
+        ).toBeLessThanOrEqual(6);
+      },
+    );
+
+    it(
+      "A-6-4(c) pauses outside drain and keeps the clock running during drain",
+      () => {
+        let overlay: CaptionOverlay;
+        const onCaptionFadeOut = vi.fn(
+          () => overlay.endDrain(),
+        );
+        overlay = createOverlay({
+          onCaptionFadeOut,
+        });
+
+        showFinal(
+          overlay,
+          1,
+          THREE_LINE_TEXT,
+        );
+        const firstPage = getBlockLines();
+
+        vi.advanceTimersByTime(500);
+        overlay.setPlaybackPaused(true);
+        vi.advanceTimersByTime(1_000);
+
+        expect(getBlockLines()).toEqual(
+          firstPage,
+        );
+
+        overlay.beginDrain();
+        overlay.setPlaybackPaused(true);
+        vi.advanceTimersByTime(
+          CUE_MINIMUM_DISPLAY_MS - 500,
+        );
+
+        expect(getPageId()).toBe("1");
+
+        vi.advanceTimersByTime(
+          CAPTION_VISIBLE_MS +
+          CAPTION_FADE_MS,
+        );
+        expect(onCaptionFadeOut)
+          .toHaveBeenCalledOnce();
+
+        showFinal(
+          overlay,
+          2,
+          THREE_LINE_TEXT,
+        );
+        overlay.setPlaybackPaused(true);
+        vi.advanceTimersByTime(
+          CUE_MINIMUM_DISPLAY_MS,
+        );
+
+        expect(getPageId()).toBe("0");
       },
     );
 

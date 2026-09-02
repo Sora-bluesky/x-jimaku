@@ -2172,7 +2172,7 @@ function clearActiveTap(
   refreshSilentInputHint();
 }
 
-function handleCaptureState(
+export function handleCaptureState(
   state: CaptureState,
   drain = false,
 ): void {
@@ -2270,6 +2270,7 @@ function handleCaptureState(
         clearPendingContextTerms(
           state.requestId,
         );
+        captionOverlay?.beginDrain();
         cancelOverlayDestroy();
         refreshSilentInputHint();
         return;
@@ -2391,6 +2392,7 @@ function postExplicitStopDrainComplete(
   if (postContentMessage(message)) {
     drainCompleteSentRequestId =
       requestId;
+    captionOverlay?.endDrain();
   }
 }
 
@@ -2406,12 +2408,13 @@ function isDrainingRequest(
 
 function clearExplicitStopDrainState():
   void {
+  captionOverlay?.endDrain();
   drainingRequestId = null;
   drainReadyRequestId = null;
   drainCompleteSentRequestId = null;
 }
 
-function ensureOverlay(): CaptionOverlay {
+export function ensureOverlay(): CaptionOverlay {
   if (captionOverlay !== null) {
     syncOverlayPlaybackGate(
       captionOverlay,
@@ -2428,7 +2431,8 @@ function ensureOverlay(): CaptionOverlay {
       if (
         drainReadyRequestId !== null &&
         drainReadyRequestId ===
-          drainingRequestId
+          drainingRequestId &&
+        !overlay.hasPendingCaption()
       ) {
         postExplicitStopDrainComplete(
           drainReadyRequestId,
@@ -2452,6 +2456,11 @@ function ensureOverlay(): CaptionOverlay {
   overlay.setTranslationPath(
     activeTranslationPath,
   );
+
+  if (drainingRequestId !== null) {
+    overlay.beginDrain();
+  }
+
   captionOverlay = overlay;
   refreshSilentInputHint(overlay);
   syncOverlayPlaybackGate(overlay);

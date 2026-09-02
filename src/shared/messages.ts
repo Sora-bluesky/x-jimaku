@@ -356,6 +356,7 @@ export interface RecognitionPayload {
   final: boolean;
   at: string;
   ja?: string;
+  fallback?: boolean;
 }
 
 export interface OffRecognitionMessage
@@ -1075,6 +1076,10 @@ function isRecognitionPayload(
     (
       value.ja === undefined ||
       typeof value.ja === "string"
+    ) &&
+    (
+      value.fallback === undefined ||
+      typeof value.fallback === "boolean"
     )
   );
 }

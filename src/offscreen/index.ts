@@ -53,6 +53,9 @@ import {
   SentenceAssembler,
 } from "./sentence-assembler";
 import {
+  TerminalLedger,
+} from "./terminal-ledger";
+import {
   isMostlyJapanese,
   TranslationEngine,
   type ContentTranslationResponse,
@@ -133,6 +136,9 @@ let activeSentenceAssemblerRequestId:
   | null = null;
 let activeTranslationEngine:
   | TranslationEngine
+  | null = null;
+let activeTerminalLedger:
+  | TerminalLedger
   | null = null;
 let activeTranslationRequestId:
   | string
@@ -910,6 +916,16 @@ async function handleCaptureStart(
       }),
     );
 
+    const terminalLedger =
+      new TerminalLedger(
+        requestId,
+        (message) => {
+          postFinalRecognition(
+            requestId,
+            message,
+          );
+        },
+      );
     const translationEngine =
       new TranslationEngine({
         backend:
@@ -945,17 +961,25 @@ async function handleCaptureStart(
             return;
           }
 
-          postFinalRecognition(
-            requestId,
-            {
-              t: "OFF_RECOG",
-              id: line.id,
-              text: line.text,
-              final: true,
-              at: line.at,
-              ja,
-            },
+          terminalLedger.translated(
+            line.id,
+            ja,
           );
+        },
+
+        onSettled(ids) {
+          if (
+            activeTranslationEngine !==
+              translationEngine ||
+            activeTranslationRequestId !==
+              requestId ||
+            activeTerminalLedger !==
+              terminalLedger
+          ) {
+            return;
+          }
+
+          terminalLedger.fallback(ids);
         },
 
         onPathChanged(path) {
@@ -975,6 +999,8 @@ async function handleCaptureStart(
 
     activeTranslationEngine =
       translationEngine;
+    activeTerminalLedger =
+      terminalLedger;
     activeTranslationRequestId =
       requestId;
     activeTranslationPath = null;
@@ -1273,9 +1299,17 @@ async function handleCaptureStop(
   try {
     await audioCapture.stop();
 
-    const drained = await drainPromise;
+    await drainPromise;
 
-    if (drain && drained) {
+    if (drain) {
+      if (
+        activeTranslationRequestId ===
+          requestId
+      ) {
+        activeTerminalLedger
+          ?.settlePendingAsFallback();
+      }
+
       await waitForCaptionDrain(requestId);
     }
 
@@ -1418,7 +1452,10 @@ function terminateRecognition(
   finishPendingCaptionDrain(requestId);
 
   activeTranslationEngine?.destroy();
+  activeTerminalLedger
+    ?.settlePendingAsFallback();
   activeTranslationEngine = null;
+  activeTerminalLedger = null;
 
   const translationRequestId =
     activeTranslationRequestId;
@@ -1539,15 +1576,26 @@ function postRecognition(
     return;
   }
 
+  const original: OffRecognitionMessage = {
+    t: "OFF_RECOG",
+    id: line.id,
+    text,
+    final: true,
+    at: line.at,
+  };
+
+  if (
+    activeTranslationRequestId ===
+      requestId
+  ) {
+    activeTerminalLedger?.register(
+      original,
+    );
+  }
+
   postFinalRecognition(
     requestId,
-    {
-      t: "OFF_RECOG",
-      id: line.id,
-      text,
-      final: true,
-      at: line.at,
-    },
+    original,
   );
 
   activeTranslationEngine?.enqueue(
