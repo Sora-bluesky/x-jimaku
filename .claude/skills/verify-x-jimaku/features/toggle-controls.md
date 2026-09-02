@@ -8,7 +8,7 @@ Two entry points turn subtitles on or off for the current tab: the toolbar actio
 - `toggle-shortcut` presses `Ctrl+Shift+9` to do the same without touching the mouse.
 - `toggle-loading-chip` shows `字幕 準備中…N%` while the model loads/warms up.
 - `toggle-active-chip` shows `字幕ON` once ASR is running and producing captions.
-- `toggle-other-badge` shows `対象外` on other videos while capture is active — only when the extension status is `loadingModel` or `running`, and only on videos that are not the capture target, not muted, and visible (`src/content/overlay.ts:1714-1732`, `refreshOtherVideos`).
+- `toggle-other-badge` shows `対象外` on other videos while capture is active — only when the extension status is `loadingModel` or `running`, and only on videos that are not the capture target, not muted, and visible (`src/content/overlay.ts:1747-1783`, `refreshOtherVideos`).
 
 ## How to get to it (user POV)
 
