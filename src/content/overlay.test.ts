@@ -21,8 +21,12 @@ import {
 } from "./cue-text";
 import {
   CaptionOverlay,
+  CUE_ACCELERATED_DISPLAY_MS,
   CUE_MINIMUM_DISPLAY_MS,
 } from "./overlay";
+
+const THREE_LINE_TEXT =
+  "おネち5ナbた1）6c オネz0と3そ4たく0 2ア pてせ、ぬ c ）、";
 
 class ResizeObserverStub {
   observe(): void {
@@ -146,6 +150,40 @@ function getBlockLines():
     lines[0]?.textContent ?? "",
     lines[1]?.textContent ?? "",
   ];
+}
+
+function getPageId(): string | undefined {
+  const { cueContainer } =
+    getOverlayDom();
+
+  return requireElement<HTMLDivElement>(
+    cueContainer,
+    ".caption-cue",
+  ).dataset.pageId;
+}
+
+function expectLinesExactlyOnce(
+  pages:
+    readonly (
+      readonly [string, string]
+    )[],
+  inputLines: readonly string[],
+): void {
+  const displayedLines = pages
+    .flatMap((page) => page)
+    .filter((line) => line !== "");
+
+  expect(displayedLines).toHaveLength(
+    inputLines.length,
+  );
+
+  for (const inputLine of inputLines) {
+    expect(
+      displayedLines.filter(
+        (line) => line === inputLine,
+      ),
+    ).toHaveLength(1);
+  }
 }
 
 function showFinal(
@@ -395,9 +433,7 @@ describe(
         ).toHaveLength(1);
         expect(
           cueContainer.textContent,
-        ).toBe(
-          "最初の字幕次の字幕",
-        );
+        ).toBe("次の字幕");
         expect(
           requireElement<HTMLDivElement>(
             cueContainer,
@@ -411,9 +447,7 @@ describe(
 
         expect(
           cueContainer.textContent,
-        ).toBe(
-          "最初の字幕次の字幕",
-        );
+        ).toBe("次の字幕");
         expect(
           cueContainer.querySelectorAll(
             ".caption-cue",
@@ -425,98 +459,63 @@ describe(
 );
 
 describe(
-  "CaptionOverlay append display buffer",
+  "CaptionOverlay page display",
   () => {
     it(
-      "keeps the previous bottom line when new clauses arrive",
+      "renders consecutive one-line clauses as separate pages",
       () => {
         const overlay = createOverlay();
+        const pages:
+          Array<[string, string]> = [];
 
         showFinal(overlay, 1, "A");
-        expect(getBlockLines()).toEqual(
-          ["", "A"],
-        );
+        pages.push(getBlockLines());
 
         showFinal(overlay, 2, "B");
         vi.advanceTimersByTime(
           CUE_MINIMUM_DISPLAY_MS,
         );
-        expect(getBlockLines()).toEqual(
-          ["A", "B"],
-        );
+        pages.push(getBlockLines());
 
-        showFinal(overlay, 3, "C");
-        vi.advanceTimersByTime(
-          CUE_MINIMUM_DISPLAY_MS,
-        );
-        expect(getBlockLines()).toEqual(
-          ["B", "C"],
+        expect(pages).toEqual([
+          ["A", ""],
+          ["B", ""],
+        ]);
+        expectLinesExactlyOnce(
+          pages,
+          ["A", "B"],
         );
       },
     );
 
     it(
-      "scrolls every line of a long clause within the existing cue dwell budget",
+      "renders one wrapped two-line cue as one page",
       () => {
         const overlay = createOverlay();
-        const snapshots:
-          Array<[string, string]> = [];
+        const text =
+          "alpha beta gamma delta epsilon zeta";
+        const inputLines = wrapCueText(
+          text,
+          MAX_LINE_UNITS,
+        ).split("\n");
 
-        showFinal(
-          overlay,
-          1,
-          "あ".repeat(50),
+        expect(inputLines).toHaveLength(2);
+
+        showFinal(overlay, 1, text);
+
+        const pages = [getBlockLines()];
+
+        expect(pages).toEqual([
+          [
+            inputLines[0] ?? "",
+            inputLines[1] ?? "",
+          ],
+        ]);
+        expect(getPageId()).toBe("0");
+        expectLinesExactlyOnce(
+          pages,
+          inputLines,
         );
-        snapshots.push(getBlockLines());
-
-        vi.advanceTimersByTime(
-          CUE_MINIMUM_DISPLAY_MS / 2,
-        );
-        snapshots.push(getBlockLines());
-
-        vi.advanceTimersByTime(
-          CUE_MINIMUM_DISPLAY_MS / 2,
-        );
-        snapshots.push(getBlockLines());
-
-        vi.advanceTimersByTime(
-          CUE_MINIMUM_DISPLAY_MS / 2,
-        );
-        snapshots.push(getBlockLines());
-
-        vi.advanceTimersByTime(
-          CUE_MINIMUM_DISPLAY_MS / 2 - 1,
-        );
-        showFinal(overlay, 2, "次");
-        vi.advanceTimersByTime(1);
-        snapshots.push(getBlockLines());
-
-        for (
-          let index = 1;
-          index < snapshots.length;
-          index += 1
-        ) {
-          expect(
-            snapshots[index]?.[0],
-          ).toBe(
-            snapshots[index - 1]?.[1],
-          );
-        }
-
-        expect(
-          snapshots.every(
-            ([top, bottom]) =>
-              top !== "" || bottom !== "",
-          ),
-        ).toBe(true);
-        expect(
-          getOverlayDom()
-            .cueContainer
-            .querySelector<HTMLElement>(
-              ".caption-cue",
-            )
-            ?.dataset.cueId,
-        ).toBe("2:0");
       },
     );
 
@@ -534,7 +533,7 @@ describe(
         );
 
         expect(getBlockLines()).toEqual(
-          ["", "A"],
+          ["A", ""],
         );
         expect(
           getOverlayDom()
@@ -571,52 +570,100 @@ describe(
     );
 
     it(
-      "surfaces every line of a cue that wraps past two lines",
+      "renders a three-line cue as two dwell-separated pages",
       () => {
-        const overlay = createOverlay({});
-        // wrapCueText breaks this 28-unit part into three lines because the
-        // boundary rules refuse the positions near the budget. The old display
-        // had two line slots with overflow hidden, so the third one vanished.
-        const threeLineText =
-          "おネち5ナbた1）6c オネz0と3そ4たく0 2ア pてせ、ぬ c ）、";
-        const expected = wrapCueText(
-          threeLineText,
+        const overlay = createOverlay();
+        const inputLines = wrapCueText(
+          THREE_LINE_TEXT,
           MAX_LINE_UNITS,
         ).split("\n");
 
-        expect(
-          expected.length,
-        ).toBeGreaterThan(2);
+        expect(inputLines).toHaveLength(3);
 
         showFinal(
           overlay,
           1,
-          threeLineText,
+          THREE_LINE_TEXT,
         );
 
-        // A cue splits its dwell across its lines, so sampling once per dwell
-        // steps over the middle one. Sample both slots at a fraction of it.
-        const seen = new Set<string>();
-        const step = Math.ceil(
-          CUE_MINIMUM_DISPLAY_MS / 10,
+        const firstPage = getBlockLines();
+        const pages:
+          Array<[string, string]> = [
+            firstPage,
+          ];
+        const pageIds = [getPageId()];
+
+        vi.advanceTimersByTime(
+          CUE_MINIMUM_DISPLAY_MS - 1,
         );
 
-        for (
-          let elapsed = 0;
-          elapsed <=
-            CUE_MINIMUM_DISPLAY_MS * 2;
-          elapsed += step
-        ) {
-          for (const slot of getBlockLines()) {
-            if (slot !== "") seen.add(slot);
-          }
+        expect(getBlockLines()).toEqual(
+          firstPage,
+        );
+        expect(getPageId()).toBe("0");
 
-          vi.advanceTimersByTime(step);
-        }
+        vi.advanceTimersByTime(1);
+        pages.push(getBlockLines());
+        pageIds.push(getPageId());
 
-        for (const line of expected) {
-          expect([...seen]).toContain(line);
-        }
+        expect(pages).toEqual([
+          [
+            inputLines[0] ?? "",
+            inputLines[1] ?? "",
+          ],
+          [
+            inputLines[2] ?? "",
+            "",
+          ],
+        ]);
+        expect(pageIds).toEqual([
+          "0",
+          "1",
+        ]);
+        expectLinesExactlyOnce(
+          pages,
+          inputLines,
+        );
+      },
+    );
+
+    it(
+      "uses accelerated dwell before rendering the second page",
+      () => {
+        const overlay = createOverlay();
+        const inputLines = wrapCueText(
+          THREE_LINE_TEXT,
+          MAX_LINE_UNITS,
+        ).split("\n");
+
+        showFinal(
+          overlay,
+          1,
+          THREE_LINE_TEXT,
+        );
+        showFinal(overlay, 2, "queued one");
+        showFinal(overlay, 3, "queued two");
+
+        const firstPage = getBlockLines();
+
+        expect(getPageId()).toBe("0");
+
+        vi.advanceTimersByTime(
+          CUE_ACCELERATED_DISPLAY_MS - 1,
+        );
+
+        expect(getBlockLines()).toEqual(
+          firstPage,
+        );
+        expect(getPageId()).toBe("0");
+
+        vi.advanceTimersByTime(1);
+
+        expect(getBlockLines()).toEqual([
+          inputLines[2] ?? "",
+          "",
+        ]);
+        expect(getPageId()).toBe("1");
       },
     );
 
@@ -669,33 +716,35 @@ describe(
     );
 
     it(
-      "shows a line pending at stop before drain completion",
+      "shows an unrendered page before drain completion",
       () => {
         const onCaptionFadeOut = vi.fn();
         const overlay = createOverlay({
           onCaptionFadeOut,
         });
+        const inputLines = wrapCueText(
+          THREE_LINE_TEXT,
+          MAX_LINE_UNITS,
+        ).split("\n");
 
         showFinal(
           overlay,
           1,
-          "あ".repeat(20),
+          THREE_LINE_TEXT,
         );
-        const first = getBlockLines();
 
-        expect(first[0]).toBe("");
-        expect(first[1]).not.toBe("");
         expect(
           overlay.hasPendingCaption(),
         ).toBe(true);
 
         vi.advanceTimersByTime(
-          CUE_MINIMUM_DISPLAY_MS / 2,
+          CUE_MINIMUM_DISPLAY_MS,
         );
 
-        expect(getBlockLines()[0]).toBe(
-          first[1],
-        );
+        expect(getBlockLines()).toEqual([
+          inputLines[2] ?? "",
+          "",
+        ]);
         expect(onCaptionFadeOut)
           .not.toHaveBeenCalled();
 
@@ -720,7 +769,7 @@ describe(
         showFinal(
           overlay,
           1,
-          "あ".repeat(20),
+          THREE_LINE_TEXT,
         );
         expect(
           getOverlayDom()
@@ -770,7 +819,7 @@ describe(
         showFinal(overlay, 1, "確定");
 
         expect(getBlockLines()).toEqual(
-          ["", "確定"],
+          ["確定", ""],
         );
         expect(
           getOverlayDom()
@@ -780,7 +829,7 @@ describe(
     );
 
     it(
-      "updates one original line and starts empty after reconstruction",
+      "keeps one original line across every page and reconstructs empty",
       () => {
         const overlay = createOverlay({
           showOriginal: true,
@@ -789,32 +838,33 @@ describe(
         showFinal(
           overlay,
           1,
-          "A",
-          "Original one",
-        );
-        showFinal(
-          overlay,
-          2,
-          "B",
-          "Original two",
-        );
-        vi.advanceTimersByTime(
-          CUE_MINIMUM_DISPLAY_MS,
+          THREE_LINE_TEXT,
+          "Original",
         );
 
         const { cueContainer } =
           getOverlayDom();
+        const originalLine =
+          requireElement<HTMLDivElement>(
+            cueContainer,
+            ".caption-original",
+          );
+
         expect(
           cueContainer.querySelectorAll(
             ".caption-original",
           ),
         ).toHaveLength(1);
-        expect(
-          requireElement<HTMLDivElement>(
-            cueContainer,
-            ".caption-original",
-          ).textContent,
-        ).toBe("Original two");
+        expect(originalLine.textContent)
+          .toBe("Original");
+
+        vi.advanceTimersByTime(
+          CUE_MINIMUM_DISPLAY_MS,
+        );
+
+        expect(getPageId()).toBe("1");
+        expect(originalLine.textContent)
+          .toBe("Original");
 
         overlay.destroy();
         createOverlay({
@@ -828,7 +878,7 @@ describe(
     );
 
     it(
-      "keeps queue drops while scrolling the retained cues",
+      "keeps queue drops while paging the retained cues",
       () => {
         const overlay = createOverlay();
         const symbols = [
@@ -865,40 +915,57 @@ describe(
     );
 
     it(
-      "freezes a pending line while playback is paused",
+      "freezes an unrendered page while playback is paused",
       () => {
         const overlay = createOverlay();
+        const inputLines = wrapCueText(
+          THREE_LINE_TEXT,
+          MAX_LINE_UNITS,
+        ).split("\n");
+        const elapsedBeforePause = 500;
 
         showFinal(
           overlay,
           1,
-          "あ".repeat(20),
+          THREE_LINE_TEXT,
         );
-        const first = getBlockLines();
+        const firstPage = getBlockLines();
 
-        vi.advanceTimersByTime(500);
+        vi.advanceTimersByTime(
+          elapsedBeforePause,
+        );
         overlay.setPlaybackPaused(true);
         vi.advanceTimersByTime(1_000);
 
         expect(getBlockLines()).toEqual(
-          first,
+          firstPage,
         );
+        expect(getPageId()).toBe("0");
 
         overlay.setPlaybackPaused(false);
-        vi.advanceTimersByTime(249);
-        expect(getBlockLines()).toEqual(
-          first,
+        vi.advanceTimersByTime(
+          CUE_MINIMUM_DISPLAY_MS -
+            elapsedBeforePause -
+            1,
         );
 
-        vi.advanceTimersByTime(1);
-        expect(getBlockLines()[0]).toBe(
-          first[1],
+        expect(getBlockLines()).toEqual(
+          firstPage,
         );
+        expect(getPageId()).toBe("0");
+
+        vi.advanceTimersByTime(1);
+
+        expect(getBlockLines()).toEqual([
+          inputLines[2] ?? "",
+          "",
+        ]);
+        expect(getPageId()).toBe("1");
       },
     );
 
     it(
-      "allows intended appends but reports a direct text rewrite",
+      "allows intended page writes but reports a direct text rewrite",
       async () => {
         const overlay = createOverlay({
           showOriginal: true,
@@ -907,7 +974,7 @@ describe(
         showFinal(
           overlay,
           1,
-          "あ".repeat(20),
+          THREE_LINE_TEXT,
           "Original",
         );
         await flushCueMutations();
@@ -922,13 +989,14 @@ describe(
         ).toBe("0");
 
         vi.advanceTimersByTime(
-          CUE_MINIMUM_DISPLAY_MS / 2,
+          CUE_MINIMUM_DISPLAY_MS,
         );
         await flushCueMutations();
 
         expect(
           host.dataset.cueMutations,
         ).toBe("0");
+        expect(getPageId()).toBe("1");
 
         requireElement<HTMLDivElement>(
           cueContainer,

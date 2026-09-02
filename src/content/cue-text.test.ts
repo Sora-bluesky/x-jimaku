@@ -267,10 +267,9 @@ describe("splitCueText", () => {
   // spills into a third line, e.g. the 28-unit part
   // "おネち5ナbた1）6c オネz0と3そ4たく0 2ア pてせ、ぬ c ）、" wraps to
   // ["おネち5ナbた1）6c オネz0と3", "そ4たく0 2ア ", "pてせ、ぬ c ）、"].
-  // The display slot is two lines tall with overflow hidden, so before the
-  // append buffer a third line was dropped without a trace. What has to hold is
-  // the per-line budget, which is what this pins; the append path is what makes
-  // every line reach the screen, and overlay.test.ts covers that.
+  // The display has two fixed slots, so a three-line cue needs two pages.
+  // What has to hold here is the per-line budget. The page path makes every
+  // line reach the screen, and overlay.test.ts covers that behavior.
   it(
     "keeps every wrapped line within the unit budget across the boundary corpus",
     () => {
