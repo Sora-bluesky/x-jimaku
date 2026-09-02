@@ -11,3 +11,6 @@ docs/plan-approved.md
 # bench artifacts (local only)
 bench/work/
 bench/results/
+
+# Cloned upstream sources read for prior art. Never committed.
+.references/
