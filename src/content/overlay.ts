@@ -113,7 +113,9 @@ export type CaptionOverlayStatus =
 
 export interface CaptionOverlayOptions {
   getTargetVideo(): HTMLVideoElement | null;
+  buildStamp: string;
   showOriginal: boolean;
+  showTentative: boolean;
   onCaptionFadeOut?(): void;
 }
 
@@ -121,6 +123,7 @@ export class CaptionOverlay {
   private readonly options:
     CaptionOverlayOptions;
   private readonly showOriginal: boolean;
+  private readonly showTentative: boolean;
   private readonly host: HTMLDivElement;
   private readonly captionStack:
     HTMLDivElement;
@@ -262,6 +265,8 @@ export class CaptionOverlay {
     this.options = options;
     this.showOriginal =
       options.showOriginal;
+    this.showTentative =
+      options.showTentative;
 
     this.host = document.createElement("div");
     this.host.id = HOST_ID;
@@ -368,6 +373,10 @@ export class CaptionOverlay {
       document.createElement("div");
     this.targetChip.className =
       "chip target-chip status-loading";
+    this.targetChip.title =
+      options.buildStamp;
+    this.targetChip.style.pointerEvents =
+      "auto";
 
     this.targetDot =
       document.createElement("span");
@@ -435,6 +444,7 @@ export class CaptionOverlay {
 
     console.log("[overlay]", "overlay created", {
       showOriginal: this.showOriginal,
+      showTentative: this.showTentative,
     });
   }
 
@@ -2282,24 +2292,24 @@ export class CaptionOverlay {
     }
 
     const width = Math.max(0, rect.width);
-    const hasTentative =
-      this.tentativeLine.textContent !== "";
+    const tentativeEnabled =
+      this.showTentative;
     const barHeight =
       this.showOriginal
         ? Math.max(
             76,
             Math.min(
-              hasTentative ? 124 : 108,
+              tentativeEnabled ? 124 : 108,
               rect.height *
-                (hasTentative ? 0.29 : 0.25),
+                (tentativeEnabled ? 0.29 : 0.25),
             ),
           )
         : Math.max(
             56,
             Math.min(
-              hasTentative ? 104 : 90,
+              tentativeEnabled ? 104 : 90,
               rect.height *
-                (hasTentative ? 0.23 : 0.19),
+                (tentativeEnabled ? 0.23 : 0.19),
             ),
           );
     const bottomOffset = Math.max(
@@ -2337,7 +2347,7 @@ export class CaptionOverlay {
           : 0
       ) +
       (
-        hasTentative
+        tentativeEnabled
           ? TENTATIVE_FONT_SCALE *
             TENTATIVE_LINE_HEIGHT
           : 0
@@ -2410,7 +2420,7 @@ export class CaptionOverlay {
     this.captionStack.style.setProperty(
       "--tentative-slot",
       `${
-        hasTentative
+        tentativeEnabled
           ? fontSize *
             TENTATIVE_FONT_SCALE *
             TENTATIVE_LINE_HEIGHT

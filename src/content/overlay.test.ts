@@ -25,6 +25,8 @@ import {
   CUE_MINIMUM_DISPLAY_MS,
 } from "./overlay";
 
+const BUILD_STAMP =
+  "0.6.0 abc1234-dirty 2026-09-02T03:04:05Z";
 const THREE_LINE_TEXT =
   "おネち5ナbた1）6c オネz0と3そ4たく0 2ア pてせ、ぬ c ）、";
 
@@ -45,14 +47,23 @@ let activeOverlay:
 
 function createOverlay(
   options: {
+    buildStamp?: string;
     showOriginal?: boolean;
+    showTentative?: boolean;
+    getTargetVideo?: () => HTMLVideoElement | null;
     onCaptionFadeOut?: () => void;
   } = {},
 ): CaptionOverlay {
   const overlay = new CaptionOverlay({
-    getTargetVideo: () => null,
+    getTargetVideo:
+      options.getTargetVideo ??
+      (() => null),
+    buildStamp:
+      options.buildStamp ?? BUILD_STAMP,
     showOriginal:
       options.showOriginal ?? false,
+    showTentative:
+      options.showTentative ?? false,
     onCaptionFadeOut:
       options.onCaptionFadeOut ??
       (() => {
@@ -286,6 +297,26 @@ describe(
         ).toBe(
           "字幕 準備中(ウォームアップ)…",
         );
+      },
+    );
+
+    it(
+      "shows the build stamp in the chip tooltip without changing its label",
+      () => {
+        const overlay = createOverlay({
+          buildStamp: BUILD_STAMP,
+        });
+        const { targetChip } =
+          getOverlayDom();
+
+        expect(
+          targetChip.getAttribute("title"),
+        ).toBe(BUILD_STAMP);
+        expect(
+          targetChip.style.pointerEvents,
+        ).toBe("auto");
+        expect(targetChip.textContent)
+          .toBe("字幕ON");
       },
     );
   },
@@ -1539,6 +1570,187 @@ describe(
         expect(
           host.dataset.cueMutations,
         ).toBe("1");
+      },
+    );
+  },
+);
+
+function createLaidOutOverlay(
+  options: {
+    showOriginal?: boolean;
+    showTentative?: boolean;
+  } = {},
+): CaptionOverlay {
+  const video = document.createElement(
+    "video",
+  );
+  video.getBoundingClientRect = () =>
+    new DOMRect(0, 0, 960, 540);
+  document.body.append(video);
+
+  return createOverlay({
+    ...options,
+    getTargetVideo: () => video,
+  });
+}
+
+function readStackMetric(
+  property:
+    | "height"
+    | "--tentative-slot"
+    | "--primary-slot"
+    | "--original-slot"
+    | "--bar-padding-y",
+): number {
+  const { captionStack } =
+    getOverlayDom();
+
+  if (property === "height") {
+    return Number.parseFloat(
+      captionStack.style.height,
+    );
+  }
+
+  return Number.parseFloat(
+    captionStack.style.getPropertyValue(
+      property,
+    ),
+  );
+}
+
+function primaryOffsetFromStack():
+  number {
+  const barHeight =
+    readStackMetric("height");
+  const padY = readStackMetric(
+    "--bar-padding-y",
+  );
+  const content =
+    readStackMetric("--primary-slot") +
+    readStackMetric("--original-slot") +
+    readStackMetric("--tentative-slot");
+
+  return (
+    padY +
+    (barHeight - padY * 2 - content) / 2
+  );
+}
+
+function paintLayout(
+  overlay: CaptionOverlay,
+): void {
+  (
+    overlay as unknown as {
+      updateLayout(): void;
+    }
+  ).updateLayout();
+}
+
+describe(
+  "CaptionOverlay caption stack geometry",
+  () => {
+    it(
+      "keeps the tentative slot and bar height while the interim line is enabled",
+      () => {
+        createLaidOutOverlay({
+          showTentative: true,
+        });
+        const emptySlot = readStackMetric(
+          "--tentative-slot",
+        );
+        const emptyHeight =
+          readStackMetric("height");
+
+        expect(emptySlot)
+          .toBeGreaterThan(0);
+        expect(emptyHeight)
+          .toBeGreaterThan(0);
+
+        const overlay = activeOverlay;
+
+        if (overlay === null) {
+          throw new Error(
+            "Expected an active overlay",
+          );
+        }
+
+        overlay.showCaption({
+          id: 1,
+          text: "draft",
+          final: false,
+          at: "2026-09-01T00:00:00.000Z",
+        });
+
+        expect(
+          readStackMetric(
+            "--tentative-slot",
+          ),
+        ).toBe(emptySlot);
+        expect(
+          readStackMetric("height"),
+        ).toBe(emptyHeight);
+      },
+    );
+
+    it(
+      "collapses the tentative slot when the interim line is disabled",
+      () => {
+        const overlay =
+          createLaidOutOverlay({
+            showTentative: false,
+          });
+
+        overlay.showCaption({
+          id: 1,
+          text: "draft",
+          final: false,
+          at: "2026-09-01T00:00:00.000Z",
+        });
+
+        expect(
+          getOverlayDom()
+            .tentativeLine.textContent,
+        ).toBe("draft");
+        expect(
+          readStackMetric(
+            "--tentative-slot",
+          ),
+        ).toBe(0);
+      },
+    );
+
+    it(
+      "keeps the primary line's offset when interim text appears and clears",
+      () => {
+        const overlay =
+          createLaidOutOverlay({
+            showTentative: true,
+          });
+
+        showFinal(overlay, 1, "確定");
+        const before =
+          primaryOffsetFromStack();
+
+        expect(Number.isFinite(before))
+          .toBe(true);
+
+        overlay.showCaption({
+          id: 2,
+          text: "draft",
+          final: false,
+          at: "2026-09-01T00:00:01.000Z",
+        });
+        const during =
+          primaryOffsetFromStack();
+
+        getOverlayDom()
+          .tentativeLine.textContent = "";
+        paintLayout(overlay);
+        const after =
+          primaryOffsetFromStack();
+
+        expect(during).toBe(before);
+        expect(after).toBe(before);
       },
     );
   },

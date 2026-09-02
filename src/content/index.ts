@@ -94,8 +94,11 @@ const PCM_SEND_DROP_WARN_INTERVAL_MS =
   5_000;
 const ERROR_CHIP_VISIBLE_MS = 2_500;
 const TRANSLATOR_CREATE_WAIT_MS = 8_000;
+const contentManifest =
+  chrome.runtime.getManifest();
 const CONTENT_INSTANCE_VERSION =
-  chrome.runtime.getManifest().version;
+  contentManifest.version_name ??
+  `${contentManifest.version} version_name-missing`;
 
 const CONTEXT_TERM_STOPLIST =
   new Set([
@@ -263,6 +266,8 @@ let activeTranslationPath:
 let activeSilentInputShowHint = false;
 let activeShowOriginal =
   DEFAULT_SETTINGS.showOriginal;
+let activeShowTentative =
+  DEFAULT_SETTINGS.showTentative;
 let playbackEventTarget:
   | HTMLVideoElement
   | null = null;
@@ -881,6 +886,8 @@ function connectBackgroundPort(): void {
       lastEosRequestId = null;
       activeShowOriginal =
         DEFAULT_SETTINGS.showOriginal;
+      activeShowTentative =
+        DEFAULT_SETTINGS.showTentative;
       contentSessionRequestId = null;
       clearExplicitStopDrainState();
       clearPendingContextTerms();
@@ -1157,6 +1164,8 @@ function beginFullGraceTeardown(
   lastEosRequestId = null;
   activeShowOriginal =
     DEFAULT_SETTINGS.showOriginal;
+  activeShowTentative =
+    DEFAULT_SETTINGS.showTentative;
   contentSessionRequestId = null;
   clearExplicitStopDrainState();
   clearPendingContextTerms();
@@ -1258,6 +1267,9 @@ function handleStartTapMessage(
       activeShowOriginal =
         message.settings?.showOriginal ??
         DEFAULT_SETTINGS.showOriginal;
+      activeShowTentative =
+        message.settings?.showTentative ??
+        DEFAULT_SETTINGS.showTentative;
       beginPcmSendDropSession(
         message.requestId,
       );
@@ -1317,6 +1329,9 @@ function handleStartTapMessage(
       activeShowOriginal =
         message.settings?.showOriginal ??
         DEFAULT_SETTINGS.showOriginal;
+      activeShowTentative =
+        message.settings?.showTentative ??
+        DEFAULT_SETTINGS.showTentative;
       activeCaptureRequestId =
         message.requestId;
       cancelOverlayDestroy();
@@ -1353,6 +1368,9 @@ function handleStartTapMessage(
   activeShowOriginal =
     message.settings?.showOriginal ??
     DEFAULT_SETTINGS.showOriginal;
+  activeShowTentative =
+    message.settings?.showTentative ??
+    DEFAULT_SETTINGS.showTentative;
 
   beginPcmSendDropSession(
     message.requestId,
@@ -1426,6 +1444,9 @@ function prepareFreshTapSession(
   activeShowOriginal =
     message.settings?.showOriginal ??
     DEFAULT_SETTINGS.showOriginal;
+  activeShowTentative =
+    message.settings?.showTentative ??
+    DEFAULT_SETTINGS.showTentative;
   beginPcmSendDropSession(
     message.requestId,
   );
@@ -2470,7 +2491,9 @@ export function ensureOverlay(): CaptionOverlay {
     getTargetVideo: () =>
       getCurrentAudioTapTarget() ??
       endedAudioTapTarget,
+    buildStamp: CONTENT_INSTANCE_VERSION,
     showOriginal: activeShowOriginal,
+    showTentative: activeShowTentative,
     onCaptionFadeOut() {
       if (
         drainReadyRequestId !== null &&

@@ -70,6 +70,23 @@ A-6-5 は次の値で表示を判定または観測する。
 | `pageIdMissing` | `0`。採取した表示サンプルに `pageId` がある。 |
 | `stopDrainTimedOut` | `false`。明示停止から45秒後もチップが `RUNNING` なら `true` とし、終了コード `1` にする。 |
 
+| 名前 | 観測内容 |
+|---|---|
+| `bothRowsEnglish` | 原文行が表示され、主字幕が空ではなく、日本語文字を1文字も含まない折り畳みブロック数。 |
+| `rowsIdentical` | 主字幕2枠を空白で連結した文字列と原文行を、それぞれ `trim()` した後に比較して一致した折り畳みブロック数。 |
+| `originalRowShown` | 表示中かつ原文行が非空だった折り畳みブロック数。ほか3値の分母。 |
+| `originalWithoutPrimary` | 原文行が表示されている一方で、主字幕2枠が両方とも空だった折り畳みブロック数。 |
+
+4値はいずれも同じ表示が続く300msサンプルを1ブロックに折り畳んだ観測値で、合否には使わず、`rowsIdentical`または`bothRowsEnglish`が0でなければ、視聴者には字幕が二重に表示されたと知覚される。
+
+位置の観測値（合否には使わない）。sampler は 300ms ごとに先頭 `.caption-primary` の `getBoundingClientRect().top`（四捨五入）と `.caption-stack` の高さを記録する。A caption that moves while its text is unchanged reads to a viewer as a new caption.
+
+| 名前 | 観測内容 |
+|---|---|
+| `observations.captionTopChanges` | 同一の先頭主字幕テキストのまま `top` が動いた回数。 |
+| `observations.captionTopValues` | 観測した `top` の重複なし一覧。2値の往復が一目で分かる。 |
+| `observations.stackHeightChanges` | バー高さが変わった回数。 |
+
 診断ログは次の観測値として保存する。いずれも合否判定には使わない。
 
 | JSONフィールド | 内容 |
@@ -81,10 +98,16 @@ A-6-5 は次の値で表示を判定または観測する。
 | `diagnostics.translationState[].timestampMs` | content script がページへ転送するときに `performance.now()` で付ける単調増加時刻。 |
 | `diagnostics.translationState[].arrivalMs` | `replayStartedAtMs`を0としたページ到着時刻。単位はミリ秒。 |
 | `diagnostics.translationPaths` | 報告された `path` を初出順に並べ、重複を除いた配列。`path` がない報告は含めない。 |
+| `diagnostics.clauseTimings[]` | `data.kind`が`clause-timing`の開発ログを受信内容のまま保存する。`data`は`lineId`、`outcome`、`path`、`enqueueToTerminalMs`、`modelCallMs`、`deadlineExpired`を持つ。 |
+| `gates.clauseTimingSamples` | 有効な`enqueueToTerminalMs`の件数。 |
+| `gates.clauseTranslateMsP50` | 句をキューへ入れてから翻訳またはフォールバックが確定するまでの時間の中央値。標本がない場合は`null`。 |
+| `gates.clauseTranslateMsP90` | 同じ時間の90パーセンタイル。標本がない場合は`null`。 |
+| `gates.clauseDeadlineHits` | 12秒の締切で`fallback`になった句の件数。 |
 | `gates.devLogQueueDrop`、`gates.devLogRescueFailure`、`gates.devLogPassthrough` | `data.kind`が`queue-drop`、`rescue-failure`、`passthrough`だった件数。 |
-| `gates.devLogOther` | 既知の3種類以外または`data.kind`がない診断ログの件数。 |
+| `gates.devLogOther` | 既知の4種類以外または`data.kind`がない診断ログの件数。 |
 | `gates.englishPassthrough` | 表示台帳の文字列のうち、日本語文字を1文字も含まない件数。 |
 
+`clauseTranslateMsP90`が12秒の締切に近い場合、遅い方の英語行は翻訳待ちで時間を使い切り、原文のまま解放されやすい。
 `devLogQueueDrop`が増えた場合、検証に失敗したのではなく、翻訳処理の負荷が高い間に句が破棄されている。
 
 時間値はページ側の `Date.now()` を300msごとのサンプルと動画の再生開始時に記録して算出する。

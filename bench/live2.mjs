@@ -73,6 +73,9 @@ function parseArgs(argv) {
     caseName: "tts2",
     model: "base",
     backend: "prompt-api",
+    // The English original row is a display option a viewer can turn on, and the
+    // two-row layout was never exercised here while it stayed off.
+    showOriginal: false,
     durationSeconds: 95,
     chromePath:
       chromeFromEnvironment
@@ -85,6 +88,11 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i += 1) {
     const flag = argv[i];
     const value = argv[i + 1];
+    if (flag === "--show-original") {
+      options.showOriginal = true;
+      continue;
+    }
+
     if (flag === "--case") { options.caseName = value; i += 1; }
     else if (flag === "--model") { options.model = value; i += 1; }
     else if (flag === "--backend") { options.backend = value; i += 1; }
@@ -204,6 +212,7 @@ const result = {
   collection: "live2 unattended (CDP Extensions.loadUnpacked + autoplay)",
   diagnostics: {
     devLog: [],
+    clauseTimings: [],
     translationState: [],
     translationPaths: [],
   },
@@ -272,7 +281,7 @@ try {
       model: options.model,
       sourceLang: "en",
       translationBackend: options.backend,
-      showOriginal: false,
+      showOriginal: options.showOriginal,
       showTentative: true,
     },
   );
@@ -456,6 +465,10 @@ try {
         const lines = [
           ...cue.querySelectorAll(":scope > .caption-primary"),
         ].map((el) => el.textContent.trim());
+        const original =
+          cue
+            .querySelector(":scope > .caption-original")
+            ?.textContent.trim() ?? "";
         const tentative =
           root
             .querySelector(".caption-tentative")
@@ -464,14 +477,28 @@ try {
           lines.some((line) => line !== "");
         const hasTentativeText =
           tentative !== "";
+        const firstPrimary =
+          cue.querySelector(":scope > .caption-primary");
+        const captionTop =
+          firstPrimary
+            ? Math.round(
+                firstPrimary.getBoundingClientRect().top,
+              )
+            : null;
+        const stackHeight = Math.round(
+          captionStack.getBoundingClientRect().height,
+        );
         sample = {
           sampledAtMs: Date.now(),
           cueId: cue.dataset.cueId ?? "",
           pageId: cue.dataset.pageId ?? "",
           line0: lines[0] ?? "",
           line1: lines[1] ?? "",
+          original,
           hasPrimaryText,
           hasTentativeText,
+          captionTop,
+          stackHeight,
           slotCountViolation: lines.length !== 2,
           stackDisplayed:
             getComputedStyle(captionStack)
@@ -549,6 +576,12 @@ try {
         arrivalMs:
           arrivedAtMs - replayStartedAtMs,
       }),
+    );
+  result.diagnostics.clauseTimings =
+    result.diagnostics.devLog.filter(
+      (entry) =>
+        entry.data?.kind ===
+        "clause-timing",
     );
   result.diagnostics.translationState =
     captured.translationState.map(
@@ -633,6 +666,7 @@ for (const sample of samples) {
     || previousDisplay.pageId !== sample.pageId
     || previousDisplay.line0 !== sample.line0
     || previousDisplay.line1 !== sample.line1
+    || previousDisplay.original !== sample.original
     || previousDisplay.slotCountViolation
       !== sample.slotCountViolation
     || previousDisplay.stackDisplayed
@@ -645,6 +679,7 @@ for (const sample of samples) {
       pageId: sample.pageId,
       line0: sample.line0,
       line1: sample.line1,
+      original: sample.original,
       slotCountViolation:
         sample.slotCountViolation,
       stackDisplayed: sample.stackDisplayed,
@@ -738,6 +773,42 @@ const blankBarSamples =
     (block) =>
       block.stackDisplayed
       && block.blank,
+  ).length;
+const originalRowBlocks =
+  displayBlocks.filter(
+    (block) =>
+      block.stackDisplayed
+      && block.original !== "",
+  );
+const primaryTextFor = (block) =>
+  [block.line0, block.line1]
+    .filter((line) => line !== "")
+    .join(" ")
+    .trim();
+const originalRowShown =
+  originalRowBlocks.length;
+const bothRowsEnglish =
+  originalRowBlocks.filter(
+    (block) => {
+      const primaryText =
+        primaryTextFor(block);
+      return (
+        primaryText !== ""
+        && !japanese.test(primaryText)
+      );
+    },
+  ).length;
+const rowsIdentical =
+  originalRowBlocks.filter(
+    (block) =>
+      primaryTextFor(block)
+        === block.original.trim(),
+  ).length;
+const originalWithoutPrimary =
+  originalRowBlocks.filter(
+    (block) =>
+      block.line0 === ""
+      && block.line1 === "",
   ).length;
 const captureToReplayMs =
   captureRunningAtMs !== null
@@ -863,11 +934,37 @@ const finalIntervalMsP50 =
   percentileMs(captionGapMs, 0.5);
 const finalIntervalMsP90 =
   percentileMs(captionGapMs, 0.9);
+const clauseTranslateMs =
+  result.diagnostics.clauseTimings
+    .map(
+      (entry) =>
+        entry.data?.enqueueToTerminalMs,
+    )
+    .filter(
+      (value) =>
+        Number.isFinite(value) &&
+        value >= 0,
+    );
+const clauseTranslateMsP50 =
+  percentileMs(clauseTranslateMs, 0.5);
+const clauseTranslateMsP90 =
+  percentileMs(clauseTranslateMs, 0.9);
+const clauseDeadlineHits =
+  result.diagnostics.clauseTimings
+    .filter(
+      (entry) =>
+        entry.data?.outcome ===
+          "fallback" &&
+        entry.data?.deadlineExpired ===
+          true,
+    )
+    .length;
 
 const devLogKindCounts = {
   "queue-drop": 0,
   "rescue-failure": 0,
   passthrough: 0,
+  "clause-timing": 0,
   other: 0,
 };
 for (
@@ -888,6 +985,47 @@ for (
   }
 }
 
+let captionTopChanges = 0;
+let stackHeightChanges = 0;
+const captionTopSeen = new Set();
+let previousGeometry = null;
+for (const sample of samples) {
+  if (!sample.stackDisplayed) {
+    previousGeometry = null;
+    continue;
+  }
+  const captionTop = sample.captionTop;
+  const stackHeight = sample.stackHeight;
+  if (Number.isFinite(captionTop)) {
+    captionTopSeen.add(captionTop);
+  }
+  if (previousGeometry !== null) {
+    if (
+      previousGeometry.line0 === sample.line0
+      && previousGeometry.captionTop !== captionTop
+    ) {
+      captionTopChanges += 1;
+    }
+    if (
+      previousGeometry.stackHeight !== stackHeight
+    ) {
+      stackHeightChanges += 1;
+    }
+  }
+  previousGeometry = {
+    line0: sample.line0,
+    captionTop,
+    stackHeight,
+  };
+}
+result.observations = {
+  captionTopChanges,
+  captionTopValues: [...captionTopSeen].sort(
+    (left, right) => left - right,
+  ),
+  stackHeightChanges,
+};
+
 result.gates = {
   lines: lines.length,
   englishPassthrough: lines.filter((l) => !japanese.test(l)).length,
@@ -899,6 +1037,11 @@ result.gates = {
     devLogKindCounts.passthrough,
   devLogOther:
     devLogKindCounts.other,
+  clauseTranslateMsP50,
+  clauseTranslateMsP90,
+  clauseDeadlineHits,
+  clauseTimingSamples:
+    clauseTranslateMs.length,
   wrongSenseRoma: (joined.match(/ローマ(?!ン)/gu) ?? []).length,
   unresolvedPlaceholders: (joined.match(/%%/gu) ?? []).length,
   romanKept: (joined.match(/(?<![A-Za-z])Roman(?![A-Za-z])/gu) ?? []).length,
@@ -906,6 +1049,10 @@ result.gates = {
   nonEmptyPageTransitions,
   twoPageCuesObserved,
   blankBarSamples,
+  bothRowsEnglish,
+  rowsIdentical,
+  originalRowShown,
+  originalWithoutPrimary,
   captureToReplayMs,
   pathFirstReportedMs,
   pathReadyMs,
@@ -972,5 +1119,10 @@ const outFile = path.join(
 );
 writeFileSync(outFile, `${JSON.stringify(result, null, 2)}\n`, "utf8");
 
-console.log(JSON.stringify({ outFile, gates: result.gates, error: result.error }, null, 2));
+console.log(JSON.stringify({
+  outFile,
+  gates: result.gates,
+  observations: result.observations,
+  error: result.error,
+}, null, 2));
 process.exit(result.error ? 1 : 0);

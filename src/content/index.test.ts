@@ -19,6 +19,9 @@ import {
   CUE_MINIMUM_DISPLAY_MS,
 } from "./overlay";
 
+const CONTENT_VERSION_NAME =
+  "0.6.0 abc1234-dirty 2026-09-02T03:04:05Z";
+
 let extractPostContextTerms:
   typeof import("./index").extractPostContextTerms;
 let handleOffscreenDevLog:
@@ -54,7 +57,8 @@ beforeAll(async () => {
   vi.stubGlobal("chrome", {
     runtime: {
       getManifest: () => ({
-        version: "test",
+        version: "0.6.0",
+        version_name: CONTENT_VERSION_NAME,
       }),
     },
   });
@@ -65,7 +69,7 @@ beforeAll(async () => {
         string;
     }
   ).__xJimakuContentScriptVersion__ =
-    "test";
+    CONTENT_VERSION_NAME;
 
   ({
     extractPostContextTerms,
@@ -80,6 +84,28 @@ beforeEach(() => {
     {},
     "",
     "/tester/status/49",
+  );
+});
+
+describe("content script build marker", () => {
+  it(
+    "matches the manifest version_name",
+    () => {
+      const instanceWindow =
+        window as Window & {
+          __xJimakuContentScriptVersion__?:
+            string;
+        };
+
+      expect(
+        instanceWindow
+          .__xJimakuContentScriptVersion__,
+      ).toBe(CONTENT_VERSION_NAME);
+      expect(
+        chrome.runtime.getManifest()
+          .version_name,
+      ).toBe(CONTENT_VERSION_NAME);
+    },
   );
 });
 
