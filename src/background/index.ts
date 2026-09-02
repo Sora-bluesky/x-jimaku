@@ -11,6 +11,7 @@ import {
   type ContentScriptProbeResultMessage,
   type CsDrainCompleteMessage,
   type CsEosMessage,
+  type CsMediaChangedMessage,
   type CsPcmMessage,
   type CsPingMessage,
   type CsPongMessage,
@@ -69,6 +70,9 @@ import {
   createCaptionReplay,
   createRecognitionRelays,
 } from "./caption-replay";
+import {
+  SilentInputTracker,
+} from "./silent-input-tracker";
 
 const OFFSCREEN_DOCUMENT_PATH =
   "offscreen.html";
@@ -88,8 +92,6 @@ const MAX_DEFERRED_TRANSLATION_REQUESTS =
   4;
 const TRANSIENT_ERROR_MS = 2_500;
 const MAX_RECOGNITION_LINES = 50;
-const SILENT_INPUT_RMS_THRESHOLD = 0.001;
-const SILENT_INPUT_HINT_DELAY_MS = 10_000;
 const LAST_UNHANDLED_ERROR_STACK_LIMIT =
   500;
 const PCM_RELAY_DROP_WARNING_INTERVAL_MS =
@@ -200,16 +202,11 @@ let badgeWriteTail: Promise<void> =
 let storageWriteTail: Promise<void> =
   Promise.resolve();
 let latestRms = 0;
-let silentInputStartedAtMs:
-  | number
-  | null = null;
-let silentInputRequestId:
-  | string
-  | null = null;
 let silentInputHintActive = false;
-let silentInputTimerId:
-  | number
-  | null = null;
+const silentInputTracker =
+  new SilentInputTracker(
+    setSilentInputHint,
+  );
 let activeTranslationState:
   | SwTranslationStateMessage
   | null = null;
@@ -1154,6 +1151,21 @@ function handleContentPortConnected(
       if (
         isMessageOfType(
           message,
+          "CS_MEDIA_CHANGED",
+        )
+      ) {
+        void stateInitialization.then(() => {
+          handleContentMediaChanged(
+            tabId,
+            message,
+          );
+        });
+        return;
+      }
+
+      if (
+        isMessageOfType(
+          message,
           "CS_TAP_STATE",
         )
       ) {
@@ -1704,6 +1716,24 @@ function relayContentDrainComplete(
   }
 }
 
+function handleContentMediaChanged(
+  tabId: number,
+  message: CsMediaChangedMessage,
+): void {
+  if (
+    captureState.status !== "running" ||
+    captureState.tabId !== tabId ||
+    captureState.requestId !==
+      message.requestId
+  ) {
+    return;
+  }
+
+  silentInputTracker.mediaChanged(
+    message.requestId,
+  );
+}
+
 function handleContentTapState(
   tabId: number,
   portGeneration: number,
@@ -2164,104 +2194,14 @@ function handleOffscreenLevel(
     return;
   }
 
-  if (
-    message.rms >=
-    SILENT_INPUT_RMS_THRESHOLD
-  ) {
-    resetSilentInputTracking();
-    return;
-  }
-
-  beginSilentInputTracking(
+  silentInputTracker.acceptLevel(
     captureState.requestId,
+    message.rms,
   );
-}
-
-function beginSilentInputTracking(
-  requestId: string,
-): void {
-  if (
-    silentInputRequestId === requestId &&
-    silentInputStartedAtMs !== null
-  ) {
-    return;
-  }
-
-  clearSilentInputTimer();
-  silentInputRequestId = requestId;
-  silentInputStartedAtMs = Date.now();
-  setSilentInputHint(false);
-  scheduleSilentInputTimer(
-    requestId,
-    silentInputStartedAtMs,
-  );
-}
-
-function scheduleSilentInputTimer(
-  requestId: string,
-  startedAtMs: number,
-): void {
-  clearSilentInputTimer();
-
-  const elapsed =
-    Date.now() - startedAtMs;
-  const remaining = Math.max(
-    0,
-    SILENT_INPUT_HINT_DELAY_MS - elapsed,
-  );
-
-  silentInputTimerId =
-    self.setTimeout(() => {
-      silentInputTimerId = null;
-
-      if (
-        captureState.status !== "running" ||
-        captureState.requestId !==
-          requestId ||
-        silentInputRequestId !==
-          requestId ||
-        silentInputStartedAtMs !==
-          startedAtMs ||
-        latestRms >=
-          SILENT_INPUT_RMS_THRESHOLD
-      ) {
-        return;
-      }
-
-      const currentElapsed =
-        Date.now() - startedAtMs;
-
-      if (
-        currentElapsed <
-        SILENT_INPUT_HINT_DELAY_MS
-      ) {
-        scheduleSilentInputTimer(
-          requestId,
-          startedAtMs,
-        );
-        return;
-      }
-
-      setSilentInputHint(true);
-    }, remaining);
 }
 
 function resetSilentInputTracking(): void {
-  clearSilentInputTimer();
-  silentInputStartedAtMs = null;
-  silentInputRequestId = null;
-  setSilentInputHint(false);
-}
-
-function clearSilentInputTimer(): void {
-  if (silentInputTimerId === null) {
-    return;
-  }
-
-  globalThis.clearTimeout(
-    silentInputTimerId,
-  );
-  silentInputTimerId = null;
+  silentInputTracker.reset();
 }
 
 function setSilentInputHint(
@@ -3658,16 +3598,6 @@ function synchronizeSilentInputForCaptureState(
   }
 
   resetSilentInputTracking();
-
-  if (
-    nextState.requestId !== undefined &&
-    latestRms <
-      SILENT_INPUT_RMS_THRESHOLD
-  ) {
-    beginSilentInputTracking(
-      nextState.requestId,
-    );
-  }
 }
 
 function relayCaptureStateToContent(

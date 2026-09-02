@@ -298,6 +298,11 @@ export interface CsEosMessage {
   requestId: string;
 }
 
+export interface CsMediaChangedMessage {
+  t: "CS_MEDIA_CHANGED";
+  requestId: string;
+}
+
 export interface CsTapStateMessage {
   t: "CS_TAP_STATE";
   requestId: string;
@@ -451,6 +456,7 @@ export type ContentPortMessage =
   | CsStopTapMessage
   | CsDrainCompleteMessage
   | CsEosMessage
+  | CsMediaChangedMessage
   | CsTapStateMessage
   | CsPcmMessage
   | CsTranslateMessage
@@ -792,6 +798,9 @@ export function isM1Message(
         )
       );
 
+    case "CS_MEDIA_CHANGED":
+      return typeof value.requestId === "string";
+
     case "CS_TAP_STATE":
       return (
         typeof value.requestId === "string" &&
@@ -937,6 +946,10 @@ export function isContentPortMessage(
       "CS_DRAIN_COMPLETE",
     ) ||
     isMessageOfType(value, "CS_EOS") ||
+    isMessageOfType(
+      value,
+      "CS_MEDIA_CHANGED",
+    ) ||
     isMessageOfType(value, "CS_TAP_STATE") ||
     isMessageOfType(value, "CS_PCM") ||
     isMessageOfType(value, "CS_TRANSLATE") ||

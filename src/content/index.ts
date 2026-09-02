@@ -10,6 +10,7 @@ import {
   type CsDevToggleMessage,
   type CsDrainCompleteMessage,
   type CsEosMessage,
+  type CsMediaChangedMessage,
   type CsPcmMessage,
   type CsPongMessage,
   type CsTapStateMessage,
@@ -80,6 +81,7 @@ type BufferedContentMessage =
 type OutboundContentMessage =
   | BufferedContentMessage
   | CsDrainCompleteMessage
+  | CsMediaChangedMessage
   | CsTapStateMessage
   | CsTranslateResultMessage;
 
@@ -467,6 +469,16 @@ function installTargetPlaybackListeners():
     true,
   );
   document.addEventListener(
+    "seeked",
+    handleTargetPlaybackEvent,
+    true,
+  );
+  document.addEventListener(
+    "loadstart",
+    handleTargetPlaybackEvent,
+    true,
+  );
+  document.addEventListener(
     "ended",
     handleTargetPlaybackEvent,
     true,
@@ -497,6 +509,14 @@ function handleTargetPlaybackEvent(
 
   if (event.type === "seeking") {
     captionOverlay?.clearPlaybackFreezeOnSeek();
+    return;
+  }
+
+  if (
+    event.type === "seeked" ||
+    event.type === "loadstart"
+  ) {
+    postMediaChanged();
     return;
   }
 
@@ -1927,6 +1947,7 @@ async function startTap(
         return;
       }
 
+      postMediaChanged(requestId);
       refreshSilentInputHint();
     },
 
@@ -2606,6 +2627,23 @@ function postEndOfStream(
 
   const message: CsEosMessage = {
     t: "CS_EOS",
+    requestId,
+  };
+
+  postContentMessage(message);
+}
+
+function postMediaChanged(
+  requestId: string | null =
+    activeTap?.getRequestId() ??
+    contentSessionRequestId,
+): void {
+  if (requestId === null) {
+    return;
+  }
+
+  const message: CsMediaChangedMessage = {
+    t: "CS_MEDIA_CHANGED",
     requestId,
   };
 
