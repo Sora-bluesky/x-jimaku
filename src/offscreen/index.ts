@@ -53,7 +53,8 @@ import {
   SentenceAssembler,
 } from "./sentence-assembler";
 import {
-  TerminalLedger,
+  createTerminalLedgerGlue,
+  type TerminalLedger,
 } from "./terminal-ledger";
 import {
   isMostlyJapanese,
@@ -916,16 +917,13 @@ async function handleCaptureStart(
       }),
     );
 
-    const terminalLedger =
-      new TerminalLedger(
+    const terminalLedgerGlue =
+      createTerminalLedgerGlue(
         requestId,
-        (message) => {
-          postFinalRecognition(
-            requestId,
-            message,
-          );
-        },
+        postFinalRecognition,
       );
+    const terminalLedger =
+      terminalLedgerGlue.ledger;
     const translationEngine =
       new TranslationEngine({
         backend:
@@ -961,10 +959,9 @@ async function handleCaptureStart(
             return;
           }
 
-          terminalLedger.translated(
-            line.id,
-            ja,
-          );
+          terminalLedgerGlue
+            .engineCallbacks
+            .onTranslated(line, ja);
         },
 
         onSettled(ids) {
@@ -979,7 +976,9 @@ async function handleCaptureStart(
             return;
           }
 
-          terminalLedger.fallback(ids);
+          terminalLedgerGlue
+            .engineCallbacks
+            .onSettled(ids);
         },
 
         onPathChanged(path) {

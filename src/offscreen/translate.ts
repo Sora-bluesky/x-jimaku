@@ -429,6 +429,16 @@ export class TranslationEngine {
       return;
     }
 
+    const clone = this.languageModelClone;
+    this.languageModelClone = null;
+
+    if (clone !== null) {
+      destroyLanguageModelSession(
+        clone,
+        "LanguageModel clone",
+      );
+    }
+
     attempt.stale = true;
     this.clearAttemptDeadline(attempt);
     this.activeAttempt = null;
@@ -821,7 +831,15 @@ export class TranslationEngine {
     }
 
     const clone = await base.clone();
-    this.assertAttemptCurrent(attempt);
+
+    if (!this.isAttemptCurrent(attempt)) {
+      destroyLanguageModelSession(
+        clone,
+        "LanguageModel clone",
+      );
+      this.assertAttemptCurrent(attempt);
+    }
+
     this.languageModelClone = clone;
 
     try {
@@ -1323,6 +1341,9 @@ export class TranslationEngine {
           );
 
         if (!this.isAttemptCurrent(attempt)) {
+          destroyTranslatorInstance(
+            translator,
+          );
           return false;
         }
 
@@ -1334,15 +1355,9 @@ export class TranslationEngine {
         ) {
           void createPromise.then(
             (instance) => {
-              if (
-                this.isAttemptCurrent(
-                  attempt,
-                )
-              ) {
-                destroyTranslatorInstance(
-                  instance,
-                );
-              }
+              destroyTranslatorInstance(
+                instance,
+              );
             },
             () => undefined,
           );
@@ -1442,7 +1457,7 @@ export class TranslationEngine {
         });
 
       if (
-        this.destroyed ||
+        !this.isAttemptCurrent(attempt) ||
         availability !== "available"
       ) {
         return false;
@@ -1464,6 +1479,10 @@ export class TranslationEngine {
         });
 
       if (!this.isAttemptCurrent(attempt)) {
+        destroyLanguageModelSession(
+          languageModel,
+          "LanguageModel",
+        );
         return false;
       }
 

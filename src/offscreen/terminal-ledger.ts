@@ -147,3 +147,40 @@ export class TerminalLedger {
     }
   }
 }
+
+export function createTerminalLedgerGlue(
+  requestId: string,
+  postFinalRecognition: (
+    requestId: string,
+    message: OffRecognitionMessage,
+  ) => void,
+) {
+  const ledger =
+    new TerminalLedger(
+      requestId,
+      (message) => {
+        postFinalRecognition(
+          requestId,
+          message,
+        );
+      },
+    );
+
+  return {
+    ledger,
+    engineCallbacks: {
+      onTranslated(
+        line: RecognitionPayload,
+        ja: string,
+      ): void {
+        ledger.translated(line.id, ja);
+      },
+
+      onSettled(
+        ids: readonly number[],
+      ): void {
+        ledger.fallback(ids);
+      },
+    },
+  };
+}

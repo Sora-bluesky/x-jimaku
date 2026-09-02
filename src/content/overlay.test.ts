@@ -182,12 +182,14 @@ function getWaitingCues(
   overlay: CaptionOverlay,
 ): Array<{
   sourceIds: readonly number[];
+  primaryText: string;
   fallback?: boolean;
 }> {
   return (
     overlay as unknown as {
       waitingCues: Array<{
         sourceIds: readonly number[];
+        primaryText: string;
         fallback?: boolean;
       }>;
     }
@@ -1116,6 +1118,69 @@ describe(
     );
 
     it(
+      "A-6-4(b) completes drain immediately when only an empty revision remains",
+      () => {
+        const onCaptionFadeOut = vi.fn();
+        const overlay = createOverlay({
+          onCaptionFadeOut,
+        });
+
+        overlay.setTranslationPath(
+          "language-model",
+        );
+        showFinal(
+          overlay,
+          1,
+          "同じ訳",
+          "same source",
+        );
+
+        vi.advanceTimersByTime(
+          CAPTION_VISIBLE_MS +
+            CAPTION_FADE_MS,
+        );
+        expect(onCaptionFadeOut)
+          .toHaveBeenCalledOnce();
+        onCaptionFadeOut.mockClear();
+
+        overlay.showCaption({
+          id: 2,
+          text: "same source",
+          final: true,
+          at: "2026-09-02T00:00:00.001Z",
+        });
+        overlay.beginDrain();
+
+        expect(
+          overlay.hasPendingCaption(),
+        ).toBe(true);
+        expect(onCaptionFadeOut)
+          .not.toHaveBeenCalled();
+
+        overlay.showCaption({
+          id: 2,
+          text: "same source",
+          ja: "同じ訳",
+          final: true,
+          at: "2026-09-02T00:00:00.002Z",
+        });
+
+        expect(
+          overlay.hasPendingCaption(),
+        ).toBe(false);
+        expect(onCaptionFadeOut)
+          .toHaveBeenCalledOnce();
+
+        vi.advanceTimersByTime(
+          CAPTION_VISIBLE_MS +
+            CAPTION_FADE_MS,
+        );
+        expect(onCaptionFadeOut)
+          .toHaveBeenCalledOnce();
+      },
+    );
+
+    it(
       "A-6-4(b''''') uses source watermark and keeps fallback queue kinds separate",
       () => {
         const overlay = createOverlay({
@@ -1238,6 +1303,101 @@ describe(
         expect(
           getWaitingCues(queued).length,
         ).toBeLessThanOrEqual(6);
+      },
+    );
+
+    it(
+      "A-6-4(b''''') keeps translated source diffs separate from waiting Japanese cues under pressure",
+      () => {
+        const overlay = createOverlay();
+        overlay.setTranslationPath(
+          "language-model",
+        );
+
+        showFinal(
+          overlay,
+          1,
+          "active",
+          "root",
+        );
+        showFinal(
+          overlay,
+          2,
+          "日本語",
+          "base",
+        );
+
+        let source = "base";
+
+        for (
+          let id = 3;
+          id <= 17;
+          id += 2
+        ) {
+          overlay.showCaption({
+            id,
+            text: source,
+            ja: source,
+            fallback: true,
+            final: true,
+            at:
+              `2026-09-02T00:00:${id}.000Z`,
+          });
+
+          const sourceDiff = String
+            .fromCharCode(96 + id)
+            .repeat(14);
+          source += sourceDiff;
+
+          overlay.showCaption({
+            id: id + 1,
+            text: source,
+            ja: `訳-${id + 1}`,
+            final: true,
+            at:
+              `2026-09-02T00:00:${id + 1}.000Z`,
+          });
+
+          if (id === 3) {
+            expect(
+              getWaitingCues(overlay),
+            ).toMatchObject([
+              {
+                sourceIds: [2],
+                primaryText: "日本語",
+                fallback: false,
+              },
+              {
+                sourceIds: [4],
+                primaryText:
+                  "c".repeat(14),
+                fallback: true,
+              },
+            ]);
+          }
+        }
+
+        const waiting =
+          getWaitingCues(overlay);
+
+        expect(getLedgerTexts())
+          .toHaveLength(10);
+        expect(waiting.length)
+          .toBeLessThanOrEqual(6);
+        expect(
+          waiting.find((cue) =>
+            cue.sourceIds.includes(2)
+          )?.sourceIds,
+        ).toEqual([2]);
+        expect(
+          waiting.filter(
+            (cue) =>
+              cue.sourceIds.includes(2) &&
+              cue.sourceIds.some(
+                (id) => id !== 2,
+              ),
+          ),
+        ).toEqual([]);
       },
     );
 

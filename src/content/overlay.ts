@@ -1084,6 +1084,15 @@ export class CaptionOverlay {
 
     if (cues.length === 0) {
       this.acceptedFinalIds.add(line.id);
+
+      if (
+        this.drainMode &&
+        !this.hasPendingCaption()
+      ) {
+        this.options.onCaptionFadeOut?.();
+        return;
+      }
+
       this.scheduleCaptionFade();
       return;
     }
@@ -1141,7 +1150,8 @@ export class CaptionOverlay {
     );
     const fallback =
       line.fallback === true ||
-      useEnglish;
+      useEnglish ||
+      suppressOriginal;
     const original =
       this.showOriginal &&
       !suppressOriginal &&

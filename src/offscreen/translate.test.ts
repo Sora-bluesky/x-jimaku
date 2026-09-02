@@ -1137,6 +1137,330 @@ describe("TranslationEngine terminal protocol", () => {
     },
   );
 
+  it(
+    "does not create a LanguageModel after stale availability resolves",
+    async () => {
+      vi.useFakeTimers();
+      const availability =
+        createDeferred<"available">();
+      const create = vi.fn(
+        async () => ({
+          clone: vi.fn(),
+          destroy: vi.fn(),
+        }),
+      );
+
+      vi.stubGlobal("LanguageModel", {
+        availability: vi.fn(
+          () => availability.promise,
+        ),
+        create,
+      });
+
+      const gate =
+        createGateEngine("prompt-api");
+
+      gate.engine.enqueue({
+        id: 1,
+        text: "late availability",
+        final: true,
+        at: "2026-09-02T00:00:01.000Z",
+      });
+
+      await vi.advanceTimersByTimeAsync(
+        TRANSLATION_DEADLINE_MS,
+      );
+
+      expect(gate.onSettled)
+        .toHaveBeenCalledWith([1]);
+
+      availability.resolve("available");
+      await vi.advanceTimersByTimeAsync(0);
+
+      const internal =
+        gate.engine as unknown as {
+          languageModel: unknown;
+          languageModelCreateAttempted:
+            boolean;
+          path: unknown;
+        };
+
+      expect(create).not.toHaveBeenCalled();
+      expect(internal.languageModel)
+        .toBeNull();
+      expect(
+        internal.languageModelCreateAttempted,
+      ).toBe(false);
+      expect(internal.path).toBeNull();
+      expect(gate.onPathChanged)
+        .not.toHaveBeenCalled();
+
+      gate.engine.destroy();
+    },
+  );
+
+  it(
+    "destroys a LanguageModel created after its attempt expires",
+    async () => {
+      vi.useFakeTimers();
+      const languageModel = {
+        clone: vi.fn(),
+        destroy: vi.fn(),
+      };
+      const created =
+        createDeferred<typeof languageModel>();
+      const create = vi.fn(
+        () => created.promise,
+      );
+
+      vi.stubGlobal("LanguageModel", {
+        availability: vi.fn(
+          async () => "available",
+        ),
+        create,
+      });
+
+      const gate =
+        createGateEngine("prompt-api");
+
+      gate.engine.enqueue({
+        id: 1,
+        text: "late model",
+        final: true,
+        at: "2026-09-02T00:00:01.000Z",
+      });
+
+      await vi.waitFor(() => {
+        expect(create)
+          .toHaveBeenCalledOnce();
+      });
+
+      await vi.advanceTimersByTimeAsync(
+        TRANSLATION_DEADLINE_MS,
+      );
+
+      expect(gate.onSettled)
+        .toHaveBeenCalledWith([1]);
+
+      created.resolve(languageModel);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(languageModel.destroy)
+        .toHaveBeenCalledOnce();
+      expect(
+        (
+          gate.engine as unknown as {
+            languageModel: unknown;
+          }
+        ).languageModel,
+      ).toBeNull();
+      expect(gate.onPathChanged)
+        .not.toHaveBeenCalled();
+
+      gate.engine.destroy();
+    },
+  );
+
+  it(
+    "destroys a Translator created after its attempt expires",
+    async () => {
+      vi.useFakeTimers();
+      const availability =
+        createDeferred<"available">();
+      const translator = {
+        translate: vi.fn(
+          async () => "unused",
+        ),
+        destroy: vi.fn(),
+      };
+      const created =
+        createDeferred<typeof translator>();
+      const create = vi.fn(
+        () => created.promise,
+      );
+
+      vi.stubGlobal("Translator", {
+        availability: vi.fn(
+          () => availability.promise,
+        ),
+        create,
+      });
+
+      const gate = createGateEngine();
+
+      gate.engine.enqueue({
+        id: 1,
+        text: "late translator",
+        final: true,
+        at: "2026-09-02T00:00:01.000Z",
+      });
+
+      await vi.advanceTimersByTimeAsync(
+        5_000,
+      );
+      availability.resolve("available");
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(create)
+        .toHaveBeenCalledOnce();
+
+      await vi.advanceTimersByTimeAsync(
+        TRANSLATION_DEADLINE_MS - 5_000,
+      );
+
+      expect(gate.onSettled)
+        .toHaveBeenCalledWith([1]);
+
+      created.resolve(translator);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(translator.destroy)
+        .toHaveBeenCalledOnce();
+      expect(
+        (
+          gate.engine as unknown as {
+            translator: unknown;
+          }
+        ).translator,
+      ).toBeNull();
+
+      gate.engine.destroy();
+    },
+  );
+
+  it(
+    "destroys a Translator that resolves after its create timeout",
+    async () => {
+      vi.useFakeTimers();
+      vi.spyOn(
+        console,
+        "warn",
+      ).mockImplementation(() => {
+      });
+
+      const translator = {
+        translate: vi.fn(
+          async () => "unused",
+        ),
+        destroy: vi.fn(),
+      };
+      const created =
+        createDeferred<typeof translator>();
+      const create = vi.fn(
+        () => created.promise,
+      );
+
+      vi.stubGlobal("Translator", {
+        availability: vi.fn(
+          async () => "available",
+        ),
+        create,
+      });
+
+      const gate = createGateEngine();
+
+      gate.engine.enqueue({
+        id: 1,
+        text: "timed out translator",
+        final: true,
+        at: "2026-09-02T00:00:01.000Z",
+      });
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(create)
+        .toHaveBeenCalledOnce();
+
+      await vi.advanceTimersByTimeAsync(
+        TRANSLATOR_CREATE_TIMEOUT_MS,
+      );
+
+      expect(gate.onSettled)
+        .toHaveBeenCalledWith([1]);
+
+      created.resolve(translator);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(translator.destroy)
+        .toHaveBeenCalledOnce();
+      expect(
+        (
+          gate.engine as unknown as {
+            translator: unknown;
+          }
+        ).translator,
+      ).toBeNull();
+
+      gate.engine.destroy();
+    },
+  );
+
+  it(
+    "destroys a LanguageModel clone that resolves after its attempt expires",
+    async () => {
+      vi.useFakeTimers();
+      const clone = {
+        prompt: vi.fn(
+          async () => "unused",
+        ),
+        destroy: vi.fn(),
+      };
+      const cloneReady =
+        createDeferred<typeof clone>();
+      const base = {
+        clone: vi.fn(
+          () => cloneReady.promise,
+        ),
+        destroy: vi.fn(),
+      };
+
+      vi.stubGlobal("LanguageModel", {
+        availability: vi.fn(
+          async () => "available",
+        ),
+        create: vi.fn(
+          async () => base,
+        ),
+      });
+
+      const gate =
+        createGateEngine("prompt-api");
+
+      gate.engine.enqueue({
+        id: 1,
+        text: "late clone",
+        final: true,
+        at: "2026-09-02T00:00:01.000Z",
+      });
+
+      await vi.waitFor(() => {
+        expect(base.clone)
+          .toHaveBeenCalledOnce();
+      });
+
+      await vi.advanceTimersByTimeAsync(
+        TRANSLATION_DEADLINE_MS,
+      );
+
+      expect(gate.onSettled)
+        .toHaveBeenCalledWith([1]);
+
+      cloneReady.resolve(clone);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(clone.destroy)
+        .toHaveBeenCalledOnce();
+      expect(
+        (
+          gate.engine as unknown as {
+            languageModelClone: unknown;
+          }
+        ).languageModelClone,
+      ).toBeNull();
+
+      gate.engine.destroy();
+    },
+  );
+
   it.each([
     "success",
     "failure",
@@ -1269,7 +1593,7 @@ describe("TranslationEngine terminal protocol", () => {
       expect(gate.onSettled.mock.calls)
         .toEqual([[[1]]]);
       expect(firstClone.destroy)
-        .not.toHaveBeenCalled();
+        .toHaveBeenCalledOnce();
       expect(secondClone.destroy)
         .not.toHaveBeenCalled();
       expect(base.destroy)
