@@ -50,9 +50,10 @@ A-6-5 は次の値で表示を判定または観測する。
 | `nonEmptyPageTransitions` | `1` 以上。`0` は `insufficient` として終了コード `1` にする。 |
 | `twoPageCuesObserved` | 同じ cue でページ `0` と `1` を観測した件数。合否には使わない。 |
 | `blankBarSamples` | `.caption-stack` が表示中かつ空だった連続区間数。合否には使わない。値の上昇は、その区間が増えたことを示す。 |
-| `firstCaptionMs` | 従来互換。キャプチャーが `running` と報告してから、表示中の最初の非空tentativeまたはprimaryまでの時間。合否には使わない。 |
-| `firstTentativeMs` | `running` から、表示中の `.caption-tentative` が初めて非空になるまでの時間。合否には使わない。 |
-| `firstFinalMs` | `running` から、表示中の `.caption-primary` のいずれかが初めて非空になるまでの時間。合否には使わない。 |
+| `captureToReplayMs` | キャプチャーが `running` と報告してから、巻き戻した動画の再生が始まるまでの時間。合否には使わない。 |
+| `firstCaptionMs` | 巻き戻した動画の再生開始から、表示中の最初の非空 `.caption-tentative` または `.caption-primary` までの時間。合否には使わない。 |
+| `firstTentativeMs` | 巻き戻した動画の再生開始から、表示中の `.caption-tentative` が初めて非空になるまでの時間。合否には使わない。 |
+| `firstFinalMs` | 巻き戻した動画の再生開始から、表示中の `.caption-primary` のいずれかが初めて非空になるまでの時間。合否には使わない。 |
 | `tentativeToFinalMs` | `firstFinalMs - firstTentativeMs`。どちらかを観測できない場合は `null`。合否には使わない。 |
 | `finalIntervalMsP50` | 連続する非空ページ遷移の間隔の中央値。合否には使わない。間隔を算出できない場合は `null`。 |
 | `finalIntervalMsP90` | 連続する非空ページ遷移の間隔の90パーセンタイル。合否には使わない。間隔を算出できない場合は `null`。 |
@@ -61,10 +62,11 @@ A-6-5 は次の値で表示を判定または観測する。
 | `pageIdMissing` | `0`。採取した表示サンプルに `pageId` がある。 |
 | `stopDrainTimedOut` | `false`。明示停止から45秒後もチップが `RUNNING` なら `true` とし、終了コード `1` にする。 |
 
-時間値はページ側の `Date.now()` を300msごとのサンプルに記録して算出する。
+時間値はページ側の `Date.now()` を300msごとのサンプルと動画の再生開始時に記録して算出する。
 `live2` はtentative段階を観測するため、採取時だけ `showTentative` を `true` にする。
-`firstCaptionMs`、`firstTentativeMs`、`firstFinalMs` には `running` 検出後の一時停止、滞留排出、動画の巻き戻しも含まれる。
-これらは文字が画面へ届いた時刻をキャプチャー開始および前後の表示と比較する値である。
+`captureToReplayMs` には `running` 検出後の一時停止、滞留排出、動画の巻き戻しが含まれる。
+`firstCaptionMs`、`firstTentativeMs`、`firstFinalMs` は、巻き戻した動画の再生開始を基準にする。
+`schemaVersion` が `1` の既存結果では、同名の3項目が `running` 検出時刻を基準にしている。`schemaVersion` が `2` の結果と直接比較しない。
 発話時刻を取得できないため、発話から字幕表示までの遅延は測定しない。
 
 成立条件（いずれか欠けると無音で失敗するので消さないこと）:

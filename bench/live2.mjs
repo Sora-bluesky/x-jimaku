@@ -196,7 +196,7 @@ const browser = await puppeteer.launch({
 
 const captureMs = options.durationSeconds * 1000;
 const result = {
-  schemaVersion: 1,
+  schemaVersion: 2,
   case: options.caseName,
   model: options.model,
   backend: options.backend,
@@ -204,6 +204,7 @@ const result = {
   collection: "live2 unattended (CDP Extensions.loadUnpacked + autoplay)",
 };
 let captureRunningAtMs = null;
+let replayStartedAtMs = null;
 
 const watchdog = setTimeout(() => {
   console.error("[live2] watchdog fired");
@@ -376,11 +377,13 @@ try {
   result.drainMs = Date.now() - (quietSince - DRAIN_QUIET_MS);
   console.error("[live2] backlog drained; opening the window");
 
-  await page.evaluate(async () => {
-    const video = document.querySelector("video");
-    video.currentTime = 0;
-    await video.play();
-  });
+  replayStartedAtMs =
+    await page.evaluate(async () => {
+      const video = document.querySelector("video");
+      video.currentTime = 0;
+      await video.play();
+      return Date.now();
+    });
 
   await page.evaluate(() => {
     window.__samples = [];
@@ -670,9 +673,19 @@ const blankBarSamples =
       block.stackDisplayed
       && block.blank,
   ).length;
+const captureToReplayMs =
+  captureRunningAtMs !== null
+  && replayStartedAtMs !== null
+    ? Math.max(
+        0,
+        replayStartedAtMs
+          - captureRunningAtMs,
+      )
+    : null;
+
 function sampleDelayMs(sample) {
   if (
-    captureRunningAtMs === null
+    replayStartedAtMs === null
     || sample === undefined
   ) {
     return null;
@@ -681,7 +694,7 @@ function sampleDelayMs(sample) {
   return Math.max(
     0,
     sample.sampledAtMs
-      - captureRunningAtMs,
+      - replayStartedAtMs,
   );
 }
 
@@ -769,6 +782,7 @@ result.gates = {
   nonEmptyPageTransitions,
   twoPageCuesObserved,
   blankBarSamples,
+  captureToReplayMs,
   firstCaptionMs,
   firstTentativeMs,
   firstFinalMs,
