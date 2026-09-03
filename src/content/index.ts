@@ -28,6 +28,9 @@ import {
   DEFAULT_SETTINGS,
 } from "../shared/settings";
 import {
+  createCaptionDisplayLog,
+} from "../shared/caption-display-log";
+import {
   presentCaptionIfAllowed,
 } from "../shared/explicit-stop-drain";
 import type {
@@ -268,6 +271,8 @@ let activeShowOriginal =
   DEFAULT_SETTINGS.showOriginal;
 let activeShowTentative =
   DEFAULT_SETTINGS.showTentative;
+const captionDisplayLog =
+  createCaptionDisplayLog();
 let playbackEventTarget:
   | HTMLVideoElement
   | null = null;
@@ -2494,6 +2499,7 @@ export function ensureOverlay(): CaptionOverlay {
     buildStamp: CONTENT_INSTANCE_VERSION,
     showOriginal: activeShowOriginal,
     showTentative: activeShowTentative,
+    displayLog: captionDisplayLog,
     onCaptionFadeOut() {
       if (
         drainReadyRequestId !== null &&

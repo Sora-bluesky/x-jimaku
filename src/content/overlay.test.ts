@@ -24,6 +24,10 @@ import {
   CUE_ACCELERATED_DISPLAY_MS,
   CUE_MINIMUM_DISPLAY_MS,
 } from "./overlay";
+import {
+  createCaptionDisplayLog,
+  type CaptionDisplayLogSink,
+} from "../shared/caption-display-log";
 
 const BUILD_STAMP =
   "0.6.0 abc1234-dirty 2026-09-02T03:04:05Z";
@@ -52,6 +56,7 @@ function createOverlay(
     showTentative?: boolean;
     getTargetVideo?: () => HTMLVideoElement | null;
     onCaptionFadeOut?: () => void;
+    displayLog?: CaptionDisplayLogSink;
   } = {},
 ): CaptionOverlay {
   const overlay = new CaptionOverlay({
@@ -68,6 +73,7 @@ function createOverlay(
       options.onCaptionFadeOut ??
       (() => {
       }),
+    displayLog: options.displayLog,
   });
 
   activeOverlay = overlay;
@@ -2057,6 +2063,145 @@ describe(
         } finally {
           restore();
         }
+      },
+    );
+  },
+);
+
+describe(
+  "CaptionOverlay display log",
+  () => {
+    it(
+      "records both lines, cue, page, and appearance time",
+      () => {
+        const log = createCaptionDisplayLog({
+          storage: null,
+        });
+        const overlay = createOverlay({
+          displayLog: log,
+        });
+        overlay.setTranslationPath(
+          "language-model",
+        );
+        showFinal(
+          overlay,
+          1,
+          "上段だけ",
+          "Only the first line",
+        );
+
+        const page = log.getPages()[0];
+
+        expect(log.getPages()).toHaveLength(
+          1,
+        );
+        expect(page?.line0).toBe("上段だけ");
+        expect(page?.line1).toBe("");
+        expect(page?.cueId).toBe("1:0");
+        expect(page?.pageId).toBe("0");
+        expect(page?.appearedAt).toEqual(
+          expect.any(String),
+        );
+        expect(
+          Number.isNaN(
+            Date.parse(page?.appearedAt ?? ""),
+          ),
+        ).toBe(false);
+        expect(page?.replacedAt).toBeNull();
+        expect(page?.sourceText).toBe(
+          "Only the first line",
+        );
+        expect(page?.translationPath).toBe(
+          "language-model",
+        );
+        expect(page?.showOriginal).toBe(
+          false,
+        );
+        expect(page?.showTentative).toBe(
+          false,
+        );
+      },
+    );
+
+    it(
+      "records when a replaced page went away and leaves the current page open",
+      () => {
+        const log = createCaptionDisplayLog({
+          storage: null,
+        });
+        const overlay = createOverlay({
+          displayLog: log,
+        });
+        const inputLines = wrapCueText(
+          THREE_LINE_TEXT,
+          MAX_LINE_UNITS,
+        ).split("\n");
+
+        showFinal(
+          overlay,
+          1,
+          THREE_LINE_TEXT,
+        );
+        vi.advanceTimersByTime(
+          CUE_MINIMUM_DISPLAY_MS,
+        );
+
+        const pages = log.getPages();
+
+        expect(pages).toHaveLength(2);
+        expect(pages[0]?.line0).toBe(
+          inputLines[0] ?? "",
+        );
+        expect(pages[0]?.line1).toBe(
+          inputLines[1] ?? "",
+        );
+        expect(pages[0]?.pageId).toBe("0");
+        expect(pages[0]?.replacedAt).toEqual(
+          expect.any(String),
+        );
+        expect(pages[1]?.line0).toBe(
+          inputLines[2] ?? "",
+        );
+        expect(pages[1]?.line1).toBe("");
+        expect(pages[1]?.pageId).toBe("1");
+        expect(pages[1]?.replacedAt).toBeNull();
+        expect(pages[0]?.cueId).toBe(
+          pages[1]?.cueId,
+        );
+      },
+    );
+
+    it(
+      "records the original and tentative row configuration",
+      () => {
+        const log = createCaptionDisplayLog({
+          storage: null,
+        });
+        const overlay = createOverlay({
+          displayLog: log,
+          showOriginal: true,
+          showTentative: true,
+        });
+
+        showFinal(
+          overlay,
+          1,
+          "日本語",
+          "English source",
+        );
+
+        const page = log.getPages()[0];
+
+        expect(page?.showOriginal).toBe(true);
+        expect(page?.showTentative).toBe(
+          true,
+        );
+        expect(page?.originalRowVisible).toBe(
+          true,
+        );
+        expect(page?.sourceText).toBe(
+          "English source",
+        );
       },
     );
   },

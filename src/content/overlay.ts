@@ -1,6 +1,9 @@
 import type {
   TranslationPath,
 } from "../shared/messages";
+import type {
+  CaptionDisplayLogSink,
+} from "../shared/caption-display-log";
 import {
   CAPTION_FADE_MS,
   CAPTION_VISIBLE_MS,
@@ -81,6 +84,7 @@ interface CueData {
   sourceIds: readonly number[];
   primaryText: string;
   originalText: string;
+  sourceText: string;
   formattedPrimary: string;
   fallback?: boolean;
 }
@@ -122,6 +126,7 @@ export interface CaptionOverlayOptions {
   showOriginal: boolean;
   showTentative: boolean;
   onCaptionFadeOut?(): void;
+  displayLog?: CaptionDisplayLogSink;
 }
 
 export class CaptionOverlay {
@@ -700,6 +705,7 @@ export class CaptionOverlay {
     }
 
     this.destroyed = true;
+    this.notifyPageHidden();
     this.cancelCueAdvance();
     this.cancelCaptionFade();
     this.resetCaptionFadeVisualState();
@@ -1204,6 +1210,7 @@ export class CaptionOverlay {
         sourceIds: [line.id],
         primaryText: part,
         originalText: original,
+        sourceText: source,
         fallback,
         formattedPrimary:
           wrapCueText(
@@ -1395,6 +1402,13 @@ export class CaptionOverlay {
           )
           .join(" ")
           .trim();
+      const combinedSource =
+        left.sourceText ===
+          right.sourceText
+          ? left.sourceText
+          : `${left.sourceText} ${right.sourceText}`
+              .replace(/\s+/gu, " ")
+              .trim();
 
       this.waitingCues.splice(
         index,
@@ -1411,6 +1425,7 @@ export class CaptionOverlay {
             combinedOriginal,
             MAX_ORIGINAL_CHARS,
           ),
+          sourceText: combinedSource,
           fallback: left.fallback,
           formattedPrimary:
             wrapCueText(
@@ -1638,9 +1653,53 @@ export class CaptionOverlay {
       secondLine;
     this.originalLine.textContent =
       originalText;
+    this.notifyDisplayedPage(
+      activeCue,
+      pageIndex,
+      firstLine,
+      secondLine,
+      originalText,
+    );
+  }
+
+  private notifyDisplayedPage(
+    activeCue: ActiveCue,
+    pageIndex: number,
+    firstLine: string,
+    secondLine: string,
+    originalText: string,
+  ): void {
+    this.options.displayLog?.recordPageShown(
+      {
+        cueId: activeCue.data.cueId,
+        pageId: String(pageIndex),
+        line0: firstLine,
+        line1: secondLine,
+        sourceText:
+          activeCue.data.sourceText,
+        translationPath:
+          this.translationPath,
+        showOriginal: this.showOriginal,
+        showTentative:
+          this.showTentative,
+        originalRowVisible:
+          this.showOriginal &&
+          originalText !== "",
+        tentativeRowVisible:
+          this.showTentative &&
+          this.tentativeLine.textContent !==
+            "",
+      },
+    );
+  }
+
+  private notifyPageHidden(): void {
+    this.options.displayLog
+      ?.recordPageHidden();
   }
 
   private resetDisplayBlock(): void {
+    this.notifyPageHidden();
     this.cueTextSnapshots.set(
       this.cueElement,
       "",

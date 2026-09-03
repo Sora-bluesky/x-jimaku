@@ -23,6 +23,14 @@ import {
   writeSettings,
   type WhisperModel,
 } from "../shared/settings";
+import {
+  CAPTION_DISPLAY_LOG_ENABLED_KEY,
+  clearCaptionDisplayLog,
+  formatCaptionDisplayLogExport,
+  readCaptionDisplayLogEnabled,
+  readCaptionDisplayLogPages,
+  writeCaptionDisplayLogEnabled,
+} from "../shared/caption-display-log";
 import type {
   CaptureState,
   CaptureStatus,
@@ -148,6 +156,26 @@ const showTentativeInput =
   requireElement<HTMLInputElement>(
     "show-tentative",
   );
+const recordCaptionDisplayInput =
+  requireElement<HTMLInputElement>(
+    "record-caption-display",
+  );
+const copyCaptionLogButton =
+  requireElement<HTMLButtonElement>(
+    "copy-caption-log",
+  );
+const downloadCaptionLogButton =
+  requireElement<HTMLButtonElement>(
+    "download-caption-log",
+  );
+const clearCaptionLogButton =
+  requireElement<HTMLButtonElement>(
+    "clear-caption-log",
+  );
+const captionLogStatus =
+  requireElement<HTMLElement>(
+    "caption-log-status",
+  );
 const settingsStatus =
   requireElement<HTMLElement>(
     "settings-status",
@@ -246,6 +274,7 @@ renderCaptureState({
 
 connectOptionsPort();
 void initializeSettings();
+void initializeCaptionDisplayLogControls();
 void refreshTranslationAvailability();
 
 void optionsWebGpuPromise.then((result) => {
@@ -293,6 +322,34 @@ prepareTranslationButton.addEventListener(
   },
 );
 
+recordCaptionDisplayInput.addEventListener(
+  "change",
+  () => {
+    void saveCaptionDisplayLogEnabled();
+  },
+);
+
+copyCaptionLogButton.addEventListener(
+  "click",
+  () => {
+    void copyCaptionDisplayLog();
+  },
+);
+
+downloadCaptionLogButton.addEventListener(
+  "click",
+  () => {
+    void downloadCaptionDisplayLog();
+  },
+);
+
+clearCaptionLogButton.addEventListener(
+  "click",
+  () => {
+    void clearCaptionDisplayLogFromPage();
+  },
+);
+
 modelSelect.addEventListener(
   "change",
   () => {
@@ -317,6 +374,21 @@ for (const control of [
 
 chrome.storage.onChanged.addListener(
   (changes, areaName) => {
+    if (areaName === "local") {
+      if (
+        changes[
+          CAPTION_DISPLAY_LOG_ENABLED_KEY
+        ] !== undefined
+      ) {
+        recordCaptionDisplayInput.checked =
+          changes[
+            CAPTION_DISPLAY_LOG_ENABLED_KEY
+          ].newValue !== false;
+      }
+
+      return;
+    }
+
     if (
       areaName !== "sync" ||
       changes[SETTINGS_STORAGE_KEY] ===
@@ -588,6 +660,101 @@ function setSettingsControlsDisabled(
     disabled;
   showOriginalInput.disabled = disabled;
   showTentativeInput.disabled = disabled;
+}
+
+async function initializeCaptionDisplayLogControls():
+  Promise<void> {
+  try {
+    recordCaptionDisplayInput.checked =
+      await readCaptionDisplayLogEnabled();
+  } catch (error) {
+    captionLogStatus.textContent =
+      `表示ログ設定の読込に失敗しました: ${toProbeError(error).message}`;
+  }
+}
+
+async function saveCaptionDisplayLogEnabled():
+  Promise<void> {
+  try {
+    await writeCaptionDisplayLogEnabled(
+      recordCaptionDisplayInput.checked,
+    );
+    captionLogStatus.textContent =
+      recordCaptionDisplayInput.checked
+        ? "表示ログの記録を開始します。"
+        : "表示ログの記録を止めました。";
+  } catch (error) {
+    captionLogStatus.textContent =
+      `表示ログ設定の保存に失敗しました: ${toProbeError(error).message}`;
+  }
+}
+
+async function copyCaptionDisplayLog():
+  Promise<void> {
+  try {
+    const text =
+      await buildCaptionDisplayLogExport();
+    await navigator.clipboard.writeText(
+      text,
+    );
+    captionLogStatus.textContent =
+      "表示ログをコピーしました。";
+  } catch (error) {
+    captionLogStatus.textContent =
+      `表示ログのコピーに失敗しました: ${toProbeError(error).message}`;
+  }
+}
+
+async function downloadCaptionDisplayLog():
+  Promise<void> {
+  try {
+    const text =
+      await buildCaptionDisplayLogExport();
+    const stamp = nowIso().replaceAll(
+      /[:.]/g,
+      "",
+    );
+    const blob = new Blob(
+      [text],
+      { type: "application/json" },
+    );
+    const url = URL.createObjectURL(blob);
+    const anchor =
+      document.createElement("a");
+    anchor.href = url;
+    anchor.download =
+      `x-jimaku-caption-log-${stamp}.json`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+    captionLogStatus.textContent =
+      "表示ログをダウンロードしました。";
+  } catch (error) {
+    captionLogStatus.textContent =
+      `表示ログのダウンロードに失敗しました: ${toProbeError(error).message}`;
+  }
+}
+
+async function clearCaptionDisplayLogFromPage():
+  Promise<void> {
+  try {
+    await clearCaptionDisplayLog();
+    captionLogStatus.textContent =
+      "表示ログを消しました。";
+  } catch (error) {
+    captionLogStatus.textContent =
+      `表示ログの削除に失敗しました: ${toProbeError(error).message}`;
+  }
+}
+
+async function buildCaptionDisplayLogExport():
+  Promise<string> {
+  const pages =
+    await readCaptionDisplayLogPages();
+
+  return formatCaptionDisplayLogExport(
+    pages,
+    nowIso(),
+  );
 }
 
 async function refreshTranslationAvailability(): Promise<void> {

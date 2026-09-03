@@ -274,6 +274,9 @@ if (options.displayMode === "both") {
 // Puppeteer's headless defaults (--headless, --mute-audio) leak through
 // ignoreDefaultArgs, and its --disable-features list disables the Optimization
 // Guide that delivers the on-device model.
+// Filled from the extension worker after the capture; see the probe near teardown.
+let captionLogEntries = null;
+
 const baseArgs = puppeteer
   .defaultArgs({ headless: false })
   .filter(
@@ -778,6 +781,39 @@ try {
 } finally {
   clearTimeout(watchdog);
   const proc = browser.process();
+  try {
+    const targets = await browser.targets();
+    const worker = targets.find(
+      (t) =>
+        t.url().startsWith(`chrome-extension://${result.extensionId}`)
+        && (t.type() === "service_worker" || t.type() === "background_page"),
+    );
+    if (!worker) {
+      captionLogEntries = "no-worker-target";
+    } else {
+      const w = await worker.worker();
+        // The log lives in the extension's storage, which the fixture page cannot
+      // read. Ask the worker, so a run says whether recording actually fired
+      // rather than only that the code shipped.
+      const probe = await w.evaluate(async () => {
+        const all = await chrome.storage.local.get(null);
+        const value = all.captionDisplayLog;
+        const pages = Array.isArray(value)
+          ? value
+          : Array.isArray(value?.pages)
+            ? value.pages
+            : null;
+        return {
+          entries: pages === null
+            ? `unexpected-shape: ${typeof value}`
+            : pages.length,
+        };
+      });
+      captionLogEntries = probe.entries;
+    }
+  } catch (error) {
+    captionLogEntries = `probe-failed: ${String(error).slice(0, 120)}`;
+  }
   await Promise.race([browser.close(), new Promise((r) => setTimeout(r, 15000))]);
   if (proc && proc.exitCode === null) proc.kill("SIGKILL");
   await server.close?.();
@@ -1404,6 +1440,7 @@ result.observations = {
     phraseBoundarySummary.rate,
   phraseBoundarySamples:
     phraseBoundarySummary.samples,
+  captionLogEntries,
   glossaryLatinKept,
   glossaryLatinLost,
   keepLatinSourceHits,
