@@ -276,6 +276,7 @@ if (options.displayMode === "both") {
 // Guide that delivers the on-device model.
 // Filled from the extension worker after the capture; see the probe near teardown.
 let captionLogEntries = null;
+let captionLogDwell = null;
 
 const baseArgs = puppeteer
   .defaultArgs({ headless: false })
@@ -409,6 +410,25 @@ try {
   // Settings reach the capture path through storage, which is read independently
   // of this message, so give it a beat before toggling.
   await new Promise((r) => setTimeout(r, 2500));
+  // The caption log persists across runs in the profile, so a run that does not
+  // clear it reports the pages of every run before it as its own.
+  try {
+    const clearTargets = await browser.targets();
+    const clearWorker = clearTargets.find(
+      (t) =>
+        t.url().startsWith(`chrome-extension://${result.extensionId}`)
+        && (t.type() === "service_worker" || t.type() === "background_page"),
+    );
+    if (clearWorker) {
+      const w = await clearWorker.worker();
+      await w.evaluate(async () => {
+        await chrome.storage.local.remove("captionDisplayLog");
+      });
+    }
+  } catch {
+    // A run that could not clear still reports its own count honestly enough;
+    // the number is a floor, and the probe says how many pages closed.
+  }
   console.error(`[live2] settings applied; ${JSON.stringify(result.builtinAi)}`);
 
   await page.evaluate(() => {
@@ -803,13 +823,55 @@ try {
           : Array.isArray(value?.pages)
             ? value.pages
             : null;
+        if (pages === null) {
+          return {
+            entries: `unexpected-shape: ${typeof value}`,
+          };
+        }
+
+        // Dwell is the whole point of the log: a well-wrapped page replaced
+        // after 400ms is unreadable, and nothing measured that before.
+        const closed = pages.filter(
+          (page) => page.appearedAt && page.replacedAt,
+        );
+        const rows = closed.map((page) => {
+          const ms =
+            Date.parse(page.replacedAt) - Date.parse(page.appearedAt);
+          const chars =
+            (page.line0 ?? "").length + (page.line1 ?? "").length;
+          return { ms, chars };
+        }).filter((row) => Number.isFinite(row.ms) && row.ms > 0);
+        const at = (list, q) =>
+          list.length === 0
+            ? null
+            : list[Math.min(list.length - 1, Math.floor(list.length * q))];
+        const dwell = rows.map((row) => row.ms).sort((a, b) => a - b);
+        const speed = rows
+          .filter((row) => row.chars > 0)
+          .map((row) => row.chars / (row.ms / 1000))
+          .sort((a, b) => a - b);
+
         return {
-          entries: pages === null
-            ? `unexpected-shape: ${typeof value}`
-            : pages.length,
+          entries: pages.length,
+          closed: rows.length,
+          dwellMsP10: at(dwell, 0.1),
+          dwellMsP50: at(dwell, 0.5),
+          dwellMsP90: at(dwell, 0.9),
+          charsPerSecondP50: at(speed, 0.5),
+          charsPerSecondP90: at(speed, 0.9),
         };
       });
       captionLogEntries = probe.entries;
+      captionLogDwell = probe.closed === undefined
+        ? null
+        : {
+            closedPages: probe.closed,
+            dwellMsP10: probe.dwellMsP10,
+            dwellMsP50: probe.dwellMsP50,
+            dwellMsP90: probe.dwellMsP90,
+            charsPerSecondP50: probe.charsPerSecondP50,
+            charsPerSecondP90: probe.charsPerSecondP90,
+          };
     }
   } catch (error) {
     captionLogEntries = `probe-failed: ${String(error).slice(0, 120)}`;
@@ -1441,6 +1503,7 @@ result.observations = {
   phraseBoundarySamples:
     phraseBoundarySummary.samples,
   captionLogEntries,
+  captionLogDwell,
   glossaryLatinKept,
   glossaryLatinLost,
   keepLatinSourceHits,
