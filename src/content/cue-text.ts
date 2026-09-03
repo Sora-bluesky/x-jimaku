@@ -1,3 +1,5 @@
+import { findJapanesePhraseBoundaries } from "./phrase-boundaries";
+
 export const MAX_CUE_UNITS = 28;
 export const MAX_LINE_UNITS = 14;
 export const MIN_FITTING_LINE_UNITS = 1;
@@ -255,6 +257,8 @@ export function splitCueText(
   const characters = Array.from(normalized);
   const protectedRanges =
     findProtectedUrlRanges(normalized);
+  const phraseBoundaries =
+    findJapanesePhraseBoundaries(normalized);
   const parts: string[] = [];
   let start = 0;
 
@@ -301,6 +305,7 @@ export function splitCueText(
         target,
         MIN_CUE_SEGMENT_CHARACTERS,
         protectedRanges,
+        phraseBoundaries,
       ),
     );
     const part = characters
@@ -355,6 +360,8 @@ export function wrapCueText(
   const characters = Array.from(normalized);
   const protectedRanges =
     findProtectedUrlRanges(normalized);
+  const phraseBoundaries =
+    findJapanesePhraseBoundaries(normalized);
   const lines: string[] = [];
   let start = 0;
 
@@ -429,6 +436,7 @@ export function wrapCueText(
         target,
         MIN_LINE_SEGMENT_CHARACTERS,
         protectedRanges,
+        phraseBoundaries,
         minimumLineBoundary,
         maximumLineBoundary,
       );
@@ -548,6 +556,7 @@ function findNaturalTextBoundary(
   ranges: ReadonlyArray<
     readonly [start: number, end: number]
   >,
+  phraseBoundaries: ReadonlySet<number>,
   minimumBoundary: number = start + 1,
   maximumBoundaryLimit: number = target,
 ): number {
@@ -588,6 +597,7 @@ function findNaturalTextBoundary(
         characters,
         start,
         boundary,
+        phraseBoundaries,
       );
 
     if (bonus === null) {
@@ -643,6 +653,7 @@ function naturalBoundaryBonus(
   characters: readonly string[],
   start: number,
   boundary: number,
+  phraseBoundaries: ReadonlySet<number>,
 ): number | null {
   const previous =
     characters[boundary - 1] ?? "";
@@ -661,6 +672,10 @@ function naturalBoundaryBonus(
     )
   ) {
     return 3;
+  }
+
+  if (phraseBoundaries.has(boundary)) {
+    return 2;
   }
 
   if (

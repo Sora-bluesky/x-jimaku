@@ -3,6 +3,7 @@ import {
   expect,
   it,
 } from "vitest";
+import { findJapanesePhraseBoundaries } from "./phrase-boundaries";
 import {
   createCaptionTextMeasurer,
   deriveLineUnitBudget,
@@ -975,3 +976,110 @@ describe(
     );
   },
 );
+
+describe("phrase boundary wrapping", () => {
+  const phraseText =
+    "どんどん空いっぱい光る夜景色";
+
+  it(
+    "breaks a particle-free sentence at a phrase boundary instead of the width limit",
+    () => {
+      const first =
+        wrapCueText(
+          phraseText,
+          6,
+        ).split("\n")[0] ?? "";
+      const firstLength =
+        Array.from(first).length;
+      const boundaries =
+        findJapanesePhraseBoundaries(
+          phraseText,
+        );
+
+      expect(firstLength).toBeLessThan(6);
+      expect(
+        boundaries.has(firstLength),
+      ).toBe(true);
+      expect(
+        wrapCueText(phraseText, 6)
+          .split("\n")
+          .join(""),
+      ).toBe(phraseText);
+    },
+  );
+
+  it(
+    "does not take a phrase boundary past the width limit",
+    () => {
+      const first =
+        wrapCueText(
+          phraseText,
+          4,
+        ).split("\n")[0] ?? "";
+      const boundaries =
+        findJapanesePhraseBoundaries(
+          phraseText,
+        );
+
+      expect(boundaries.has(5)).toBe(true);
+      expect(first).not.toBe(
+        "どんどん空",
+      );
+      expect(
+        displayUnits(first),
+      ).toBeLessThanOrEqual(4);
+    },
+  );
+
+  it(
+    "does not break a protected URL at a phrase boundary inside it",
+    () => {
+      const text =
+        "https://今日は天気ですよ続きの文章を足していく確認作業";
+      const first =
+        wrapCueText(
+          text,
+          12,
+        ).split("\n")[0] ?? "";
+      const boundaries =
+        findJapanesePhraseBoundaries(
+          text,
+        );
+
+      expect(boundaries.has(11)).toBe(
+        true,
+      );
+      expect(first).not.toBe(
+        "https://今日は",
+      );
+      expect(
+        Array.from(first).length,
+      ).toBeGreaterThan(11);
+      expect(
+        displayUnits(first),
+      ).toBeLessThanOrEqual(12);
+    },
+  );
+
+  it(
+    "prefers a clause break after 、 over a phrase boundary at the same distance",
+    () => {
+      const text =
+        "一二三、どんどん空いまる";
+      const boundaries =
+        findJapanesePhraseBoundaries(
+          text,
+        );
+
+      expect(boundaries.has(8)).toBe(
+        true,
+      );
+      expect(
+        wrapCueText(
+          text,
+          10,
+        ).split("\n")[0],
+      ).toBe("一二三、");
+    },
+  );
+});
