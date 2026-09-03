@@ -28,32 +28,32 @@ function glossaryTerms(
 }
 
 describe("selectGlossaryMatches", () => {
-  it("yields a model name and the same word as ordinary English, with conditional phrasing", () => {
-    const model = selectGlossaryMatches(
-      "Anthropic released Opus",
+  it("yields a product name and the same word as ordinary English, with conditional phrasing", () => {
+    const product = selectGlossaryMatches(
+      "GitHub released Cursor",
     );
     const ordinary = selectGlossaryMatches(
-      "The Opus premiered tonight",
+      "The Cursor moved",
     );
 
     expect(keepLatinTerms(
-      "Anthropic released Opus",
-    )).toEqual(["Anthropic", "Opus"]);
+      "GitHub released Cursor",
+    )).toEqual(["GitHub", "Cursor"]);
     expect(ordinary.keepLatin).toEqual([
-      { term: "Opus", ambiguous: true },
+      { term: "Cursor", ambiguous: true },
     ]);
 
-    const modelPrompt =
-      glossaryPromptBlocks(model).join("\n");
+    const productPrompt =
+      glossaryPromptBlocks(product).join("\n");
     const ordinaryPrompt =
       glossaryPromptBlocks(ordinary).join("\n");
 
-    expect(modelPrompt).toContain("Anthropic");
-    expect(modelPrompt).toContain(
-      "モデル・製品・組織名のときだけ原綴り（一般語は訳す）: Opus",
+    expect(productPrompt).toContain("GitHub");
+    expect(productPrompt).toContain(
+      "モデル・製品・組織名のときだけ原綴り（一般語は訳す）: Cursor",
     );
     expect(ordinaryPrompt).toBe(
-      "[原綴り]\nモデル・製品・組織名のときだけ原綴り（一般語は訳す）: Opus",
+      "[原綴り]\nモデル・製品・組織名のときだけ原綴り（一般語は訳す）: Cursor",
     );
   });
 
@@ -145,18 +145,32 @@ describe("KEEP_LATIN_MASK_TERMS", () => {
     );
     expect(
       KEEP_LATIN_MASK_TERMS,
-    ).not.toContain("Opus");
-    expect(
-      KEEP_LATIN_MASK_TERMS,
-    ).not.toContain("Haiku");
+    ).not.toContain("Cursor");
     expect(
       KEEP_LATIN_MASK_TERMS,
     ).not.toContain("Roman");
     expect(KEEP_LATIN_ALL_TERMS).toContain(
-      "Opus",
+      "Cursor",
     );
     expect(KEEP_LATIN_ALL_TERMS).toContain(
       "Claude",
     );
+  });
+
+  it("holds Opus, Sonnet, Haiku, Fable, and Mythos in Latin unconditionally", () => {
+    for (const term of [
+      "Opus",
+      "Sonnet",
+      "Haiku",
+      "Fable",
+      "Mythos",
+    ]) {
+      expect(KEEP_LATIN_MASK_TERMS).toContain(
+        term,
+      );
+      expect(
+        selectGlossaryMatches(term).keepLatin,
+      ).toEqual([{ term }]);
+    }
   });
 });

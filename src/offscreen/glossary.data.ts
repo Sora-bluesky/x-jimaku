@@ -19,11 +19,20 @@
 export interface KeepLatinTerm {
   readonly term: string;
   /**
-   * True when the word is also ordinary English. Anthropic's model names are
-   * all common nouns, so "opus", "sonnet", "haiku", "fable" and "mythos" carry
-   * their everyday meanings too, and a caption about poetry must not come out
-   * with "Haiku" sitting in Latin script. The rule for these is conditional on
-   * the term naming the product, which only the sentence can decide.
+   * True when the word is also ordinary English and the everyday sense is
+   * plausible in what this extension captions.
+   *
+   * Anthropic's model names are all common nouns, and they were flagged here
+   * at first for that reason. Measurement changed the call: the model names
+   * are what a viewer actually reported seeing mangled, and the videos this
+   * runs on are about AI, where "opus" and "haiku" in their everyday senses
+   * effectively do not occur. They are now held in Latin unconditionally
+   * (project owner's decision, 2026-09-03). The cost is that a video about
+   * poetry would render "Haiku" in Latin.
+   *
+   * What is left flagged are the words whose everyday sense does turn up in
+   * this material: Roman as an adjective, Meta as a prefix, and Clerk and
+   * Cursor as ordinary nouns.
    */
   readonly ambiguous?: true;
 }
@@ -31,11 +40,11 @@ export interface KeepLatinTerm {
 export const KEEP_LATIN_TERMS: readonly KeepLatinTerm[] = [
   { term: "Anthropic" },
   { term: "Claude" },
-  { term: "Opus", ambiguous: true },
-  { term: "Sonnet", ambiguous: true },
-  { term: "Haiku", ambiguous: true },
-  { term: "Fable", ambiguous: true },
-  { term: "Mythos", ambiguous: true },
+  { term: "Opus" },
+  { term: "Sonnet" },
+  { term: "Haiku" },
+  { term: "Fable" },
+  { term: "Mythos" },
   { term: "OpenAI" },
   { term: "ChatGPT" },
   { term: "GPT" },

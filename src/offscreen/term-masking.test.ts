@@ -214,8 +214,21 @@ describe("term masking", () => {
     ).toBe("Claudeです");
   });
 
+  it("masks Opus with no version, family name, or page name", () => {
+    const result = planKeepLatin(
+      "The Opus premiered",
+    );
+
+    expect(result.masked).toBe(
+      "The %%1%% premiered",
+    );
+    expect(result.maskPlan?.entries).toEqual([
+      { number: 1, term: "Opus" },
+    ]);
+  });
+
   it("does not mask an ambiguous glossary name", () => {
-    const original = "The Opus premiered";
+    const original = "The Cursor moved";
 
     expect(
       createMaskPlan(
@@ -230,18 +243,15 @@ describe("term masking", () => {
     });
   });
 
-  it("masks Opus 4.5 and leaves ordinary opus", () => {
+  it("masks Cursor 4.5 and leaves ordinary cursor", () => {
     expect(
-      planKeepLatin("Opus 4.5").masked,
+      planKeepLatin("Cursor 4.5").masked,
     ).toBe("%%1%% 4.5");
     expect(
-      planKeepLatin("Fable 5.1").masked,
-    ).toBe("%%1%% 5.1");
-    expect(
-      planKeepLatin("Sonnet 4").masked,
+      planKeepLatin("Clerk 4").masked,
     ).toBe("%%1%% 4");
 
-    const ordinary = "his greatest opus";
+    const ordinary = "the blinking cursor";
     expect(
       planKeepLatin(ordinary),
     ).toEqual({
@@ -250,7 +260,7 @@ describe("term masking", () => {
       maskPlan: null,
     });
 
-    const capital = "The Opus premiered";
+    const capital = "The Cursor moved";
     expect(
       planKeepLatin(capital),
     ).toEqual({
@@ -260,9 +270,9 @@ describe("term masking", () => {
     });
   });
 
-  it("masks Claude Opus on the neighbouring family name", () => {
+  it("masks NASA Roman on the neighbouring family name", () => {
     const result = planKeepLatin(
-      "Claude Opus",
+      "NASA Roman",
     );
 
     expect(result.masked).toBe(
@@ -271,23 +281,23 @@ describe("term masking", () => {
     expect(
       result.maskPlan?.entries,
     ).toEqual([
-      { number: 1, term: "Claude" },
-      { number: 2, term: "Opus" },
+      { number: 1, term: "NASA" },
+      { number: 2, term: "Roman" },
     ]);
     expect(
-      planKeepLatin("Anthropic's Opus")
+      planKeepLatin("NASA's Roman")
         .masked,
-    ).toBe("Anthropic's %%1%%");
+    ).toBe("NASA's %%1%%");
     expect(
-      planKeepLatin("Claude 4 Opus")
+      planKeepLatin("NASA 4 Roman")
         .masked,
     ).toBe("%%1%% 4 %%2%%");
   });
 
   it("masks an ambiguous term the page names", () => {
     const result = planKeepLatin(
-      "We shipped Opus today",
-      ["Opus 4.5"],
+      "We shipped Cursor today",
+      ["Cursor 4.5"],
     );
 
     expect(result.masked).toBe(
@@ -296,7 +306,7 @@ describe("term masking", () => {
     expect(
       result.maskPlan?.entries,
     ).toEqual([
-      { number: 1, term: "Opus" },
+      { number: 1, term: "Cursor" },
     ]);
   });
 
@@ -321,23 +331,23 @@ describe("term masking", () => {
     });
   });
 
-  it("does not drop page nouns to make room for evidenced Opus", () => {
+  it("does not drop page nouns to make room for evidenced Cursor", () => {
     const result = planKeepLatin(
-      "Theo Theo Theo Theo Opus 4.5",
+      "Theo Theo Theo Theo Cursor 4.5",
       ["Theo"],
     );
 
     expect(result.masked).toBe(
-      "%%1%% %%2%% %%3%% %%4%% Opus 4.5",
+      "%%1%% %%2%% %%3%% %%4%% Cursor 4.5",
     );
   });
 
   it("does not treat a family name in the same clause as beside", () => {
     expect(
       planKeepLatin(
-        "Hugging Face released Opus.",
+        "Hugging Face released Cursor.",
       ).masked,
-    ).toBe("%%1%% released Opus.");
+    ).toBe("%%1%% released Cursor.");
   });
 
   it("masks four glossary names and leaves NVIDIA", () => {
@@ -688,9 +698,9 @@ describe("TranslationEngine masking ladder", () => {
     engine.destroy();
   });
 
-  it("does not mask Opus in the LanguageModel prompt", async () => {
+  it("does not mask Cursor in the LanguageModel prompt", async () => {
     const prompt = installLanguageModel(
-      async () => "作品です",
+      async () => "動きました",
     );
     const onTranslated = vi.fn();
     const engine = createTestEngine(
@@ -703,7 +713,7 @@ describe("TranslationEngine masking ladder", () => {
     await translateClause(
       engine,
       7,
-      "The Opus premiered.",
+      "The Cursor moved.",
     );
 
     const sent = String(
@@ -711,21 +721,21 @@ describe("TranslationEngine masking ladder", () => {
     );
 
     expect(sent).toContain(
-      "[今訳す節]\nThe Opus premiered.",
+      "[今訳す節]\nThe Cursor moved.",
     );
     expect(sent).not.toContain("%%");
     expect(sent).toContain(
-      "モデル・製品・組織名のときだけ原綴り（一般語は訳す）: Opus",
+      "モデル・製品・組織名のときだけ原綴り（一般語は訳す）: Cursor",
     );
     expect(onTranslated).toHaveBeenCalledWith(
       expect.objectContaining({ id: 7 }),
-      "作品です",
+      "動きました",
     );
 
     engine.destroy();
   });
 
-  it("masks Opus 4.5 in the LanguageModel prompt", async () => {
+  it("masks Cursor 4.5 in the LanguageModel prompt", async () => {
     const prompt = installLanguageModel(
       async () => "%%1%%です",
     );
@@ -740,7 +750,7 @@ describe("TranslationEngine masking ladder", () => {
     await translateClause(
       engine,
       8,
-      "Opus 4.5 shipped.",
+      "Cursor 4.5 shipped.",
     );
 
     const sent = String(
@@ -750,23 +760,23 @@ describe("TranslationEngine masking ladder", () => {
     expect(sent).toContain(
       "[今訳す節]\n%%1%% 4.5 shipped.",
     );
-    expect(sent).not.toContain("Opus");
+    expect(sent).not.toContain("Cursor");
     expect(onTranslated).toHaveBeenCalledWith(
       expect.objectContaining({ id: 8 }),
-      "Opusです",
+      "Cursorです",
     );
 
     engine.destroy();
   });
 
-  it("masks Opus when the page names a phrase that contains it", async () => {
+  it("masks Cursor when the page names a phrase that contains it", async () => {
     const prompt = installLanguageModel(
       async () => "%%1%%です",
     );
     const onTranslated = vi.fn();
     const engine = createTestEngine(
       "prompt-api",
-      ["Opus 4.5"],
+      ["Cursor 4.5"],
       onTranslated,
     );
 
@@ -774,7 +784,7 @@ describe("TranslationEngine masking ladder", () => {
     await translateClause(
       engine,
       9,
-      "We shipped Opus today.",
+      "We shipped Cursor today.",
     );
 
     const sent = String(
@@ -784,17 +794,17 @@ describe("TranslationEngine masking ladder", () => {
     expect(sent).toContain(
       "[今訳す節]\nWe shipped %%1%% today.",
     );
-    // The proper-noun block still names Opus 4.5, because that is what the
+    // The proper-noun block still names Cursor 4.5, because that is what the
     // page called it. What matters is that the clause handed to the model
     // carries a placeholder instead of the name.
     expect(
       sent.slice(
         sent.indexOf("[今訳す節]"),
       ),
-    ).not.toContain("Opus");
+    ).not.toContain("Cursor");
     expect(onTranslated).toHaveBeenCalledWith(
       expect.objectContaining({ id: 9 }),
-      "Opusです",
+      "Cursorです",
     );
 
     engine.destroy();

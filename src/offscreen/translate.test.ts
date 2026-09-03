@@ -2081,16 +2081,16 @@ describe("TranslationEngine glossary prompt", () => {
 
   it("sends glossary instructions in the LanguageModel prompt", async () => {
     const sent = await sentPrompt(
-      "Hugging Face released Opus.",
+      "Hugging Face released Cursor.",
     );
 
     expect(sent).toContain("[原綴り]");
     expect(sent).not.toContain("Hugging Face");
     expect(sent).toContain(
-      "モデル・製品・組織名のときだけ原綴り（一般語は訳す）: Opus",
+      "モデル・製品・組織名のときだけ原綴り（一般語は訳す）: Cursor",
     );
     expect(sent).toContain(
-      "[今訳す節]\n%%1%% released Opus.",
+      "[今訳す節]\n%%1%% released Cursor.",
     );
   });
 
