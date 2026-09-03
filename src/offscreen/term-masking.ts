@@ -25,6 +25,9 @@ export function createMaskPlan(
   original: string,
   properNouns: readonly string[],
   glossaryTerms: readonly string[] = [],
+  allowGlossaryOccurrence?: (
+    occurrence: LocatedTerm,
+  ) => boolean,
 ): MaskedTranslationLine {
   const pageOccurrences =
     findNonOverlappingOccurrences(
@@ -53,7 +56,12 @@ export function createMaskPlan(
           (page) =>
             hit.start < page.end &&
             hit.end > page.start,
-        ),
+        ) &&
+        (allowGlossaryOccurrence ===
+          undefined ||
+          allowGlossaryOccurrence(
+            hit,
+          )),
     );
   const takenGlossary = [
     ...glossaryOccurrences,

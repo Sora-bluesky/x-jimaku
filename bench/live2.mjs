@@ -102,15 +102,17 @@ function countMatches(text, pattern) {
   return [...text.matchAll(new RegExp(pattern.source, flags))].length;
 }
 
-const KATAKANA_NAME_RENDERINGS = [
+const KATAKANA_NAME_RENDERINGS_AMBIGUOUS = [
   "オプス",
   "オパウス",
   "オピュス",
+  "クラーク",
+];
+const KATAKANA_NAME_RENDERINGS_PLAIN = [
   "クロード",
   "アンソロピック",
   "ハルキング",
   "ゴダード",
-  "クラーク",
 ];
 
 function splitEnglishClauses(text) {
@@ -1259,10 +1261,16 @@ for (const entry of keepLatinEntries) {
     keepLatinPattern(entry.term),
   );
 }
-let katakanaNameHits = 0;
-for (const rendering of KATAKANA_NAME_RENDERINGS) {
-  katakanaNameHits += joined.split(rendering).length - 1;
+let katakanaNameHitsAmbiguous = 0;
+for (const rendering of KATAKANA_NAME_RENDERINGS_AMBIGUOUS) {
+  katakanaNameHitsAmbiguous += joined.split(rendering).length - 1;
 }
+let katakanaNameHitsPlain = 0;
+for (const rendering of KATAKANA_NAME_RENDERINGS_PLAIN) {
+  katakanaNameHitsPlain += joined.split(rendering).length - 1;
+}
+const katakanaNameHits =
+  katakanaNameHitsAmbiguous + katakanaNameHitsPlain;
 
 result.observations = {
   captionTopChanges,
@@ -1277,6 +1285,8 @@ result.observations = {
   glossaryLatinLost,
   maskedNameOccurrences,
   katakanaNameHits,
+  katakanaNameHitsAmbiguous,
+  katakanaNameHitsPlain,
 };
 
 result.gates = {

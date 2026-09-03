@@ -13,7 +13,8 @@ import type {
   MaskedTranslationLine,
 } from "./term-masking";
 import {
-  KEEP_LATIN_MASK_TERMS,
+  KEEP_LATIN_ALL_TERMS,
+  allowKeepLatinMaskOccurrence,
   glossaryPromptBlocks,
   selectGlossaryMatches,
 } from "./glossary";
@@ -795,7 +796,13 @@ export class TranslationEngine {
     const request = createMaskPlan(
       line.text,
       context.properNouns,
-      KEEP_LATIN_MASK_TERMS,
+      KEEP_LATIN_ALL_TERMS,
+      (hit) =>
+        allowKeepLatinMaskOccurrence(
+          line.text,
+          hit,
+          context.properNouns,
+        ),
     );
 
     while (

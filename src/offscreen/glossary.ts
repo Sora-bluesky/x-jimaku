@@ -14,6 +14,17 @@ export const KEEP_LATIN_MASK_TERMS =
     (entry) =>
       entry.ambiguous !== true,
   ).map((entry) => entry.term);
+export const KEEP_LATIN_ALL_TERMS =
+  KEEP_LATIN_TERMS.map(
+    (entry) => entry.term,
+  );
+
+const AMBIGUOUS_KEEP_LATIN = new Set(
+  KEEP_LATIN_TERMS.filter(
+    (entry) =>
+      entry.ambiguous === true,
+  ).map((entry) => entry.term),
+);
 
 export interface GlossarySelection {
   readonly keepLatin: readonly KeepLatinTerm[];
@@ -43,6 +54,101 @@ function termPattern(
   return new RegExp(
     `(?<![A-Za-z0-9])${escapeRegExp(term)}(?![A-Za-z0-9'])`,
     ignoreCase ? "giu" : "gu",
+  );
+}
+
+export function allowKeepLatinMaskOccurrence(
+  clause: string,
+  occurrence: {
+    readonly term: string;
+    readonly start: number;
+    readonly end: number;
+  },
+  properNouns: readonly string[] = [],
+): boolean {
+  if (
+    !AMBIGUOUS_KEEP_LATIN.has(
+      occurrence.term,
+    )
+  ) {
+    return true;
+  }
+
+  return (
+    pageNamesTerm(
+      occurrence.term,
+      properNouns,
+    ) ||
+    hasVersionAfter(
+      clause,
+      occurrence.end,
+    ) ||
+    hasFamilyNeighbour(
+      clause,
+      occurrence.start,
+      occurrence.end,
+    )
+  );
+}
+
+function pageNamesTerm(
+  term: string,
+  properNouns: readonly string[],
+): boolean {
+  const pattern = new RegExp(
+    `(?<![A-Za-z0-9])${escapeRegExp(term)}(?![A-Za-z0-9'])`,
+    "u",
+  );
+
+  return properNouns.some(
+    (noun) => pattern.test(noun),
+  );
+}
+
+function hasVersionAfter(
+  clause: string,
+  end: number,
+): boolean {
+  // Dotted (4.5) or one digit (4).
+  // Two-digit Opus 27 stays ordinary.
+  return /^\s*(?:\d+\.\d+|[1-9])(?![0-9])/u
+    .test(clause.slice(end));
+}
+
+function hasFamilyNeighbour(
+  clause: string,
+  start: number,
+  end: number,
+): boolean {
+  const source = KEEP_LATIN_MASK_TERMS
+    .slice()
+    .sort(
+      (left, right) =>
+        right.length - left.length,
+    )
+    .map(escapeRegExp)
+    .join("|");
+
+  if (source === "") {
+    return false;
+  }
+
+  // Term match rejects Anthropic's;
+  // this still treats it as a neighbour.
+  const before = new RegExp(
+    `(?<![A-Za-z0-9])(?:${source})(?:['’]s)?(?:\\s+\\d+(?:\\.\\d+)*)?\\s+$`,
+    "u",
+  );
+  const after = new RegExp(
+    `^\\s+(?:${source})(?![A-Za-z0-9'])`,
+    "u",
+  );
+
+  return (
+    before.test(
+      clause.slice(0, start),
+    ) ||
+    after.test(clause.slice(end))
   );
 }
 

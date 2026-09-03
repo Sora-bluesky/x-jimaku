@@ -10,7 +10,9 @@ import type {
   TranslationEngineOptions,
 } from "./translate";
 import {
+  KEEP_LATIN_ALL_TERMS,
   KEEP_LATIN_MASK_TERMS,
+  allowKeepLatinMaskOccurrence,
 } from "./glossary";
 import {
   createMaskPlan,
@@ -102,6 +104,23 @@ async function translateClause(
   await expect(
     engine.drain(),
   ).resolves.toBe(true);
+}
+
+function planKeepLatin(
+  clause: string,
+  properNouns: readonly string[] = [],
+) {
+  return createMaskPlan(
+    clause,
+    properNouns,
+    KEEP_LATIN_ALL_TERMS,
+    (hit) =>
+      allowKeepLatinMaskOccurrence(
+        clause,
+        hit,
+        properNouns,
+      ),
+  );
 }
 
 afterEach(() => {
@@ -209,6 +228,116 @@ describe("term masking", () => {
       masked: original,
       maskPlan: null,
     });
+  });
+
+  it("masks Opus 4.5 and leaves ordinary opus", () => {
+    expect(
+      planKeepLatin("Opus 4.5").masked,
+    ).toBe("%%1%% 4.5");
+    expect(
+      planKeepLatin("Fable 5.1").masked,
+    ).toBe("%%1%% 5.1");
+    expect(
+      planKeepLatin("Sonnet 4").masked,
+    ).toBe("%%1%% 4");
+
+    const ordinary = "his greatest opus";
+    expect(
+      planKeepLatin(ordinary),
+    ).toEqual({
+      original: ordinary,
+      masked: ordinary,
+      maskPlan: null,
+    });
+
+    const capital = "The Opus premiered";
+    expect(
+      planKeepLatin(capital),
+    ).toEqual({
+      original: capital,
+      masked: capital,
+      maskPlan: null,
+    });
+  });
+
+  it("masks Claude Opus on the neighbouring family name", () => {
+    const result = planKeepLatin(
+      "Claude Opus",
+    );
+
+    expect(result.masked).toBe(
+      "%%1%% %%2%%",
+    );
+    expect(
+      result.maskPlan?.entries,
+    ).toEqual([
+      { number: 1, term: "Claude" },
+      { number: 2, term: "Opus" },
+    ]);
+    expect(
+      planKeepLatin("Anthropic's Opus")
+        .masked,
+    ).toBe("Anthropic's %%1%%");
+    expect(
+      planKeepLatin("Claude 4 Opus")
+        .masked,
+    ).toBe("%%1%% 4 %%2%%");
+  });
+
+  it("masks an ambiguous term the page names", () => {
+    const result = planKeepLatin(
+      "We shipped Opus today",
+      ["Opus 4.5"],
+    );
+
+    expect(result.masked).toBe(
+      "We shipped %%1%% today",
+    );
+    expect(
+      result.maskPlan?.entries,
+    ).toEqual([
+      { number: 1, term: "Opus" },
+    ]);
+  });
+
+  it("does not mask Roman history or the Roman Space Telescope", () => {
+    const history = "Roman history";
+    const telescope =
+      "the Roman Space Telescope";
+
+    expect(
+      planKeepLatin(history),
+    ).toEqual({
+      original: history,
+      masked: history,
+      maskPlan: null,
+    });
+    expect(
+      planKeepLatin(telescope),
+    ).toEqual({
+      original: telescope,
+      masked: telescope,
+      maskPlan: null,
+    });
+  });
+
+  it("does not drop page nouns to make room for evidenced Opus", () => {
+    const result = planKeepLatin(
+      "Theo Theo Theo Theo Opus 4.5",
+      ["Theo"],
+    );
+
+    expect(result.masked).toBe(
+      "%%1%% %%2%% %%3%% %%4%% Opus 4.5",
+    );
+  });
+
+  it("does not treat a family name in the same clause as beside", () => {
+    expect(
+      planKeepLatin(
+        "Hugging Face released Opus.",
+      ).masked,
+    ).toBe("%%1%% released Opus.");
   });
 
   it("masks four glossary names and leaves NVIDIA", () => {
@@ -591,6 +720,74 @@ describe("TranslationEngine masking ladder", () => {
     expect(onTranslated).toHaveBeenCalledWith(
       expect.objectContaining({ id: 7 }),
       "作品です",
+    );
+
+    engine.destroy();
+  });
+
+  it("masks Opus 4.5 in the LanguageModel prompt", async () => {
+    const prompt = installLanguageModel(
+      async () => "%%1%%です",
+    );
+    const onTranslated = vi.fn();
+    const engine = createTestEngine(
+      "prompt-api",
+      [],
+      onTranslated,
+    );
+
+    await engine.initialize();
+    await translateClause(
+      engine,
+      8,
+      "Opus 4.5 shipped.",
+    );
+
+    const sent = String(
+      prompt.mock.calls[0]?.[0] ?? "",
+    );
+
+    expect(sent).toContain(
+      "[今訳す節]\n%%1%% 4.5 shipped.",
+    );
+    expect(sent).not.toContain("Opus");
+    expect(onTranslated).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 8 }),
+      "Opusです",
+    );
+
+    engine.destroy();
+  });
+
+  it("masks Opus when the page names a phrase that contains it", async () => {
+    const prompt = installLanguageModel(
+      async () => "%%1%%です",
+    );
+    const onTranslated = vi.fn();
+    const engine = createTestEngine(
+      "prompt-api",
+      ["Opus 4.5"],
+      onTranslated,
+    );
+
+    await engine.initialize();
+    await translateClause(
+      engine,
+      9,
+      "We shipped Opus today.",
+    );
+
+    const sent = String(
+      prompt.mock.calls[0]?.[0] ?? "",
+    );
+
+    expect(sent).toContain(
+      "[今訳す節]\nWe shipped %%1%% today.",
+    );
+    expect(sent).not.toContain("Opus");
+    expect(onTranslated).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 9 }),
+      "Opusです",
     );
 
     engine.destroy();

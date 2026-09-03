@@ -6,6 +6,7 @@ import {
 
 import {
   GLOSSARY_MATCH_CAP,
+  KEEP_LATIN_ALL_TERMS,
   KEEP_LATIN_MASK_TERMS,
   KEEP_LATIN_MATCH_CAP,
   glossaryPromptBlocks,
@@ -151,5 +152,11 @@ describe("KEEP_LATIN_MASK_TERMS", () => {
     expect(
       KEEP_LATIN_MASK_TERMS,
     ).not.toContain("Roman");
+    expect(KEEP_LATIN_ALL_TERMS).toContain(
+      "Opus",
+    );
+    expect(KEEP_LATIN_ALL_TERMS).toContain(
+      "Claude",
+    );
   });
 });
