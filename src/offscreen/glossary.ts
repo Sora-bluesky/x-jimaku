@@ -9,6 +9,11 @@ import type {
 
 export const KEEP_LATIN_MATCH_CAP = 6;
 export const GLOSSARY_MATCH_CAP = 4;
+export const KEEP_LATIN_MASK_TERMS =
+  KEEP_LATIN_TERMS.filter(
+    (entry) =>
+      entry.ambiguous !== true,
+  ).map((entry) => entry.term);
 
 export interface GlossarySelection {
   readonly keepLatin: readonly KeepLatinTerm[];

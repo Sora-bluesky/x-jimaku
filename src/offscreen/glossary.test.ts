@@ -6,6 +6,7 @@ import {
 
 import {
   GLOSSARY_MATCH_CAP,
+  KEEP_LATIN_MASK_TERMS,
   KEEP_LATIN_MATCH_CAP,
   glossaryPromptBlocks,
   selectGlossaryMatches,
@@ -130,5 +131,25 @@ describe("selectGlossaryMatches", () => {
         glossary: [],
       }),
     ).toEqual([]);
+  });
+});
+
+describe("KEEP_LATIN_MASK_TERMS", () => {
+  it("omits ambiguous names that must not be masked", () => {
+    expect(KEEP_LATIN_MASK_TERMS).toContain(
+      "Claude",
+    );
+    expect(KEEP_LATIN_MASK_TERMS).toContain(
+      "Hugging Face",
+    );
+    expect(
+      KEEP_LATIN_MASK_TERMS,
+    ).not.toContain("Opus");
+    expect(
+      KEEP_LATIN_MASK_TERMS,
+    ).not.toContain("Haiku");
+    expect(
+      KEEP_LATIN_MASK_TERMS,
+    ).not.toContain("Roman");
   });
 });

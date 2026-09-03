@@ -2085,103 +2085,12 @@ describe("TranslationEngine glossary prompt", () => {
     );
 
     expect(sent).toContain("[原綴り]");
-    expect(sent).toContain("Hugging Face");
+    expect(sent).not.toContain("Hugging Face");
     expect(sent).toContain(
       "モデル・製品・組織名のときだけ原綴り（一般語は訳す）: Opus",
     );
     expect(sent).toContain(
-      "[今訳す節]\nHugging Face released Opus.",
-    );
-  });
-
-  it("omits glossary sections when the clause has no glossary term", async () => {
-    const sent = await sentPrompt(
-      "Hello everyone.",
-    );
-
-    expect(sent).toBe(
-      "[今訳す節]\nHello everyone.",
-    );
-    expect(sent).not.toContain("[原綴り]");
-    expect(sent).not.toContain("[用語]");
-  });
-});
-
-describe("TranslationEngine glossary prompt", () => {
-  function installPromptApi(
-    respond: (
-      prompt: string,
-    ) => Promise<string>,
-  ): ReturnType<typeof vi.fn> {
-    const prompt = vi.fn(respond);
-
-    vi.stubGlobal("LanguageModel", {
-      availability: vi.fn(
-        async () => "available",
-      ),
-      create: vi.fn(async () => ({
-        clone: vi.fn(async () => ({
-          prompt,
-          destroy: vi.fn(),
-        })),
-        destroy: vi.fn(),
-      })),
-    });
-
-    return prompt;
-  }
-
-  async function sentPrompt(
-    text: string,
-  ): Promise<string> {
-    const prompt = installPromptApi(
-      async () => "出た",
-    );
-    const engine =
-      new TranslationEngine({
-        backend: "prompt-api",
-        getContext: () => ({
-          recentPairs: [],
-          properNouns: [],
-        }),
-        requestContentTranslation:
-          vi.fn(async () => ({
-            available: false,
-            ja: "",
-          })),
-        onTranslated: vi.fn(),
-        onPathChanged: vi.fn(),
-      });
-
-    await engine.initialize();
-    engine.enqueue({
-      id: 1,
-      text,
-      final: true,
-      at: "2026-08-30T00:00:00.000Z",
-    });
-    await expect(
-      engine.drain(),
-    ).resolves.toBe(true);
-    engine.destroy();
-
-    return String(
-      prompt.mock.calls[0]?.[0] ?? "",
-    );
-  }
-
-  it("sends glossary instructions in the LanguageModel prompt", async () => {
-    const sent = await sentPrompt(
-      "Hugging Face released Opus.",
-    );
-
-    expect(sent).toContain("[原綴り]");
-    expect(sent).toContain("Hugging Face");
-    expect(sent).toContain(
-      "モデル・製品・組織名のときだけ原綴り（一般語は訳す）: Opus",
-    );
-    expect(sent).toContain(
-      "[今訳す節]\nHugging Face released Opus.",
+      "[今訳す節]\n%%1%% released Opus.",
     );
   });
 

@@ -58,7 +58,7 @@ const CASES = {
   },
 };
 
-function loadKeepLatinTerms() {
+function loadKeepLatinEntries() {
   const source = readFileSync(
     path.join(root, "src", "offscreen", "glossary.data.ts"),
     "utf8",
@@ -68,9 +68,22 @@ function loadKeepLatinTerms() {
   if (start < 0 || end <= start) {
     throw new Error("KEEP_LATIN_TERMS block was not found");
   }
-  return [...source.slice(start, end).matchAll(/term:\s*"([^"]+)"/gu)].map(
-    (match) => match[1],
-  );
+  const block = source.slice(start, end);
+  return [...block.matchAll(/term:\s*"([^"]+)"/gu)].map((match) => {
+    const lineEnd = block.indexOf("\n", match.index);
+    const line = block.slice(
+      match.index,
+      lineEnd < 0 ? block.length : lineEnd,
+    );
+    return {
+      term: match[1],
+      ambiguous: line.includes("ambiguous: true"),
+    };
+  });
+}
+
+function loadKeepLatinTerms() {
+  return loadKeepLatinEntries().map((entry) => entry.term);
 }
 
 function keepLatinPattern(term) {
@@ -81,6 +94,24 @@ function keepLatinPattern(term) {
 function keepLatinTermsIn(text, terms) {
   return terms.filter((term) => keepLatinPattern(term).test(text));
 }
+
+function countMatches(text, pattern) {
+  const flags = pattern.flags.includes("g")
+    ? pattern.flags
+    : `${pattern.flags}g`;
+  return [...text.matchAll(new RegExp(pattern.source, flags))].length;
+}
+
+const KATAKANA_NAME_RENDERINGS = [
+  "オプス",
+  "オパウス",
+  "オピュス",
+  "クロード",
+  "アンソロピック",
+  "ハルキング",
+  "ゴダード",
+  "クラーク",
+];
 
 function splitEnglishClauses(text) {
   return text
@@ -1185,7 +1216,8 @@ const captionMeasure = captionMeasureSeen.has("canvas")
     ? "units"
     : null;
 
-const keepLatinTerms = loadKeepLatinTerms();
+const keepLatinEntries = loadKeepLatinEntries();
+const keepLatinTerms = keepLatinEntries.map((entry) => entry.term);
 const glossaryScriptFile = path.join(
   here,
   "refs",
@@ -1219,6 +1251,19 @@ for (const [index, english] of glossaryEnglishClauses.entries()) {
   }
 }
 
+let maskedNameOccurrences = 0;
+for (const entry of keepLatinEntries) {
+  if (entry.ambiguous) continue;
+  maskedNameOccurrences += countMatches(
+    joined,
+    keepLatinPattern(entry.term),
+  );
+}
+let katakanaNameHits = 0;
+for (const rendering of KATAKANA_NAME_RENDERINGS) {
+  katakanaNameHits += joined.split(rendering).length - 1;
+}
+
 result.observations = {
   captionTopChanges,
   captionTopValues: [...captionTopSeen].sort(
@@ -1230,6 +1275,8 @@ result.observations = {
   phraseBoundaryRate: phraseBoundaryRate(pageBlocks),
   glossaryLatinKept,
   glossaryLatinLost,
+  maskedNameOccurrences,
+  katakanaNameHits,
 };
 
 result.gates = {

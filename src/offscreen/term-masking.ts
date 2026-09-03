@@ -1,4 +1,4 @@
-const MAX_MASKED_OCCURRENCES = 4;
+export const MAX_MASKED_OCCURRENCES = 4;
 
 export interface MaskPlanEntry {
   number: number;
@@ -24,19 +24,60 @@ interface LocatedTerm {
 export function createMaskPlan(
   original: string,
   properNouns: readonly string[],
+  glossaryTerms: readonly string[] = [],
 ): MaskedTranslationLine {
-  const terms = normalizeTerms(properNouns);
-  const occurrences =
+  const pageOccurrences =
     findNonOverlappingOccurrences(
       original,
-      terms,
+      properNouns,
     );
 
   if (
-    occurrences.length === 0 ||
-    occurrences.length >
-      MAX_MASKED_OCCURRENCES
+    pageOccurrences.length >
+    MAX_MASKED_OCCURRENCES
   ) {
+    return {
+      original,
+      masked: original,
+      maskPlan: null,
+    };
+  }
+
+  const glossaryOccurrences =
+    findNonOverlappingOccurrences(
+      original,
+      glossaryTerms,
+    ).filter(
+      (hit) =>
+        !pageOccurrences.some(
+          (page) =>
+            hit.start < page.end &&
+            hit.end > page.start,
+        ),
+    );
+  const takenGlossary = [
+    ...glossaryOccurrences,
+  ]
+    .sort(
+      (left, right) =>
+        right.term.length -
+          left.term.length ||
+        left.start - right.start,
+    )
+    .slice(
+      0,
+      MAX_MASKED_OCCURRENCES -
+        pageOccurrences.length,
+    );
+  const occurrences = [
+    ...pageOccurrences,
+    ...takenGlossary,
+  ].sort(
+    (left, right) =>
+      left.start - right.start,
+  );
+
+  if (occurrences.length === 0) {
     return {
       original,
       masked: original,

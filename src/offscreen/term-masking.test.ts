@@ -10,7 +10,11 @@ import type {
   TranslationEngineOptions,
 } from "./translate";
 import {
+  KEEP_LATIN_MASK_TERMS,
+} from "./glossary";
+import {
   createMaskPlan,
+  MAX_MASKED_OCCURRENCES,
   remaskPlannedTerms,
   restoreMaskedTranslation,
 } from "./term-masking";
@@ -164,6 +168,124 @@ describe("term masking", () => {
     );
 
     expect(result).toEqual({
+      original,
+      masked: original,
+      maskPlan: null,
+    });
+  });
+
+  it("masks a non-ambiguous glossary name and restores it in Latin", () => {
+    const result = createMaskPlan(
+      "Claude is here",
+      [],
+      KEEP_LATIN_MASK_TERMS,
+    );
+
+    expect(result.masked).toBe(
+      "%%1%% is here",
+    );
+    expect(result.maskPlan?.entries).toEqual([
+      { number: 1, term: "Claude" },
+    ]);
+    expect(
+      restoreMaskedTranslation(
+        "%%1%%です",
+        result.maskPlan,
+      ),
+    ).toBe("Claudeです");
+  });
+
+  it("does not mask an ambiguous glossary name", () => {
+    const original = "The Opus premiered";
+
+    expect(
+      createMaskPlan(
+        original,
+        [],
+        KEEP_LATIN_MASK_TERMS,
+      ),
+    ).toEqual({
+      original,
+      masked: original,
+      maskPlan: null,
+    });
+  });
+
+  it("masks four glossary names and leaves NVIDIA", () => {
+    const result = createMaskPlan(
+      "Anthropic Claude OpenAI Google NVIDIA",
+      [],
+      KEEP_LATIN_MASK_TERMS,
+    );
+
+    expect(result.masked).toBe(
+      "%%1%% %%2%% %%3%% %%4%% NVIDIA",
+    );
+    expect(
+      result.maskPlan?.entries.map(
+        (entry) => entry.term,
+      ),
+    ).toEqual([
+      "Anthropic",
+      "Claude",
+      "OpenAI",
+      "Google",
+    ]);
+    expect(
+      result.maskPlan?.entries,
+    ).toHaveLength(MAX_MASKED_OCCURRENCES);
+  });
+
+  it("keeps a page noun masked when glossary names would exceed the cap", () => {
+    const result = createMaskPlan(
+      "Theo and Claude and Anthropic and OpenAI and Google",
+      ["Theo"],
+      KEEP_LATIN_MASK_TERMS,
+    );
+
+    expect(result.masked).toBe(
+      "%%1%% and %%2%% and %%3%% and %%4%% and Google",
+    );
+    expect(
+      result.maskPlan?.entries.map(
+        (entry) => entry.term,
+      ),
+    ).toEqual([
+      "Theo",
+      "Claude",
+      "Anthropic",
+      "OpenAI",
+    ]);
+  });
+
+  it("does not drop page nouns to make room for a glossary name", () => {
+    const result = createMaskPlan(
+      "Theo Theo Theo Theo Claude",
+      ["Theo"],
+      KEEP_LATIN_MASK_TERMS,
+    );
+
+    expect(result.masked).toBe(
+      "%%1%% %%2%% %%3%% %%4%% Claude",
+    );
+    expect(
+      result.maskPlan?.entries.every(
+        (entry) => entry.term === "Theo",
+      ),
+    ).toBe(true);
+  });
+
+  it("still passes through a page-noun overflow when glossary names are present", () => {
+    const original =
+      "Theo Theo Theo Theo Theo Claude";
+
+    expect(
+      createMaskPlan(
+        original,
+        ["Theo"],
+        KEEP_LATIN_MASK_TERMS,
+      ),
+    ).toEqual({
       original,
       masked: original,
       maskPlan: null,
@@ -398,6 +520,77 @@ describe("TranslationEngine masking ladder", () => {
       2,
       expect.objectContaining({ id: 5 }),
       "Romanが去った",
+    );
+
+    engine.destroy();
+  });
+
+  it("masks and restores a glossary name when the page list is empty", async () => {
+    const prompt = installLanguageModel(
+      async () => "%%1%%です",
+    );
+    const onTranslated = vi.fn();
+    const engine = createTestEngine(
+      "prompt-api",
+      [],
+      onTranslated,
+    );
+
+    await engine.initialize();
+    await translateClause(
+      engine,
+      6,
+      "Claude is here.",
+    );
+
+    const sent = String(
+      prompt.mock.calls[0]?.[0] ?? "",
+    );
+
+    expect(sent).toContain(
+      "[今訳す節]\n%%1%% is here.",
+    );
+    expect(sent).not.toContain("Claude");
+    expect(onTranslated).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 6 }),
+      "Claudeです",
+    );
+
+    engine.destroy();
+  });
+
+  it("does not mask Opus in the LanguageModel prompt", async () => {
+    const prompt = installLanguageModel(
+      async () => "作品です",
+    );
+    const onTranslated = vi.fn();
+    const engine = createTestEngine(
+      "prompt-api",
+      [],
+      onTranslated,
+    );
+
+    await engine.initialize();
+    await translateClause(
+      engine,
+      7,
+      "The Opus premiered.",
+    );
+
+    const sent = String(
+      prompt.mock.calls[0]?.[0] ?? "",
+    );
+
+    expect(sent).toContain(
+      "[今訳す節]\nThe Opus premiered.",
+    );
+    expect(sent).not.toContain("%%");
+    expect(sent).toContain(
+      "モデル・製品・組織名のときだけ原綴り（一般語は訳す）: Opus",
+    );
+    expect(onTranslated).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 7 }),
+      "作品です",
     );
 
     engine.destroy();

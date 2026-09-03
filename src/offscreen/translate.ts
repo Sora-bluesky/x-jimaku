@@ -13,6 +13,7 @@ import type {
   MaskedTranslationLine,
 } from "./term-masking";
 import {
+  KEEP_LATIN_MASK_TERMS,
   glossaryPromptBlocks,
   selectGlossaryMatches,
 } from "./glossary";
@@ -794,6 +795,7 @@ export class TranslationEngine {
     const request = createMaskPlan(
       line.text,
       context.properNouns,
+      KEEP_LATIN_MASK_TERMS,
     );
 
     while (
@@ -1046,7 +1048,14 @@ export class TranslationEngine {
       isBadLanguageModelResponse(
         restored,
         request.original,
-        context.properNouns,
+        [
+          ...context.properNouns,
+          ...(
+            request.maskPlan?.entries.map(
+              (entry) => entry.term,
+            ) ?? []
+          ),
+        ],
       )
     ) {
       console.info(
