@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -224,4 +225,50 @@ export function combineDisplayReports(reports) {
     configs,
     error: errors.length > 0 ? errors.join("; ") : undefined,
   };
+}
+
+export function missingMediaError(mediaFile, { localOnly = false } = {}) {
+  if (localOnly) {
+    return `missing local-only media file: ${mediaFile}`;
+  }
+  return `missing media file: ${mediaFile}`;
+}
+
+export function assertCaseMedia(definition) {
+  if (existsSync(definition.mediaFile)) {
+    return;
+  }
+  throw new Error(
+    missingMediaError(definition.mediaFile, {
+      localOnly: definition.localOnly === true,
+    }),
+  );
+}
+
+export function countPageLineReuse(pageBlocks) {
+  let reuse = 0;
+  for (let index = 1; index < pageBlocks.length; index += 1) {
+    const previous = pageBlocks[index - 1];
+    const block = pageBlocks[index];
+    if (
+      previous.cueId === ""
+      || block.cueId === ""
+      || previous.cueId !== block.cueId
+      || previous.pageId === block.pageId
+    ) {
+      continue;
+    }
+    const previousLines = new Set(
+      (previous.lines ?? [previous.line0, previous.line1]).filter(
+        (line) => line !== "" && line != null,
+      ),
+    );
+    const currentLines = (
+      block.lines ?? [block.line0, block.line1]
+    ).filter((line) => line !== "" && line != null);
+    if (currentLines.some((line) => previousLines.has(line))) {
+      reuse += 1;
+    }
+  }
+  return reuse;
 }

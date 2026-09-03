@@ -3,6 +3,8 @@ import {
   expect,
   it,
 } from "vitest";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   parseArgs,
   resolveDisplayRuns,
@@ -10,7 +12,11 @@ import {
   combineDisplayReports,
   parseChildReport,
   annotateDisplayMeta,
+  assertCaseMedia,
+  countPageLineReuse,
 } from "./live2-config.mjs";
+
+const here = path.dirname(fileURLToPath(import.meta.url));
 
 describe("parseArgs display mode", () => {
   it("defaults to both configurations", () => {
@@ -177,5 +183,49 @@ describe("single-configuration argv", () => {
     expect(report.gates.showOriginal).toBe(true);
     expect(report.gates.displayCoverage).toBe("single");
     expect(report.gates.primaryClipped).toBe(0);
+  });
+});
+
+describe("countPageLineReuse", () => {
+  it("does not flag two pages that share text but not cue identity", () => {
+    expect(
+      countPageLineReuse([
+        { cueId: "cue-1", pageId: "0", lines: ["はい"] },
+        { cueId: "cue-2", pageId: "0", lines: ["はい"] },
+      ]),
+    ).toBe(0);
+  });
+
+  it("flags a line carried across pages of the same cue", () => {
+    expect(
+      countPageLineReuse([
+        { cueId: "cue-1", pageId: "0", lines: ["上の行", "持ち越し"] },
+        { cueId: "cue-1", pageId: "1", lines: ["持ち越し", "新しい行"] },
+      ]),
+    ).toBe(1);
+  });
+
+  it("does not flag a two-page cue whose pages share no line", () => {
+    expect(
+      countPageLineReuse([
+        { cueId: "cue-1", pageId: "0", lines: ["L1", "L2"] },
+        { cueId: "cue-1", pageId: "1", lines: ["L3"] },
+      ]),
+    ).toBe(0);
+  });
+});
+
+describe("assertCaseMedia", () => {
+  it("fails fast with the path and local-only for a missing third-party fixture", () => {
+    const mediaFile = "/no-such-x-jimaku-media/theo-speech.wav";
+    expect(() =>
+      assertCaseMedia({ mediaFile, localOnly: true }),
+    ).toThrow(`missing local-only media file: ${mediaFile}`);
+  });
+
+  it("accepts committed fixture media", () => {
+    assertCaseMedia({
+      mediaFile: path.join(here, "refs", "tts-speech.wav"),
+    });
   });
 });

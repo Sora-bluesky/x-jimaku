@@ -27,6 +27,8 @@ import {
   combineDisplayReports,
   annotateDisplayMeta,
   coverageNote,
+  assertCaseMedia,
+  countPageLineReuse,
 } from "./live2-config.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -35,8 +37,11 @@ const root = path.resolve(here, "..");
 // The overlay can take a while to reach the running state when the on-device
 // model is cold, and a fresh checkout has no bench/results directory.
 const READY_TIMEOUT_MS = 120000;
-const DRAIN_TIMEOUT_MS = 30000;
-const DRAIN_QUIET_MS = 6000;
+const DRAIN_TIMEOUT_MS = 60000;
+// Quiet must outlast src/offscreen/translate.ts TRANSLATION_DEADLINE_MS (12s).
+// pendingFinals do not change .caption-primary until translation or that
+// deadline lands, so a 6s overlay-only wait lets the clause enter the window.
+const DRAIN_QUIET_MS = 12000;
 const STOP_DRAIN_TIMEOUT_MS = 45000;
 // Same sets run-bench.mjs validates against. An unvalidated typo is silently
 // rejected by the extension, which keeps its previous setting while the result
@@ -55,16 +60,19 @@ const CASES = {
   theo: {
     mediaFile: path.join(here, "refs", "theo-speech.wav"),
     contextTerms: ["Anthropic", "Claude", "Opus", "Theo"],
+    localOnly: true,
   },
   theo2: {
     mediaFile: path.join(here, "refs", "theo2-speech.wav"),
     contextTerms: ["Anthropic", "Claude", "Opus", "Theo"],
+    localOnly: true,
   },
   // Real speech with 35s of digital silence spliced into the middle, to
   // exercise the recognizer's behaviour when a stream goes quiet.
   theosil: {
     mediaFile: path.join(here, "refs", "theosil-speech.wav"),
     contextTerms: ["Anthropic", "Claude", "Opus", "Theo"],
+    localOnly: true,
   },
 };
 
@@ -218,6 +226,13 @@ if (definition === undefined) {
   console.error(
     `[live2] unknown case: ${options.caseName} (known: ${Object.keys(CASES).join(", ")})`,
   );
+  process.exit(2);
+}
+
+try {
+  assertCaseMedia(definition);
+} catch (error) {
+  console.error(`[live2] ${error.message}`);
   process.exit(2);
 }
 
@@ -530,44 +545,72 @@ try {
   // Those warm-up seconds are still in the capture ring, and
   // WhisperSegmenter.start() begins at the oldest available offset
   // (src/offscreen/segmenter.ts:299-307), so they would be emitted inside the
-  // measured window. Pause and let the backlog drain: the overlay stops changing
-  // once the recognizer has caught up with what it already holds.
+  // measured window. Pause and wait until rendered captions, the ledger,
+  // __devLog (clause-timing / passthrough / queue-drop), and
+  // __translationState have all been quiet for the translation deadline.
   await page.evaluate(() => {
     document.querySelector("video").pause();
   });
 
-  const overlayState = () =>
+  const drainSnapshot = () =>
     page.evaluate(() => {
       const blocks = [];
+      let tentative = "";
+      const ledger = [];
       for (const host of document.querySelectorAll("*")) {
         if (!host.shadowRoot) continue;
         const lines = [
           ...host.shadowRoot.querySelectorAll(".caption-primary"),
         ].map((el) => el.textContent.trim());
         if (lines.length === 2) blocks.push(lines);
+        const tentativeText =
+          host.shadowRoot.querySelector(".caption-tentative")
+            ?.textContent.trim() ?? "";
+        if (tentativeText) tentative = tentativeText;
+        for (const entry of host.shadowRoot.querySelectorAll(
+          ".caption-ledger > *",
+        )) {
+          const text = entry.textContent.trim();
+          if (text) ledger.push(text);
+        }
       }
-      return blocks.map((lines) => lines.join("␟")).join("␞");
+      return [
+        blocks.map((lines) => lines.join("␟")).join("␞"),
+        tentative,
+        ledger.join("\n"),
+        `log:${(window.__devLog ?? []).length}`,
+        `ts:${(window.__translationState ?? []).length}`,
+      ].join("␞");
     });
 
-  let quietSince = Date.now();
-  let lastSeen = await overlayState();
-  const drainDeadline = Date.now() + DRAIN_TIMEOUT_MS;
+  const drainStartedAt = Date.now();
+  let quietSince = drainStartedAt;
+  let lastSeen = await drainSnapshot();
+  const drainDeadline = drainStartedAt + DRAIN_TIMEOUT_MS;
+  let drained = false;
   while (Date.now() < drainDeadline) {
     await new Promise((r) => setTimeout(r, 1000));
-    const now = await overlayState();
+    const now = await drainSnapshot();
     if (now !== lastSeen) {
       lastSeen = now;
       quietSince = Date.now();
     } else if (Date.now() - quietSince >= DRAIN_QUIET_MS) {
+      drained = true;
       break;
     }
   }
-  result.drainMs = Date.now() - (quietSince - DRAIN_QUIET_MS);
+  if (!drained) {
+    throw new Error(
+      `backlog did not drain within ${DRAIN_TIMEOUT_MS}ms`,
+    );
+  }
+  result.drainMs = Date.now() - drainStartedAt;
   console.error("[live2] backlog drained; opening the window");
 
   replayStartedAtMs =
     await page.evaluate(async () => {
       window.__devLog = [];
+      window.__translationState = [];
 
       const video = document.querySelector("video");
       video.currentTime = 0;
@@ -1001,7 +1044,7 @@ result.display = {
   blocks: pageBlocks,
 };
 
-let pageLineReuse = 0;
+const pageLineReuse = countPageLineReuse(pageBlocks);
 let nonEmptyPageTransitions = 0;
 const pageIdsByCue = new Map();
 
@@ -1019,15 +1062,6 @@ for (let index = 0; index < pageBlocks.length; index += 1) {
 
   if (!previous) {
     continue;
-  }
-
-  const previousLines = new Set(previous.lines);
-  if (
-    block.lines.some(
-      (line) => previousLines.has(line),
-    )
-  ) {
-    pageLineReuse += 1;
   }
 
   if (
