@@ -14,10 +14,20 @@
 // still accept it), so on Canary the flag is silently ignored and loadUnpacked is
 // the only way in.
 import puppeteer from "puppeteer-core";
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { startBenchServer } from "./serve.mjs";
+import {
+  parseArgs,
+  resolveDisplayRuns,
+  argvForDisplayRun,
+  parseChildReport,
+  combineDisplayReports,
+  annotateDisplayMeta,
+  coverageNote,
+} from "./live2-config.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, "..");
@@ -123,61 +133,22 @@ function splitEnglishClauses(text) {
     .filter(Boolean);
 }
 
-function parseArgs(argv) {
-  const chromeFromEnvironment =
-    typeof process.env.BENCH_CHROME === "string"
-    && process.env.BENCH_CHROME.trim()
-      ? process.env.BENCH_CHROME.trim()
-      : null;
-  const profileFromEnvironment =
-    typeof process.env.BENCH_PROFILE === "string"
-    && process.env.BENCH_PROFILE.trim()
-      ? process.env.BENCH_PROFILE.trim()
-      : null;
-  const options = {
-    caseName: "tts2",
-    model: "base",
-    backend: "prompt-api",
-    // The English original row is a display option a viewer can turn on, and the
-    // two-row layout was never exercised here while it stayed off.
-    showOriginal: false,
-    durationSeconds: 95,
-    chromePath:
-      chromeFromEnvironment
-      ?? "C:\\Users\\sorab\\AppData\\Local\\Google\\Chrome SxS\\Application\\chrome.exe",
-    profile:
-      profileFromEnvironment
-      ?? "C:\\Users\\sorab\\AppData\\Local\\Temp\\x-jimaku-builtin-ai-nano",
-    extension: path.join(root, "dist"),
-  };
-  for (let i = 0; i < argv.length; i += 1) {
-    const flag = argv[i];
-    const value = argv[i + 1];
-    if (flag === "--show-original") {
-      options.showOriginal = true;
-      continue;
-    }
-
-    if (flag === "--case") { options.caseName = value; i += 1; }
-    else if (flag === "--model") { options.model = value; i += 1; }
-    else if (flag === "--backend") { options.backend = value; i += 1; }
-    else if (flag === "--duration") { options.durationSeconds = Number(value); i += 1; }
-    else if (flag === "--chrome") { options.chromePath = value; i += 1; }
-    else if (flag === "--profile") { options.profile = value; i += 1; }
-    else if (flag === "--extension") { options.extension = path.resolve(value); i += 1; }
-    else if (flag === "--help") { options.help = true; }
-  }
-  return options;
-}
 
 const options = parseArgs(process.argv.slice(2));
 
 if (options.help) {
   console.log(
     "Usage: node bench/live2.mjs [--case tts|tts2] [--model base] [--backend prompt-api]\n" +
-      "                           [--duration 95] [--chrome <exe>] [--profile <dir>] [--extension <dir>]",
+      "                           [--duration 95] [--chrome <exe>] [--profile <dir>] [--extension <dir>]\n" +
+      "                           [--show-original | --no-show-original]\n" +
+      "With neither display flag, both original-off and original-on are captured.",
   );
   process.exit(0);
+}
+
+if (options.displayModeError) {
+  console.error(`[live2] ${options.displayModeError}`);
+  process.exit(2);
 }
 
 if (
@@ -219,6 +190,56 @@ if (definition === undefined) {
     `[live2] unknown case: ${options.caseName} (known: ${Object.keys(CASES).join(", ")})`,
   );
   process.exit(2);
+}
+
+if (options.displayMode === "both") {
+  const reports = [];
+  for (const run of resolveDisplayRuns(options)) {
+    console.error(`[live2] display config ${run.displayConfig}`);
+    const child = spawnSync(
+      process.execPath,
+      [
+        fileURLToPath(import.meta.url),
+        ...argvForDisplayRun(
+          process.argv.slice(2),
+          run.displayConfig,
+        ),
+      ],
+      {
+        encoding: "utf8",
+        cwd: process.cwd(),
+        env: process.env,
+        windowsHide: true,
+        stdio: ["ignore", "pipe", "inherit"],
+        maxBuffer: 10 * 1024 * 1024,
+      },
+    );
+    if (child.error) {
+      reports.push({
+        displayConfig: run.displayConfig,
+        showOriginal: run.showOriginal,
+        error: String(child.error),
+        gates: annotateDisplayMeta(
+          {},
+          {
+            displayConfig: run.displayConfig,
+            displayCoverage: "single",
+          },
+        ),
+      });
+      continue;
+    }
+    reports.push(
+      parseChildReport(
+        child.stdout,
+        child.status,
+        run.displayConfig,
+      ),
+    );
+  }
+  const combined = combineDisplayReports(reports);
+  console.log(JSON.stringify(combined, null, 2));
+  process.exit(combined.error ? 1 : 0);
 }
 
 // Puppeteer's headless defaults (--headless, --mute-audio) leak through
@@ -273,6 +294,9 @@ const result = {
   case: options.caseName,
   model: options.model,
   backend: options.backend,
+  displayConfig: options.displayMode,
+  displayCoverage: "single",
+  showOriginal: options.showOriginal,
   durationSeconds: options.durationSeconds,
   collection: "live2 unattended (CDP Extensions.loadUnpacked + autoplay)",
   diagnostics: {
@@ -1345,7 +1369,7 @@ result.observations = {
 result.diagnostics.primaryClippedExample =
   primaryClippedExample;
 
-result.gates = {
+result.gates = annotateDisplayMeta({
   lines: lines.length,
   englishPassthrough: lines.filter((l) => !japanese.test(l)).length,
   devLogQueueDrop:
@@ -1389,7 +1413,10 @@ result.gates = {
   primaryClipped,
   stopDrainTimedOut:
     result.stopDrainTimedOut ?? false,
-};
+}, {
+  displayConfig: options.displayMode,
+  displayCoverage: "single",
+});
 
 const failedDisplayGates = [
   pageLineReuse !== 0
@@ -1434,16 +1461,24 @@ const stamp = new Date()
   .replace("T", "-")
   .slice(0, 15);
 result.generatedAt = new Date().toISOString();
+result.displayCoverageNote = coverageNote(
+  "single",
+  options.displayMode,
+);
 const resultsDir = path.join(here, "results");
 mkdirSync(resultsDir, { recursive: true });
 const outFile = path.join(
   resultsDir,
-  `live2-${options.caseName}-${options.model}-${stamp}.json`,
+  `live2-${options.caseName}-${options.model}-${options.displayMode}-${stamp}.json`,
 );
 writeFileSync(outFile, `${JSON.stringify(result, null, 2)}\n`, "utf8");
 
 console.log(JSON.stringify({
   outFile,
+  displayConfig: options.displayMode,
+  displayCoverage: "single",
+  displayCoverageNote: result.displayCoverageNote,
+  showOriginal: options.showOriginal,
   gates: result.gates,
   observations: result.observations,
   error: result.error,

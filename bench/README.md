@@ -39,8 +39,9 @@ node bench/live2.mjs --case tts2 --duration 95
 ```
 
 fixture サーバ起動・Chrome 起動・拡張インストール・設定投入・再生・overlay 収集・
-result JSON 保存・機械ゲート出力までを 1 コマンドで行う。
+result JSON 保存・機械ゲート出力までを 1 コマンドで行う。フラグなしでは英語行オフとオンを直列で両方回す（表示の確認はこれ）。片方だけなら `--show-original` または `--no-show-original`。
 `--case tts|tts2` / `--model` / `--backend` / `--chrome` / `--profile` / `--extension` で切替。
+表示の数字に設定の名前が付いていないものは証拠にならない。
 
 翻訳経路の報告時刻と準備時間は次の3値で観測する。いずれも巻き戻した動画の再生開始を0とし、再生前なら負数になる。`gates` オブジェクトへ保存するが、合否には使わない。
 
