@@ -66,6 +66,7 @@ A-6-5 は次の値で表示を判定または観測する。
 | `finalIntervalMsP50` | 連続する非空ページ遷移の間隔の中央値。合否には使わない。間隔を算出できない場合は `null`。 |
 | `finalIntervalMsP90` | 連続する非空ページ遷移の間隔の90パーセンタイル。合否には使わない。間隔を算出できない場合は `null`。 |
 | `slotCountViolations` | `0`。`.caption-primary` は常に2個。 |
+| `primaryClipped` | `0`。`primaryClippedVertical + primaryClippedHorizontal`。既存ゲート。 |
 | `cueIdMissing` | `0`。採取した表示サンプルに `cueId` がある。 |
 | `pageIdMissing` | `0`。採取した表示サンプルに `pageId` がある。 |
 | `stopDrainTimedOut` | `false`。明示停止から45秒後もチップが `RUNNING` なら `true` とし、終了コード `1` にする。 |
@@ -87,6 +88,9 @@ A-6-5 は次の値で表示を判定または観測する。
 | `observations.captionTopValues` | 観測した `top` の重複なし一覧。2値の往復が一目で分かる。 |
 | `observations.stackHeightChanges` | バー高さが変わった回数。 |
 | `observations.captionMeasure` | 折返しが `canvas`（実フォントの measureText）か `units`（文字単位の仮定）か。実機では `canvas`。合否には使わない。 |
+| `observations.captionLineMeasure` | 行スロットが `font`（`fontBoundingBoxAscent + fontBoundingBoxDescent`）か `constant`（`PRIMARY_LINE_HEIGHT`）か。実機では `font`。合否には使わない。 |
+| `observations.primaryClippedVertical` | 非空の `.caption-primary` で `scrollHeight > clientHeight + 1` だった件数。合否には使わない。 |
+| `observations.primaryClippedHorizontal` | 非空の `.caption-primary` で `scrollWidth > clientWidth + 1` だった件数。合否には使わない。 |
 | `observations.phraseBoundaryRate` | 表示された行の改行のうち、BudouX（`.references/budoux`）の文節境界に落ちた割合。合否には使わない。文節境界での折返しは別変更であり、入るまでこの値は現行付近のままになる想定。 |
 | `observations.glossaryLatinKept` | 英語側に KEEP_LATIN_TERMS の語があった節のうち、日本語出力にもその語がラテン文字で残っている件数。合否には使わない。 |
 | `observations.glossaryLatinLost` | 英語側にあった語が日本語出力にラテン文字で残っていない件数。曖昧語では正しい判断のこともあるので、閾値にはしない。 |
@@ -107,6 +111,7 @@ A-6-5 は次の値で表示を判定または観測する。
 | `diagnostics.translationState[].arrivalMs` | `replayStartedAtMs`を0としたページ到着時刻。単位はミリ秒。 |
 | `diagnostics.translationPaths` | 報告された `path` を初出順に並べ、重複を除いた配列。`path` がない報告は含めない。 |
 | `diagnostics.clauseTimings[]` | `data.kind`が`clause-timing`の開発ログを受信内容のまま保存する。`data`は`lineId`、`outcome`、`path`、`enqueueToTerminalMs`、`modelCallMs`、`deadlineExpired`を持つ。 |
+| `diagnostics.primaryClippedExample` | 最初に観測したクリップ1件。`text`、`scrollWidth`、`clientWidth`、`scrollHeight`、`clientHeight`。クリップがなければ `null`。 |
 | `gates.clauseTimingSamples` | 有効な`enqueueToTerminalMs`の件数。 |
 | `gates.clauseTranslateMsP50` | 句をキューへ入れてから翻訳またはフォールバックが確定するまでの時間の中央値。標本がない場合は`null`。 |
 | `gates.clauseTranslateMsP90` | 同じ時間の90パーセンタイル。標本がない場合は`null`。 |

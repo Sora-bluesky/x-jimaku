@@ -533,18 +533,37 @@ try {
         const lines = primaryElements.map(
           (el) => el.textContent.trim(),
         );
-        let primaryClipped = 0;
+        let primaryClippedVertical = 0;
+        let primaryClippedHorizontal = 0;
+        let primaryClippedExample = null;
         for (const el of primaryElements) {
           if (el.textContent.trim() === "") continue;
+          const vertical =
+            el.scrollHeight > el.clientHeight + 1;
+          const horizontal =
+            el.scrollWidth > el.clientWidth + 1;
+          if (vertical) {
+            primaryClippedVertical += 1;
+          }
+          if (horizontal) {
+            primaryClippedHorizontal += 1;
+          }
           if (
-            !(
-              el.scrollHeight <= el.clientHeight + 1
-              && el.scrollWidth <= el.clientWidth + 1
-            )
+            (vertical || horizontal) &&
+            primaryClippedExample === null
           ) {
-            primaryClipped += 1;
+            primaryClippedExample = {
+              text: el.textContent.trim(),
+              scrollWidth: el.scrollWidth,
+              clientWidth: el.clientWidth,
+              scrollHeight: el.scrollHeight,
+              clientHeight: el.clientHeight,
+            };
           }
         }
+        const primaryClipped =
+          primaryClippedVertical +
+          primaryClippedHorizontal;
         const original =
           cue
             .querySelector(":scope > .caption-original")
@@ -587,8 +606,14 @@ try {
             !hasPrimaryText
             && !hasTentativeText,
           primaryClipped,
+          primaryClippedVertical,
+          primaryClippedHorizontal,
+          primaryClippedExample,
           captionMeasure:
             captionStack.dataset.captionMeasure
+            ?? "",
+          captionLineMeasure:
+            captionStack.dataset.captionLineMeasure
             ?? "",
         };
         break;
@@ -721,6 +746,9 @@ let slotCountViolations = 0;
 let cueIdMissing = 0;
 let pageIdMissing = 0;
 let primaryClipped = 0;
+let primaryClippedVertical = 0;
+let primaryClippedHorizontal = 0;
+let primaryClippedExample = null;
 
 for (const sample of samples) {
   const hasPageText =
@@ -732,6 +760,17 @@ for (const sample of samples) {
   }
   if (sample.primaryClipped) {
     primaryClipped += sample.primaryClipped;
+  }
+  primaryClippedVertical +=
+    sample.primaryClippedVertical ?? 0;
+  primaryClippedHorizontal +=
+    sample.primaryClippedHorizontal ?? 0;
+  if (
+    primaryClippedExample === null &&
+    sample.primaryClippedExample
+  ) {
+    primaryClippedExample =
+      sample.primaryClippedExample;
   }
   if (
     (hasPageText || sample.slotCountViolation)
@@ -1218,6 +1257,17 @@ const captionMeasure = captionMeasureSeen.has("canvas")
     ? "units"
     : null;
 
+const captionLineMeasureSeen = new Set(
+  samples
+    .map((sample) => sample.captionLineMeasure)
+    .filter((value) => value === "font" || value === "constant"),
+);
+const captionLineMeasure = captionLineMeasureSeen.has("font")
+  ? "font"
+  : captionLineMeasureSeen.has("constant")
+    ? "constant"
+    : null;
+
 const keepLatinEntries = loadKeepLatinEntries();
 const keepLatinTerms = keepLatinEntries.map((entry) => entry.term);
 const glossaryScriptFile = path.join(
@@ -1280,6 +1330,9 @@ result.observations = {
   stackHeightChanges,
   sentenceFitRate,
   captionMeasure,
+  captionLineMeasure,
+  primaryClippedVertical,
+  primaryClippedHorizontal,
   phraseBoundaryRate: phraseBoundaryRate(pageBlocks),
   glossaryLatinKept,
   glossaryLatinLost,
@@ -1288,6 +1341,9 @@ result.observations = {
   katakanaNameHitsAmbiguous,
   katakanaNameHitsPlain,
 };
+
+result.diagnostics.primaryClippedExample =
+  primaryClippedExample;
 
 result.gates = {
   lines: lines.length,

@@ -1575,6 +1575,26 @@ describe(
   },
 );
 
+function stubCanvasTextMetrics(
+  metricsFor: (
+    text: string,
+  ) => object,
+): () => void {
+  const proto =
+    HTMLCanvasElement.prototype;
+  const original = proto.getContext;
+  proto.getContext = function getContext() {
+    return {
+      font: "",
+      measureText: metricsFor,
+    } as unknown as CanvasRenderingContext2D;
+  } as unknown as typeof proto.getContext;
+
+  return () => {
+    proto.getContext = original;
+  };
+}
+
 function createLaidOutOverlay(
   options: {
     showOriginal?: boolean;
@@ -1599,6 +1619,7 @@ function readStackMetric(
     | "height"
     | "--tentative-slot"
     | "--primary-slot"
+    | "--primary-line-slot"
     | "--original-slot"
     | "--bar-padding-y",
 ): number {
@@ -1861,6 +1882,181 @@ describe(
           text,
           "",
         ]);
+      },
+    );
+  },
+);
+
+describe(
+  "CaptionOverlay primary line slot",
+  () => {
+    it(
+      "follows measured font metrics when they are available",
+      () => {
+        const restore = stubCanvasTextMetrics(
+          () => ({
+            width: 10,
+            fontBoundingBoxAscent: 22,
+            fontBoundingBoxDescent: 8,
+          }),
+        );
+
+        try {
+          createLaidOutOverlay();
+          const { captionStack, host } =
+            getOverlayDom();
+
+          expect(
+            readStackMetric(
+              "--primary-line-slot",
+            ),
+          ).toBe(30);
+          expect(
+            readStackMetric("--primary-slot"),
+          ).toBe(60);
+          expect(
+            captionStack.dataset
+              .captionLineMeasure,
+          ).toBe("font");
+          expect(
+            host.dataset.captionLineMeasure,
+          ).toBe("font");
+        } finally {
+          restore();
+        }
+      },
+    );
+
+    it(
+      "falls back to the line-height constant when metrics are missing",
+      () => {
+        const restore = stubCanvasTextMetrics(
+          () => ({
+            width: 10,
+          }),
+        );
+
+        try {
+          createLaidOutOverlay();
+          const { captionStack, host } =
+            getOverlayDom();
+          const fontSize = Number.parseFloat(
+            captionStack.style.fontSize,
+          );
+
+          expect(fontSize).toBeGreaterThan(0);
+          expect(
+            readStackMetric(
+              "--primary-line-slot",
+            ),
+          ).toBe(fontSize * 1.16);
+          expect(
+            captionStack.dataset
+              .captionLineMeasure,
+          ).toBe("constant");
+          expect(
+            host.dataset.captionLineMeasure,
+          ).toBe("constant");
+          expect(
+            captionStack.dataset.captionMeasure,
+          ).toBe("canvas");
+        } finally {
+          restore();
+        }
+      },
+    );
+
+    it(
+      "keeps the same slot for two different strings",
+      () => {
+        const restore = stubCanvasTextMetrics(
+          (text) => ({
+            width: 10,
+            fontBoundingBoxAscent: 22,
+            fontBoundingBoxDescent: 8,
+            actualBoundingBoxAscent:
+              text.length + 4,
+            actualBoundingBoxDescent: 3,
+          }),
+        );
+
+        try {
+          const overlay = createLaidOutOverlay();
+          const { captionStack } =
+            getOverlayDom();
+          const lines = [
+            ...captionStack.querySelectorAll(
+              ".caption-primary",
+            ),
+          ];
+
+          lines[0].textContent = "A";
+          paintLayout(overlay);
+          const slotA = readStackMetric(
+            "--primary-line-slot",
+          );
+
+          lines[0].textContent =
+            "WWWWWWWWWWWW";
+          paintLayout(overlay);
+          const slotB = readStackMetric(
+            "--primary-line-slot",
+          );
+
+          expect(slotA).toBe(30);
+          expect(slotB).toBe(slotA);
+        } finally {
+          restore();
+        }
+      },
+    );
+
+    it(
+      "does not change the primary slot when the English row is on",
+      () => {
+        const restore = stubCanvasTextMetrics(
+          () => ({
+            width: 10,
+            fontBoundingBoxAscent: 22,
+            fontBoundingBoxDescent: 8,
+          }),
+        );
+
+        try {
+          const withoutOriginal =
+            createLaidOutOverlay({
+              showOriginal: false,
+            });
+          const fontWithout = Number.parseFloat(
+            getOverlayDom()
+              .captionStack
+              .style
+              .fontSize,
+          );
+          const slotWithout = readStackMetric(
+            "--primary-line-slot",
+          );
+          withoutOriginal.destroy();
+
+          createLaidOutOverlay({
+            showOriginal: true,
+          });
+          const fontWith = Number.parseFloat(
+            getOverlayDom()
+              .captionStack
+              .style
+              .fontSize,
+          );
+          const slotWith = readStackMetric(
+            "--primary-line-slot",
+          );
+
+          expect(fontWith).toBe(fontWithout);
+          expect(slotWith).toBe(slotWithout);
+          expect(slotWith).toBe(30);
+        } finally {
+          restore();
+        }
       },
     );
   },

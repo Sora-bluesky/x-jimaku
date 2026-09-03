@@ -283,6 +283,8 @@ export class CaptionOverlay {
     this.host.dataset.cueMutations = "0";
     this.host.dataset.cueDrops = "0";
     this.host.dataset.captionMeasure = "units";
+    this.host.dataset.captionLineMeasure =
+      "constant";
     this.host.style.position = "fixed";
     this.host.style.display = "block";
     this.host.style.margin = "0";
@@ -308,6 +310,8 @@ export class CaptionOverlay {
       "caption-stack";
     this.captionStack.dataset.captionMeasure =
       "units";
+    this.captionStack.dataset.captionLineMeasure =
+      "constant";
 
     this.translationBadge =
       document.createElement("div");
@@ -2362,43 +2366,42 @@ export class CaptionOverlay {
       1,
       barHeight - verticalPadding * 2,
     );
-    const rowHeightUnits =
-      PRIMARY_LINE_HEIGHT * 2 +
-      (
-        this.showOriginal
-          ? ORIGINAL_FONT_SCALE *
-            ORIGINAL_LINE_HEIGHT
-          : 0
-      ) +
-      (
-        tentativeEnabled
-          ? TENTATIVE_FONT_SCALE *
-            TENTATIVE_LINE_HEIGHT
-          : 0
-      );
+    const originalRowUnits = this.showOriginal
+      ? ORIGINAL_FONT_SCALE *
+        ORIGINAL_LINE_HEIGHT
+      : 0;
+    const tentativeRowUnits =
+      tentativeEnabled
+        ? TENTATIVE_FONT_SCALE *
+          TENTATIVE_LINE_HEIGHT
+        : 0;
     const widthScaledFontSize = Math.max(
       14,
       Math.min(24, rect.width / 32),
     );
-    const heightLimitedFontSize =
-      availableHeight / rowHeightUnits;
-    const fontSize = Math.max(
-      10,
-      Math.min(
-        widthScaledFontSize,
-        heightLimitedFontSize,
-      ),
+    const fontSizeFor = (
+      primaryLineRatio: number,
+    ): number => {
+      const rowHeightUnits =
+        primaryLineRatio * 2 +
+        originalRowUnits +
+        tentativeRowUnits;
+      return Math.max(
+        10,
+        Math.min(
+          widthScaledFontSize,
+          availableHeight / rowHeightUnits,
+        ),
+      );
+    };
+    let fontSize = fontSizeFor(
+      PRIMARY_LINE_HEIGHT,
     );
     const innerWidth = Math.max(
       0,
       width - horizontalPadding * 2,
     );
     this.captionInnerWidth = innerWidth;
-    this.lineUnitBudget =
-      deriveLineUnitBudget(
-        innerWidth,
-        fontSize,
-      );
 
     this.captionStack.style.display =
       "flex";
@@ -2426,20 +2429,66 @@ export class CaptionOverlay {
       "--bar-padding-y",
       `${verticalPadding}px`,
     );
+    const computedFont = getComputedStyle(
+      this.primaryLines[0],
+    ).font;
+    this.textMeasurer.setFont(
+      computedFont.trim() === ""
+        ? `${CAPTION_PRIMARY_FONT_WEIGHT} ${fontSize}px ${CAPTION_PRIMARY_FONT_FAMILY}`
+        : computedFont,
+    );
+
+    const lineBox =
+      this.textMeasurer.measureLineBox();
+    let primaryLineSlot =
+      fontSize * PRIMARY_LINE_HEIGHT;
+    let lineMeasurePath:
+      | "font"
+      | "constant" = "constant";
+
+    if (lineBox !== null && fontSize > 0) {
+      const primaryLineRatio =
+        lineBox / fontSize;
+      const fittedFontSize = fontSizeFor(
+        primaryLineRatio,
+      );
+
+      if (fittedFontSize !== fontSize) {
+        fontSize = fittedFontSize;
+        this.captionStack.style.fontSize =
+          `${fontSize}px`;
+        const fittedFont = getComputedStyle(
+          this.primaryLines[0],
+        ).font;
+        this.textMeasurer.setFont(
+          fittedFont.trim() === ""
+            ? `${CAPTION_PRIMARY_FONT_WEIGHT} ${fontSize}px ${CAPTION_PRIMARY_FONT_FAMILY}`
+            : fittedFont,
+        );
+      }
+
+      const measuredSlot =
+        this.textMeasurer.measureLineBox();
+      primaryLineSlot = Math.ceil(
+        measuredSlot ??
+          primaryLineRatio * fontSize,
+      );
+      lineMeasurePath = "font";
+    }
+
+    this.lineUnitBudget =
+      deriveLineUnitBudget(
+        innerWidth,
+        fontSize,
+      );
+
     this.captionStack.style.setProperty(
       "--primary-line-slot",
-      `${
-        fontSize *
-        PRIMARY_LINE_HEIGHT
-      }px`,
+      `${primaryLineSlot}px`,
     );
     this.captionStack.style.setProperty(
       "--primary-slot",
-      `${
-        fontSize *
-        PRIMARY_LINE_HEIGHT *
-        2
-      }px`,
+      `${primaryLineSlot * 2}px`,
     );
     this.captionStack.style.setProperty(
       "--original-slot",
@@ -2462,14 +2511,6 @@ export class CaptionOverlay {
       }px`,
     );
 
-    const computedFont = getComputedStyle(
-      this.primaryLines[0],
-    ).font;
-    this.textMeasurer.setFont(
-      computedFont.trim() === ""
-        ? `${CAPTION_PRIMARY_FONT_WEIGHT} ${fontSize}px ${CAPTION_PRIMARY_FONT_FAMILY}`
-        : computedFont,
-    );
     const measurePath =
       this.textMeasurer.isMeasured()
         ? "canvas"
@@ -2491,10 +2532,30 @@ export class CaptionOverlay {
       );
     }
 
+    if (
+      lineMeasurePath === "font" &&
+      this.host.dataset.captionLineMeasure !==
+        "font"
+    ) {
+      console.log(
+        "[overlay]",
+        "caption line measure",
+        {
+          path: "font",
+          fontSize,
+          lineSlot: primaryLineSlot,
+        },
+      );
+    }
+
     this.host.dataset.captionMeasure =
       measurePath;
     this.captionStack.dataset.captionMeasure =
       measurePath;
+    this.host.dataset.captionLineMeasure =
+      lineMeasurePath;
+    this.captionStack.dataset.captionLineMeasure =
+      lineMeasurePath;
   }
 
   private positionTargetChip(
@@ -3077,7 +3138,7 @@ function getOverlayStyles(): string {
       font-size: 1em;
       font-style: normal;
       font-weight: ${CAPTION_PRIMARY_FONT_WEIGHT};
-      line-height: ${PRIMARY_LINE_HEIGHT};
+      line-height: var(--primary-line-slot);
       white-space: pre-line;
     }
 

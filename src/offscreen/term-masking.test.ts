@@ -784,7 +784,14 @@ describe("TranslationEngine masking ladder", () => {
     expect(sent).toContain(
       "[今訳す節]\nWe shipped %%1%% today.",
     );
-    expect(sent).not.toContain("Opus");
+    // The proper-noun block still names Opus 4.5, because that is what the
+    // page called it. What matters is that the clause handed to the model
+    // carries a placeholder instead of the name.
+    expect(
+      sent.slice(
+        sent.indexOf("[今訳す節]"),
+      ),
+    ).not.toContain("Opus");
     expect(onTranslated).toHaveBeenCalledWith(
       expect.objectContaining({ id: 9 }),
       "Opusです",

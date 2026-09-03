@@ -41,6 +41,7 @@ export function isCaptionLayoutMeasured(
 export function createCaptionTextMeasurer(): {
   setFont(font: string): void;
   measure(text: string): number | null;
+  measureLineBox(): number | null;
   isMeasured(): boolean;
 } {
   let context:
@@ -108,6 +109,50 @@ export function createCaptionTextMeasurer(): {
       }
 
       return width;
+    },
+    measureLineBox(): number | null {
+      if (!measured) {
+        return null;
+      }
+
+      const canvasContext = getContext();
+
+      if (canvasContext === null) {
+        return null;
+      }
+
+      let lineBox: number | null = null;
+
+      for (const probe of ["M", "あ"]) {
+        const metrics =
+          canvasContext.measureText(probe);
+        const ascent =
+          metrics.fontBoundingBoxAscent;
+        const descent =
+          metrics.fontBoundingBoxDescent;
+
+        if (
+          !Number.isFinite(ascent) ||
+          !Number.isFinite(descent)
+        ) {
+          continue;
+        }
+
+        const size = ascent + descent;
+
+        if (!(size > 0)) {
+          continue;
+        }
+
+        if (
+          lineBox === null ||
+          size > lineBox
+        ) {
+          lineBox = size;
+        }
+      }
+
+      return lineBox;
     },
     isMeasured(): boolean {
       return measured;

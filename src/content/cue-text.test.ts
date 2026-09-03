@@ -739,6 +739,9 @@ describe("measured wrapping", () => {
       expect(measurer.measure("W")).toBe(
         null,
       );
+      expect(measurer.measureLineBox()).toBe(
+        null,
+      );
     },
   );
 
