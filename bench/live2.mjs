@@ -112,15 +112,29 @@ function countMatches(text, pattern) {
   return [...text.matchAll(new RegExp(pattern.source, flags))].length;
 }
 
+// A LOWER BOUND, not a count. This can only find spellings someone has already
+// seen, and a survey of every result file turned up nine more than the list
+// held - ゴッドガード and ゴッダード for Goddard, オペウス and オーパス for Opus,
+// クローク for Clerk, フェブル for Fable. A model that mangles a name mangles it
+// a new way each time, so a number from this list is the floor and never the
+// total. The real measure compares against the English source, which needs the
+// full source text recorded per cue; until that exists, read this as "at least".
 const KATAKANA_NAME_RENDERINGS = [
   { term: "Opus", rendering: "オプス" },
   { term: "Opus", rendering: "オパウス" },
   { term: "Opus", rendering: "オピュス" },
+  { term: "Opus", rendering: "オペウス" },
+  { term: "Opus", rendering: "オーパス" },
   { term: "Clerk", rendering: "クラーク" },
+  { term: "Clerk", rendering: "クローク" },
   { term: "Claude", rendering: "クロード" },
   { term: "Anthropic", rendering: "アンソロピック" },
   { term: "Hugging Face", rendering: "ハルキング" },
   { term: "Goddard", rendering: "ゴダード" },
+  { term: "Goddard", rendering: "ゴッダード" },
+  { term: "Goddard", rendering: "ゴッドガード" },
+  { term: "Fable", rendering: "ファブル" },
+  { term: "Fable", rendering: "フェブル" },
 ];
 
 function countKatakanaNameHits(text, entries, renderings) {
