@@ -1,4 +1,5 @@
 import type {
+  ClauseTimingOutcome,
   OffDevLogData,
   OffDevLogMessage,
   RecognitionPayload,
@@ -57,6 +58,13 @@ interface TranslationAttemptResult {
 interface QueuedTranslation
   extends TranslationQueueEntry {
   deadlineAt: number;
+}
+
+interface ClauseTimingState {
+  enqueuedAt: number;
+  path: TranslationPath;
+  modelCallMs: number;
+  modelCallStartedAt: number | null;
 }
 
 interface TranslationAttempt {
@@ -173,6 +181,8 @@ export class TranslationEngine {
     new Set<TranslationPath>();
   private readonly terminalIds =
     new Set<number>();
+  private readonly clauseTimings =
+    new Map<number, ClauseTimingState>();
   private readonly recentHistory:
     TranslationPair[] = [];
   private readonly languageModelSlowSamples:
@@ -288,6 +298,11 @@ export class TranslationEngine {
     ) {
       return;
     }
+
+    this.beginClauseTiming(
+      line.id,
+      performance.now(),
+    );
 
     if (
       this.path === "none" &&
@@ -501,7 +516,14 @@ export class TranslationEngine {
         return;
       }
 
-      if (!this.markTerminal(line.id)) {
+      if (
+        !this.markTerminal(
+          line.id,
+          result.recordHistory
+            ? "translated"
+            : "fallback",
+        )
+      ) {
         return;
       }
 
@@ -551,7 +573,10 @@ export class TranslationEngine {
     this.clearAttemptDeadline(attempt);
     this.activeAttempt = null;
     this.processing = false;
-    this.settleIds([attempt.line.id]);
+    this.settleIds(
+      [attempt.line.id],
+      true,
+    );
     this.runQueue();
     this.resolveDrainWaitersIfIdle();
   }
@@ -607,22 +632,149 @@ export class TranslationEngine {
     attempt.timeoutId = null;
   }
 
-  private markTerminal(id: number): boolean {
+  private beginClauseTiming(
+    lineId: number,
+    enqueuedAt: number,
+  ): void {
+    if (
+      this.options.requestId === undefined ||
+      this.options.onDevLog === undefined
+    ) {
+      return;
+    }
+
+    this.clauseTimings.set(lineId, {
+      enqueuedAt,
+      path: "none",
+      modelCallMs: 0,
+      modelCallStartedAt: null,
+    });
+  }
+
+  private setClauseTimingPath(
+    lineId: number,
+    path: TranslationPath,
+  ): void {
+    const timing =
+      this.clauseTimings.get(lineId);
+
+    if (timing !== undefined) {
+      timing.path = path;
+    }
+  }
+
+  private async measureModelCall<TResult>(
+    lineId: number,
+    path: TranslationPath,
+    operation: () => TResult,
+  ): Promise<Awaited<TResult>> {
+    const timing =
+      this.clauseTimings.get(lineId);
+
+    if (timing === undefined) {
+      return await operation();
+    }
+
+    const startedAt = performance.now();
+
+    timing.path = path;
+    timing.modelCallStartedAt = startedAt;
+
+    try {
+      return await operation();
+    } finally {
+      timing.modelCallMs += Math.max(
+        0,
+        performance.now() - startedAt,
+      );
+
+      if (
+        timing.modelCallStartedAt ===
+        startedAt
+      ) {
+        timing.modelCallStartedAt = null;
+      }
+    }
+  }
+
+  private emitClauseTiming(
+    lineId: number,
+    outcome: ClauseTimingOutcome,
+    deadlineExpired: boolean,
+  ): void {
+    const timing =
+      this.clauseTimings.get(lineId);
+
+    if (timing === undefined) {
+      return;
+    }
+
+    const terminalAt = performance.now();
+    const activeModelCallMs =
+      timing.modelCallStartedAt === null
+        ? 0
+        : Math.max(
+            0,
+            terminalAt -
+              timing.modelCallStartedAt,
+          );
+
+    this.emitDevLog({
+      level: "info",
+      tag: "translate",
+      message:
+        "translation clause reached terminal state",
+      data: {
+        kind: "clause-timing",
+        lineId,
+        path: timing.path,
+        outcome,
+        enqueueToTerminalMs: Math.round(
+          Math.max(
+            0,
+            terminalAt - timing.enqueuedAt,
+          ),
+        ),
+        modelCallMs: Math.round(
+          timing.modelCallMs +
+            activeModelCallMs,
+        ),
+        deadlineExpired,
+      },
+    });
+    this.clauseTimings.delete(lineId);
+  }
+
+  private markTerminal(
+    id: number,
+    outcome: ClauseTimingOutcome,
+    deadlineExpired = false,
+  ): boolean {
     if (this.terminalIds.has(id)) {
       return false;
     }
 
     this.terminalIds.add(id);
+    this.emitClauseTiming(
+      id,
+      outcome,
+      deadlineExpired,
+    );
     return true;
   }
 
   private settleIds(
     ids: readonly number[],
+    deadlineExpired = false,
   ): void {
     const settled = [...new Set(ids)]
       .sort((left, right) => left - right)
       .filter((id) =>
-        this.markTerminal(id)
+        this.markTerminal(
+          id,
+          "fallback",
+          deadlineExpired,
+        )
       );
 
     if (settled.length > 0) {
@@ -647,6 +799,11 @@ export class TranslationEngine {
     ) {
       const attemptedPath = this.path;
       const startedAt = performance.now();
+
+      this.setClauseTimingPath(
+        line.id,
+        attemptedPath,
+      );
 
       try {
         const result =
@@ -731,15 +888,22 @@ export class TranslationEngine {
           );
         }
 
-        if (this.translator === null) {
+        const translator = this.translator;
+
+        if (translator === null) {
           throw new Error(
             "Offscreen Translator is not initialized",
           );
         }
 
         return {
-          ja: await this.translator.translate(
-            request.original,
+          ja: await this.measureModelCall(
+            lineId,
+            path,
+            () =>
+              translator.translate(
+                request.original,
+              ),
           ),
           recordHistory: true,
         };
@@ -754,10 +918,15 @@ export class TranslationEngine {
         }
 
         const response =
-          await this.options
-            .requestContentTranslation(
-              request.original,
-            );
+          await this.measureModelCall(
+            lineId,
+            path,
+            () =>
+              this.options
+                .requestContentTranslation(
+                  request.original,
+                ),
+          );
 
         if (!response.available) {
           throw new Error(
@@ -963,13 +1132,18 @@ export class TranslationEngine {
     this.languageModelClone = clone;
 
     try {
-      return await clone.prompt(
-        prompt,
-        {
-          signal: AbortSignal.timeout(
-            LANGUAGE_MODEL_PROMPT_TIMEOUT_MS,
+      return await this.measureModelCall(
+        attempt.line.id,
+        "language-model",
+        () =>
+          clone.prompt(
+            prompt,
+            {
+              signal: AbortSignal.timeout(
+                LANGUAGE_MODEL_PROMPT_TIMEOUT_MS,
+              ),
+            },
           ),
-        },
       );
     } finally {
       if (
@@ -1094,14 +1268,21 @@ export class TranslationEngine {
 
       try {
         const result =
-          rescuePath ===
-          "offscreen-translator"
-            ? await this.translator
-                ?.translate(request.masked)
-            : await this.options
-                .requestContentTranslation(
-                  request.masked,
-                );
+          await this.measureModelCall(
+            lineId,
+            rescuePath,
+            () =>
+              rescuePath ===
+              "offscreen-translator"
+                ? this.translator
+                    ?.translate(
+                      request.masked,
+                    )
+                : this.options
+                    .requestContentTranslation(
+                      request.masked,
+                    ),
+          );
 
         this.assertAttemptCurrent(attempt);
 
@@ -1244,12 +1425,8 @@ export class TranslationEngine {
         tag: event.tag,
         message: event.message,
         data: {
-          kind: event.data.kind,
+          ...event.data,
           requestId,
-          lineId: event.data.lineId,
-          ...(event.data.path === undefined
-            ? {}
-            : { path: event.data.path }),
         },
       };
       const pending = onDevLog(message);

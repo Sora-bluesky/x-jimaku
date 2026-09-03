@@ -60,9 +60,11 @@ function createGateEngine(
   const onSettled = vi.fn();
   const onTranslated = vi.fn();
   const onPathChanged = vi.fn();
+  const onDevLog = vi.fn();
   const engine =
     new TranslationEngine({
       backend,
+      requestId: "request-gate",
       getContext: () => ({
         recentPairs: [],
         properNouns: [],
@@ -75,6 +77,7 @@ function createGateEngine(
       onSettled,
       onTranslated,
       onPathChanged,
+      onDevLog,
     });
 
   return {
@@ -82,6 +85,7 @@ function createGateEngine(
     onSettled,
     onTranslated,
     onPathChanged,
+    onDevLog,
   };
 }
 
@@ -1125,6 +1129,115 @@ describe(
 );
 
 describe("TranslationEngine terminal protocol", () => {
+  it.each([
+    {
+      name: "translated",
+      translate: async () => "訳",
+      advanceMs: 0,
+      outcome: "translated",
+      deadlineExpired: false,
+    },
+    {
+      name: "deadline fallback",
+      translate: () =>
+        new Promise<string>(() => {
+        }),
+      advanceMs: TRANSLATION_DEADLINE_MS,
+      outcome: "fallback",
+      deadlineExpired: true,
+    },
+  ])(
+    "emits one clause timing entry for $name",
+    async ({
+      translate,
+      advanceMs,
+      outcome,
+      deadlineExpired,
+    }) => {
+      vi.useFakeTimers();
+      installTranslator(translate);
+      const gate = createGateEngine();
+
+      await gate.engine.initialize();
+
+      gate.engine.enqueue({
+        id: 61,
+        text: "measure this clause",
+        final: true,
+        at: "2026-09-02T00:00:01.000Z",
+      });
+      await vi.advanceTimersByTimeAsync(
+        advanceMs,
+      );
+      await expect(
+        gate.engine.drain(),
+      ).resolves.toBe(true);
+
+      const timingEntries =
+        gate.onDevLog.mock.calls
+          .map(([message]) => message)
+          .filter(
+            (message) =>
+              message.data?.kind ===
+              "clause-timing",
+          );
+
+      expect(timingEntries).toHaveLength(1);
+
+      const timing = timingEntries[0];
+
+      expect(timing).toEqual({
+        t: "OFF_DEV_LOG",
+        level: "info",
+        tag: "translate",
+        message:
+          "translation clause reached terminal state",
+        data: {
+          kind: "clause-timing",
+          requestId: "request-gate",
+          lineId: 61,
+          path: "offscreen-translator",
+          outcome,
+          enqueueToTerminalMs:
+            expect.any(Number),
+          modelCallMs: expect.any(Number),
+          deadlineExpired,
+        },
+      });
+      expect(
+        timing.data.enqueueToTerminalMs,
+      ).toBeGreaterThanOrEqual(0);
+      expect(
+        timing.data.enqueueToTerminalMs,
+      ).toBeLessThanOrEqual(
+        TRANSLATION_DEADLINE_MS,
+      );
+      expect(
+        timing.data.modelCallMs,
+      ).toBeGreaterThanOrEqual(0);
+      expect(
+        timing.data.modelCallMs,
+      ).toBeLessThanOrEqual(
+        timing.data.enqueueToTerminalMs,
+      );
+
+      if (outcome === "translated") {
+        expect(gate.onTranslated)
+          .toHaveBeenCalledWith(
+            expect.objectContaining({
+              id: 61,
+            }),
+            "訳",
+          );
+      } else {
+        expect(gate.onSettled)
+          .toHaveBeenCalledWith([61]);
+      }
+
+      gate.engine.destroy();
+    },
+  );
+
   it("A-6-4(b') settles drop, destroy, and drain timeout in id order", async () => {
     vi.useFakeTimers();
     const never =

@@ -260,13 +260,22 @@ export interface OffDiagnosticMessage {
 export type OffDevLogKind =
   | "rescue-failure"
   | "passthrough"
-  | "queue-drop";
+  | "queue-drop"
+  | "clause-timing";
+
+export type ClauseTimingOutcome =
+  | "translated"
+  | "fallback";
 
 export interface OffDevLogData {
   kind: OffDevLogKind;
   requestId: string;
   lineId: number;
   path?: TranslationPath;
+  outcome?: ClauseTimingOutcome;
+  enqueueToTerminalMs?: number;
+  modelCallMs?: number;
+  deadlineExpired?: boolean;
 }
 
 export interface OffDevLogMessage {
@@ -769,7 +778,9 @@ export function isM1Message(
               value.data.kind ===
                 "passthrough" ||
               value.data.kind ===
-                "queue-drop"
+                "queue-drop" ||
+              value.data.kind ===
+                "clause-timing"
             ) &&
             typeof value.data.requestId ===
               "string" &&
@@ -783,6 +794,48 @@ export function isM1Message(
               value.data.path === undefined ||
               isTranslationPath(
                 value.data.path,
+              )
+            ) &&
+            (
+              value.data.kind !==
+                "clause-timing" ||
+              (
+                isTranslationPath(
+                  value.data.path,
+                ) &&
+                (
+                  value.data.outcome ===
+                    "translated" ||
+                  value.data.outcome ===
+                    "fallback"
+                ) &&
+                typeof value.data
+                  .enqueueToTerminalMs ===
+                  "number" &&
+                Number.isFinite(
+                  value.data
+                    .enqueueToTerminalMs,
+                ) &&
+                value.data
+                  .enqueueToTerminalMs >= 0 &&
+                typeof value.data.modelCallMs ===
+                  "number" &&
+                Number.isFinite(
+                  value.data.modelCallMs,
+                ) &&
+                value.data.modelCallMs >= 0 &&
+                value.data.modelCallMs <=
+                  value.data
+                    .enqueueToTerminalMs &&
+                typeof value.data
+                  .deadlineExpired ===
+                  "boolean" &&
+                (
+                  !value.data
+                    .deadlineExpired ||
+                  value.data.outcome ===
+                    "fallback"
+                )
               )
             )
           )
