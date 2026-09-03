@@ -88,6 +88,10 @@ A-6-5 は次の値で表示を判定または観測する。
 | `observations.stackHeightChanges` | バー高さが変わった回数。 |
 | `observations.captionMeasure` | 折返しが `canvas`（実フォントの measureText）か `units`（文字単位の仮定）か。実機では `canvas`。合否には使わない。 |
 | `observations.phraseBoundaryRate` | 表示された行の改行のうち、BudouX（`.references/budoux`）の文節境界に落ちた割合。合否には使わない。文節境界での折返しは別変更であり、入るまでこの値は現行付近のままになる想定。 |
+| `observations.glossaryLatinKept` | 英語側に KEEP_LATIN_TERMS の語があった節のうち、日本語出力にもその語がラテン文字で残っている件数。合否には使わない。 |
+| `observations.glossaryLatinLost` | 英語側にあった語が日本語出力にラテン文字で残っていない件数。曖昧語では正しい判断のこともあるので、閾値にはしない。 |
+| `observations.glossaryLatinKept` | 英語側に KEEP_LATIN_TERMS の語があった節のうち、日本語出力にもその語がラテン文字で残っている件数。合否には使わない。 |
+| `observations.glossaryLatinLost` | 英語側にあった語が日本語出力にラテン文字で残っていない件数。曖昧語では正しい判断のこともあるので、閾値にはしない。 |
 
 診断ログは次の観測値として保存する。いずれも合否判定には使わない。
 

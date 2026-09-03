@@ -13,6 +13,10 @@ import type {
   MaskedTranslationLine,
 } from "./term-masking";
 import {
+  glossaryPromptBlocks,
+  selectGlossaryMatches,
+} from "./glossary";
+import {
   createMaskPlan,
   remaskPlannedTerms,
   restoreMaskedTranslation,
@@ -2002,6 +2006,23 @@ function createTranslationPrompt(
       ].join("\n"),
     );
   }
+
+  const glossaryMatch =
+    selectGlossaryMatches(text);
+  blocks.push(
+    ...glossaryPromptBlocks({
+      keepLatin:
+        glossaryMatch.keepLatin.filter(
+          (entry) =>
+            !maskedTerms.has(entry.term),
+        ),
+      glossary:
+        glossaryMatch.glossary.filter(
+          (entry) =>
+            !maskedTerms.has(entry.term),
+        ),
+    }),
+  );
 
   if (context.recentPairs.length > 0) {
     blocks.push(

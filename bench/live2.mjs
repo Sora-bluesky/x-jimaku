@@ -58,6 +58,38 @@ const CASES = {
   },
 };
 
+function loadKeepLatinTerms() {
+  const source = readFileSync(
+    path.join(root, "src", "offscreen", "glossary.data.ts"),
+    "utf8",
+  );
+  const start = source.indexOf("export const KEEP_LATIN_TERMS");
+  const end = source.indexOf("export const GLOSSARY_TERMS");
+  if (start < 0 || end <= start) {
+    throw new Error("KEEP_LATIN_TERMS block was not found");
+  }
+  return [...source.slice(start, end).matchAll(/term:\s*"([^"]+)"/gu)].map(
+    (match) => match[1],
+  );
+}
+
+function keepLatinPattern(term) {
+  const escaped = term.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+  return new RegExp(`(?<![A-Za-z0-9])${escaped}(?![A-Za-z0-9'])`, "u");
+}
+
+function keepLatinTermsIn(text, terms) {
+  return terms.filter((term) => keepLatinPattern(term).test(text));
+}
+
+function splitEnglishClauses(text) {
+  return text
+    .replace(/\r\n/g, "\n")
+    .split(/(?<=[.!?])(?:\s+|$)/u)
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
 function parseArgs(argv) {
   const chromeFromEnvironment =
     typeof process.env.BENCH_CHROME === "string"
@@ -1153,6 +1185,40 @@ const captionMeasure = captionMeasureSeen.has("canvas")
     ? "units"
     : null;
 
+const keepLatinTerms = loadKeepLatinTerms();
+const glossaryScriptFile = path.join(
+  here,
+  "refs",
+  `${options.caseName}-script.txt`,
+);
+let glossaryEnglishClauses;
+let glossaryJapaneseOf;
+if (originalRowBlocks.length > 0) {
+  glossaryEnglishClauses = originalRowBlocks.map((block) => block.original);
+  glossaryJapaneseOf = (index) => primaryTextFor(originalRowBlocks[index]);
+} else if (existsSync(glossaryScriptFile)) {
+  glossaryEnglishClauses = splitEnglishClauses(
+    readFileSync(glossaryScriptFile, "utf8"),
+  );
+  glossaryJapaneseOf = () => joined;
+} else {
+  glossaryEnglishClauses = lines;
+  glossaryJapaneseOf = (_index, english) => english;
+}
+
+let glossaryLatinKept = 0;
+let glossaryLatinLost = 0;
+for (const [index, english] of glossaryEnglishClauses.entries()) {
+  const terms = [...new Set(keepLatinTermsIn(english, keepLatinTerms))];
+  if (terms.length === 0) continue;
+  const japanese = glossaryJapaneseOf(index, english);
+  if (terms.every((term) => keepLatinPattern(term).test(japanese))) {
+    glossaryLatinKept += 1;
+  } else {
+    glossaryLatinLost += 1;
+  }
+}
+
 result.observations = {
   captionTopChanges,
   captionTopValues: [...captionTopSeen].sort(
@@ -1162,6 +1228,8 @@ result.observations = {
   sentenceFitRate,
   captionMeasure,
   phraseBoundaryRate: phraseBoundaryRate(pageBlocks),
+  glossaryLatinKept,
+  glossaryLatinLost,
 };
 
 result.gates = {
