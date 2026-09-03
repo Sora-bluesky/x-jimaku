@@ -721,7 +721,7 @@ describe(
 
         expect(
           harness.translator.translate,
-        ).toHaveBeenCalledTimes(2);
+        ).toHaveBeenCalledTimes(4);
         expect(
           harness.requestContentTranslation
             .mock.calls.filter(
@@ -736,29 +736,23 @@ describe(
         ).toHaveBeenNthCalledWith(
           1,
           expect.objectContaining({ id: 11 }),
-          "Roman is here.",
+          "ここです",
         );
         expect(
           harness.onTranslated,
         ).toHaveBeenNthCalledWith(
           2,
           expect.objectContaining({ id: 12 }),
-          "Roman is there.",
+          "ここです",
         );
         expect(
           harness.onDevLog,
-        ).toHaveBeenCalledWith({
-          t: "OFF_DEV_LOG",
-          level: "info",
-          tag: "translate",
-          message:
-            "Translator line rescue exhausted; passing through original",
-          data: {
-            kind: "passthrough",
-            requestId: "request-63",
-            lineId: 11,
-          },
-        });
+        ).not.toHaveBeenCalledWith(
+          expect.objectContaining({
+            message:
+              "Translator line rescue exhausted; passing through original",
+          }),
+        );
 
         harness.engine.destroy();
       },
@@ -863,7 +857,7 @@ describe(
 
         expect(
           harness.translator.translate,
-        ).toHaveBeenCalledTimes(2);
+        ).toHaveBeenCalledTimes(4);
         expect(
           harness.requestContentTranslation,
         ).toHaveBeenCalledTimes(2);
@@ -872,14 +866,14 @@ describe(
         ).toHaveBeenNthCalledWith(
           1,
           expect.objectContaining({ id: 31 }),
-          "Roman is here.",
+          "ここです",
         );
         expect(
           harness.onTranslated,
         ).toHaveBeenNthCalledWith(
           2,
           expect.objectContaining({ id: 32 }),
-          "Roman is there.",
+          "ここです",
         );
 
         harness.engine.destroy();

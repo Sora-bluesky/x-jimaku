@@ -199,14 +199,26 @@ describe("KEEP_LATIN_MASK_TERMS", () => {
       ).toEqual([{ term }]);
     }
   });
+
+  it("holds Clerk in Latin unconditionally", () => {
+    expect(KEEP_LATIN_MASK_TERMS).toContain(
+      "Clerk",
+    );
+    expect(
+      selectGlossaryMatches("Clerk").keepLatin,
+    ).toEqual([{ term: "Clerk" }]);
+    expect(
+      selectGlossaryMatches("clerk").keepLatin,
+    ).toEqual([{ term: "Clerk" }]);
+  });
 });
 
 describe("countKatakanaNameHits", () => {
   const renderings = [
     { term: "Opus", rendering: "オプス" },
-    { term: "Clerk", rendering: "クラーク" },
+    { term: "Cursor", rendering: "カーソル" },
   ];
-  const text = "オプスとクラークとオプス";
+  const text = "オプスとカーソルとオプス";
 
   it("buckets by the glossary flag so flipping an entry moves the count", () => {
     expect(
@@ -215,7 +227,7 @@ describe("countKatakanaNameHits", () => {
         [
           { term: "Opus" },
           {
-            term: "Clerk",
+            term: "Cursor",
             ambiguous: true,
           },
         ],
@@ -234,7 +246,7 @@ describe("countKatakanaNameHits", () => {
             ambiguous: true,
           },
           {
-            term: "Clerk",
+            term: "Cursor",
             ambiguous: true,
           },
         ],

@@ -1256,6 +1256,72 @@ export class TranslationEngine {
     lineId: number,
     attempt: TranslationAttempt,
   ): Promise<TranslationAttemptResult> {
+    const rescued =
+      await this.tryTranslatorRescue(
+        request,
+        lineId,
+        attempt,
+      );
+
+    if (rescued !== null) {
+      return rescued;
+    }
+
+    this.assertAttemptCurrent(attempt);
+
+    if (request.maskPlan !== null) {
+      const unmaskedRescued =
+        await this.tryTranslatorRescue(
+          {
+            original: request.original,
+            masked: request.original,
+            maskPlan: null,
+          },
+          lineId,
+          attempt,
+        );
+
+      if (unmaskedRescued !== null) {
+        return unmaskedRescued;
+      }
+
+      const unmaskedLanguageModel =
+        await this.tryUnmaskedLanguageModel(
+          request,
+          attempt,
+        );
+
+      if (unmaskedLanguageModel !== null) {
+        return unmaskedLanguageModel;
+      }
+    }
+
+    this.assertAttemptCurrent(attempt);
+    this.emitDevLog(
+      {
+        level: "info",
+        tag: "translate",
+        message:
+          "Translator line rescue exhausted; passing through original",
+        data: {
+          kind: "passthrough",
+          lineId,
+        },
+      },
+      attempt,
+    );
+
+    return {
+      ja: request.original,
+      recordHistory: false,
+    };
+  }
+
+  private async tryTranslatorRescue(
+    request: MaskedTranslationLine,
+    lineId: number,
+    attempt: TranslationAttempt,
+  ): Promise<TranslationAttemptResult | null> {
     for (
       const rescuePath of [
         "offscreen-translator",
@@ -1394,25 +1460,65 @@ export class TranslationEngine {
       }
     }
 
-    this.assertAttemptCurrent(attempt);
-    this.emitDevLog(
-      {
-        level: "info",
-        tag: "translate",
-        message:
-          "Translator line rescue exhausted; passing through original",
-        data: {
-          kind: "passthrough",
-          lineId,
-        },
-      },
-      attempt,
-    );
+    return null;
+  }
 
-    return {
-      ja: request.original,
-      recordHistory: false,
-    };
+  private async tryUnmaskedLanguageModel(
+    request: MaskedTranslationLine,
+    attempt: TranslationAttempt,
+  ): Promise<TranslationAttemptResult | null> {
+    if (this.languageModel === null) {
+      return null;
+    }
+
+    this.assertAttemptCurrent(attempt);
+
+    const context = this.readContext();
+
+    try {
+      const rawResponse =
+        await this.promptLanguageModel(
+          createTranslationPrompt(
+            request.original,
+            context,
+            null,
+          ),
+          attempt,
+        );
+      this.assertAttemptCurrent(attempt);
+
+      const normalized =
+        normalizeLanguageModelResponse(
+          rawResponse,
+        );
+
+      if (
+        normalized === "" ||
+        normalized.includes("%%") ||
+        isBadLanguageModelResponse(
+          normalized,
+          request.original,
+          [
+            ...context.properNouns,
+            ...(
+              request.maskPlan?.entries.map(
+                (entry) => entry.term,
+              ) ?? []
+            ),
+          ],
+        )
+      ) {
+        return null;
+      }
+
+      return {
+        ja: normalized,
+        recordHistory: true,
+      };
+    } catch {
+      this.assertAttemptCurrent(attempt);
+      return null;
+    }
   }
 
   private emitDevLog(

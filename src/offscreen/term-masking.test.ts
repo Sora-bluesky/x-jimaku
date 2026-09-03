@@ -227,6 +227,19 @@ describe("term masking", () => {
     ]);
   });
 
+  it("masks Clerk with no version, family name, or page name", () => {
+    const result = planKeepLatin(
+      "the clerk opened",
+    );
+
+    expect(result.masked).toBe(
+      "the %%1%% opened",
+    );
+    expect(result.maskPlan?.entries).toEqual([
+      { number: 1, term: "Clerk" },
+    ]);
+  });
+
   it("masks lowercase opus and restores Opus", () => {
     const result = planKeepLatin(
       "a new version of opus",
@@ -318,7 +331,7 @@ describe("term masking", () => {
       planKeepLatin("Cursor 4.5").masked,
     ).toBe("%%1%% 4.5");
     expect(
-      planKeepLatin("Clerk 4").masked,
+      planKeepLatin("Cursor 4").masked,
     ).toBe("%%1%% 4");
 
     const ordinary = "the blinking cursor";
@@ -649,9 +662,77 @@ describe("TranslationEngine masking ladder", () => {
     },
   );
 
-  it("returns the original English when every masked translation fails", async () => {
+  it("retries LanguageModel without the mask when placeholders are lost", async () => {
+    const prompt = installLanguageModel(
+      async (sent) =>
+        sent.includes("%%")
+          ? "ここです"
+          : "ローマです",
+    );
+    const onTranslated = vi.fn();
+    const engine = createTestEngine(
+      "prompt-api",
+      ["Roman"],
+      onTranslated,
+    );
+
+    await engine.initialize();
+    await translateClause(
+      engine,
+      2,
+      "Roman is here.",
+    );
+
+    expect(prompt).toHaveBeenCalledTimes(2);
+    expect(onTranslated).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 2 }),
+      "ローマです",
+    );
+
+    engine.destroy();
+  });
+
+  it("retries Translator without the mask when placeholders are lost", async () => {
     installLanguageModel(
       async () => "ここです",
+    );
+    const translator = installTranslator(
+      async (text) =>
+        text.includes("%%")
+          ? "ここです"
+          : "ローマです",
+    );
+    const onTranslated = vi.fn();
+    const engine = createTestEngine(
+      "prompt-api",
+      ["Roman"],
+      onTranslated,
+    );
+
+    await engine.initialize();
+    await translateClause(
+      engine,
+      2,
+      "Roman is here.",
+    );
+
+    expect(translator).toHaveBeenCalledWith(
+      "%%1%% is here.",
+    );
+    expect(translator).toHaveBeenCalledWith(
+      "Roman is here.",
+    );
+    expect(onTranslated).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 2 }),
+      "ローマです",
+    );
+
+    engine.destroy();
+  });
+
+  it("returns the original English when unmasked retry cannot translate", async () => {
+    installLanguageModel(
+      async () => "Still entirely English.",
     );
     const onTranslated = vi.fn();
     const engine = createTestEngine(

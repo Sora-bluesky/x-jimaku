@@ -31,8 +31,9 @@ export interface KeepLatinTerm {
    * poetry would render "Haiku" in Latin.
    *
    * What is left flagged are the words whose everyday sense does turn up in
-   * this material: Roman as an adjective, Meta as a prefix, and Clerk and
-   * Cursor as ordinary nouns.
+   * this material: Roman as an adjective, Meta as a prefix, and Cursor as
+   * an on-screen cursor. Clerk is held in Latin unconditionally: the
+   * ordinary noun does not occur in this material.
    */
   readonly ambiguous?: true;
 }
@@ -62,7 +63,7 @@ export const KEEP_LATIN_TERMS: readonly KeepLatinTerm[] = [
   { term: "Copilot", ambiguous: true },
   { term: "Hugging Face" },
   { term: "NVIDIA" },
-  { term: "Clerk", ambiguous: true },
+  { term: "Clerk" },
   { term: "NASA" },
   { term: "Goddard" },
   { term: "Roman", ambiguous: true },
