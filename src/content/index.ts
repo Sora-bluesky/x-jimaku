@@ -1,3 +1,5 @@
+import { createTranslationQueue } from "./translation-queue";
+import { TRANSLATION_DEADLINE_MS } from "../shared/translation-timing";
 import {
   createProbeRequestId,
   getProbeEnvironment,
@@ -230,8 +232,16 @@ let lastEosRequestId:
   | null = null;
 let tapOperationTail: Promise<void> =
   Promise.resolve();
-let contentTranslationTail: Promise<void> =
-  Promise.resolve();
+const contentTranslationQueue =
+  createTranslationQueue({
+    deadlineMs: TRANSLATION_DEADLINE_MS,
+    onAbandoned() {
+      console.warn(
+        "[cs]",
+        "content translation abandoned at the deadline; releasing the queue",
+      );
+    },
+  });
 let contentTranslator:
   | TranslatorInstance
   | null = null;
@@ -1526,20 +1536,8 @@ function enqueueTapOperation(
 function enqueueContentTranslation(
   message: CsTranslateMessage,
 ): void {
-  const operation = contentTranslationTail
-    .catch(() => undefined)
-    .then(() =>
-      handleContentTranslation(message),
-    );
-
-  contentTranslationTail = operation.catch(
-    (error: unknown) => {
-      console.error(
-        "[cs]",
-        "content translation operation failed",
-        error,
-      );
-    },
+  contentTranslationQueue.enqueue(() =>
+    handleContentTranslation(message),
   );
 }
 
@@ -1839,8 +1837,7 @@ function resetContentTranslator(): void {
   contentTranslatorGeneration += 1;
   destroyContentTranslator();
   contentTranslatorCreateAttempted = false;
-  contentTranslationTail =
-    Promise.resolve();
+  contentTranslationQueue.reset();
 }
 
 function destroyContentTranslator(): void {
