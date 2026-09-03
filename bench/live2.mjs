@@ -14,7 +14,7 @@
 // still accept it), so on Canary the flag is silently ignored and loadUnpacked is
 // the only way in.
 import puppeteer from "puppeteer-core";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { startBenchServer } from "./serve.mjs";
@@ -462,9 +462,24 @@ try {
           root.querySelector(".caption-cue");
         if (!captionStack || !cue) continue;
 
-        const lines = [
+        const primaryElements = [
           ...cue.querySelectorAll(":scope > .caption-primary"),
-        ].map((el) => el.textContent.trim());
+        ];
+        const lines = primaryElements.map(
+          (el) => el.textContent.trim(),
+        );
+        let primaryClipped = 0;
+        for (const el of primaryElements) {
+          if (el.textContent.trim() === "") continue;
+          if (
+            !(
+              el.scrollHeight <= el.clientHeight + 1
+              && el.scrollWidth <= el.clientWidth + 1
+            )
+          ) {
+            primaryClipped += 1;
+          }
+        }
         const original =
           cue
             .querySelector(":scope > .caption-original")
@@ -506,6 +521,10 @@ try {
           blank:
             !hasPrimaryText
             && !hasTentativeText,
+          primaryClipped,
+          captionMeasure:
+            captionStack.dataset.captionMeasure
+            ?? "",
         };
         break;
       }
@@ -636,6 +655,7 @@ const pageBlocks = [];
 let slotCountViolations = 0;
 let cueIdMissing = 0;
 let pageIdMissing = 0;
+let primaryClipped = 0;
 
 for (const sample of samples) {
   const hasPageText =
@@ -644,6 +664,9 @@ for (const sample of samples) {
 
   if (sample.slotCountViolation) {
     slotCountViolations += 1;
+  }
+  if (sample.primaryClipped) {
+    primaryClipped += sample.primaryClipped;
   }
   if (
     (hasPageText || sample.slotCountViolation)
@@ -767,6 +790,16 @@ const twoPageCuesObserved =
       pageIds.has("0")
       && pageIds.has("1"),
   ).length;
+const captionedCueCount = pageIdsByCue.size;
+const onePageCueCount = [...pageIdsByCue.values()].filter(
+  (pageIds) =>
+    pageIds.size === 1
+    && pageIds.has("0"),
+).length;
+const sentenceFitRate =
+  captionedCueCount === 0
+    ? null
+    : onePageCueCount / captionedCueCount;
 
 const blankBarSamples =
   displayBlocks.filter(
@@ -1018,12 +1051,117 @@ for (const sample of samples) {
     stackHeight,
   };
 }
+function loadBudouxJapaneseBoundaries() {
+  const modelPath = path.join(
+    root,
+    ".references/budoux/budoux/models/ja.json",
+  );
+  if (!existsSync(modelPath)) return null;
+  const model = JSON.parse(readFileSync(modelPath, "utf8"));
+  const groups = new Map(
+    Object.entries(model).map(([key, value]) => [
+      key,
+      new Map(Object.entries(value)),
+    ]),
+  );
+  const baseScore = -0.5 * [...groups.values()]
+    .flatMap((group) => [...group.values()])
+    .reduce((sum, score) => sum + score, 0);
+  const uw1 = groups.get("UW1");
+  const uw2 = groups.get("UW2");
+  const uw3 = groups.get("UW3");
+  const uw4 = groups.get("UW4");
+  const uw5 = groups.get("UW5");
+  const uw6 = groups.get("UW6");
+  const bw1 = groups.get("BW1");
+  const bw2 = groups.get("BW2");
+  const bw3 = groups.get("BW3");
+  const tw1 = groups.get("TW1");
+  const tw2 = groups.get("TW2");
+  const tw3 = groups.get("TW3");
+  const tw4 = groups.get("TW4");
+  return (sentence) => {
+    const result = [];
+    for (let i = 1; i < sentence.length; i += 1) {
+      let score = baseScore;
+      score += uw1?.get(sentence.substring(i - 3, i - 2)) || 0;
+      score += uw2?.get(sentence.substring(i - 2, i - 1)) || 0;
+      score += uw3?.get(sentence.substring(i - 1, i)) || 0;
+      score += uw4?.get(sentence.substring(i, i + 1)) || 0;
+      score += uw5?.get(sentence.substring(i + 1, i + 2)) || 0;
+      score += uw6?.get(sentence.substring(i + 2, i + 3)) || 0;
+      score += bw1?.get(sentence.substring(i - 2, i)) || 0;
+      score += bw2?.get(sentence.substring(i - 1, i + 1)) || 0;
+      score += bw3?.get(sentence.substring(i, i + 2)) || 0;
+      score += tw1?.get(sentence.substring(i - 3, i)) || 0;
+      score += tw2?.get(sentence.substring(i - 2, i + 1)) || 0;
+      score += tw3?.get(sentence.substring(i - 1, i + 2)) || 0;
+      score += tw4?.get(sentence.substring(i, i + 3)) || 0;
+      if (score > 0) result.push(i);
+    }
+    return result;
+  };
+}
+
+function phraseBoundaryRate(blocks) {
+  const parseBoundaries = loadBudouxJapaneseBoundaries();
+  if (parseBoundaries === null) return null;
+  const pagesByCue = new Map();
+  for (const block of blocks) {
+    if (!block.cueId) continue;
+    const pages = pagesByCue.get(block.cueId) ?? [];
+    pages.push(block);
+    pagesByCue.set(block.cueId, pages);
+  }
+  let lineBreaks = 0;
+  let phraseBreaks = 0;
+  for (const pages of pagesByCue.values()) {
+    const seen = new Set();
+    const unique = [...pages]
+      .sort((left, right) => Number(left.pageId) - Number(right.pageId))
+      .filter((page) => {
+        if (seen.has(page.pageId)) return false;
+        seen.add(page.pageId);
+        return true;
+      });
+    const lines = [];
+    for (const page of unique) {
+      if (page.line0) lines.push(page.line0);
+      if (page.line1) lines.push(page.line1);
+    }
+    if (lines.length < 2) continue;
+    const text = lines.join("");
+    const boundaries = new Set(parseBoundaries(text));
+    let offset = 0;
+    for (let index = 0; index < lines.length - 1; index += 1) {
+      offset += lines[index].length;
+      lineBreaks += 1;
+      if (boundaries.has(offset)) phraseBreaks += 1;
+    }
+  }
+  return lineBreaks === 0 ? null : phraseBreaks / lineBreaks;
+}
+
+const captionMeasureSeen = new Set(
+  samples
+    .map((sample) => sample.captionMeasure)
+    .filter((value) => value === "canvas" || value === "units"),
+);
+const captionMeasure = captionMeasureSeen.has("canvas")
+  ? "canvas"
+  : captionMeasureSeen.has("units")
+    ? "units"
+    : null;
+
 result.observations = {
   captionTopChanges,
   captionTopValues: [...captionTopSeen].sort(
     (left, right) => left - right,
   ),
   stackHeightChanges,
+  sentenceFitRate,
+  captionMeasure,
+  phraseBoundaryRate: phraseBoundaryRate(pageBlocks),
 };
 
 result.gates = {
@@ -1067,6 +1205,7 @@ result.gates = {
   slotCountViolations,
   cueIdMissing,
   pageIdMissing,
+  primaryClipped,
   stopDrainTimedOut:
     result.stopDrainTimedOut ?? false,
 };
@@ -1083,6 +1222,9 @@ const failedDisplayGates = [
     : null,
   pageIdMissing !== 0
     ? "pageIdMissing"
+    : null,
+  primaryClipped !== 0
+    ? "primaryClipped"
     : null,
   result.gates.stopDrainTimedOut
     ? "stopDrainTimedOut"

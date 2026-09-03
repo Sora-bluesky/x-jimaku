@@ -1755,3 +1755,113 @@ describe(
     );
   },
 );
+
+describe(
+  "CaptionOverlay line budget",
+  () => {
+    it(
+      "records units measurement under jsdom",
+      () => {
+        createLaidOutOverlay();
+
+        expect(
+          getOverlayDom()
+            .captionStack
+            .dataset
+            .captionMeasure,
+        ).toBe("units");
+        expect(
+          getOverlayDom()
+            .host
+            .dataset
+            .captionMeasure,
+        ).toBe("units");
+      },
+    );
+
+    it(
+      "records canvas measurement when measureText returns a width",
+      () => {
+        const proto =
+          HTMLCanvasElement.prototype;
+        const original = proto.getContext;
+        proto.getContext = function getContext() {
+          return {
+            font: "",
+            measureText: () => ({
+              width: 10,
+            }),
+          } as unknown as CanvasRenderingContext2D;
+        } as unknown as typeof proto.getContext;
+
+        try {
+          createLaidOutOverlay();
+
+          expect(
+            getOverlayDom()
+              .captionStack
+              .dataset
+              .captionMeasure,
+          ).toBe("canvas");
+        } finally {
+          proto.getContext = original;
+        }
+      },
+    );
+
+    it(
+      "keeps wrapping of an on-screen cue when the snapshot width changes",
+      () => {
+        let rect = new DOMRect(
+          0,
+          0,
+          320,
+          180,
+        );
+        const video =
+          document.createElement(
+            "video",
+          );
+        video.getBoundingClientRect =
+          () => rect;
+        document.body.append(video);
+
+        const overlay = createOverlay({
+          getTargetVideo: () => video,
+        });
+        const text = "あ".repeat(30);
+
+        showFinal(overlay, 1, text);
+        const before = getBlockLines();
+
+        expect(before[0]).not.toBe("");
+        expect(before[1]).not.toBe("");
+        expect(
+          `${before[0]}${before[1]}`,
+        ).toBe(text);
+
+        rect = new DOMRect(
+          0,
+          0,
+          1280,
+          720,
+        );
+        paintLayout(overlay);
+
+        expect(getBlockLines()).toEqual(
+          before,
+        );
+
+        showFinal(overlay, 2, text);
+        vi.advanceTimersByTime(
+          CUE_MINIMUM_DISPLAY_MS,
+        );
+
+        expect(getBlockLines()).toEqual([
+          text,
+          "",
+        ]);
+      },
+    );
+  },
+);

@@ -1,5 +1,139 @@
 export const MAX_CUE_UNITS = 28;
 export const MAX_LINE_UNITS = 14;
+export const MIN_FITTING_LINE_UNITS = 1;
+
+export function deriveLineUnitBudget(
+  innerWidth: number,
+  fontSize: number,
+): number {
+  if (
+    !Number.isFinite(fontSize) ||
+    fontSize <= 0 ||
+    !Number.isFinite(innerWidth)
+  ) {
+    return MAX_LINE_UNITS;
+  }
+
+  return Math.max(
+    MIN_FITTING_LINE_UNITS,
+    Math.floor(innerWidth / fontSize),
+  );
+}
+
+export interface CaptionWrapLayout {
+  readonly availableWidth: number;
+  measure(text: string): number | null;
+}
+
+export function isCaptionLayoutMeasured(
+  layout: CaptionWrapLayout | undefined,
+): layout is CaptionWrapLayout {
+  return (
+    layout !== undefined &&
+    Number.isFinite(layout.availableWidth) &&
+    layout.availableWidth > 0 &&
+    layout.measure("M") !== null
+  );
+}
+
+export function createCaptionTextMeasurer(): {
+  setFont(font: string): void;
+  measure(text: string): number | null;
+  isMeasured(): boolean;
+} {
+  let context:
+    | CanvasRenderingContext2D
+    | null
+    | undefined;
+  let measured = false;
+
+  function getContext():
+    CanvasRenderingContext2D | null {
+    if (context !== undefined) {
+      return context;
+    }
+
+    if (typeof document === "undefined") {
+      context = null;
+      return null;
+    }
+
+    const canvas =
+      document.createElement("canvas");
+    context = canvas.getContext("2d");
+    return context;
+  }
+
+  return {
+    setFont(font: string): void {
+      const canvasContext = getContext();
+
+      if (
+        canvasContext === null ||
+        font.trim() === ""
+      ) {
+        measured = false;
+        return;
+      }
+
+      canvasContext.font = font;
+      const probe =
+        canvasContext.measureText("M").width;
+      measured =
+        Number.isFinite(probe) &&
+        probe > 0;
+    },
+    measure(text: string): number | null {
+      if (!measured) {
+        return null;
+      }
+
+      const canvasContext = getContext();
+
+      if (canvasContext === null) {
+        return null;
+      }
+
+      if (text === "") {
+        return 0;
+      }
+
+      const width =
+        canvasContext.measureText(text).width;
+
+      if (!Number.isFinite(width)) {
+        return null;
+      }
+
+      return width;
+    },
+    isMeasured(): boolean {
+      return measured;
+    },
+  };
+}
+
+function createTextFit(
+  maxUnits: number,
+  layout: CaptionWrapLayout | undefined,
+  widthScale: number,
+): (text: string) => boolean {
+  if (isCaptionLayoutMeasured(layout)) {
+    const limit =
+      layout.availableWidth * widthScale;
+
+    return (text: string) => {
+      const width = layout.measure(text);
+      return (
+        width !== null &&
+        width <= limit
+      );
+    };
+  }
+
+  return (text: string) =>
+    displayUnits(text) <= maxUnits;
+}
 
 const MIN_CUE_SEGMENT_CHARACTERS = 5;
 const MIN_LINE_SEGMENT_CHARACTERS = 2;
@@ -103,6 +237,7 @@ const FORBIDDEN_SUFFIXES:
 export function splitCueText(
   text: string,
   maxUnits: number = MAX_CUE_UNITS,
+  layout?: CaptionWrapLayout,
 ): string[] {
   const normalized = text
     .replace(/\s+/gu, " ")
@@ -112,6 +247,11 @@ export function splitCueText(
     return [];
   }
 
+  const fitsCue = createTextFit(
+    maxUnits,
+    layout,
+    2,
+  );
   const characters = Array.from(normalized);
   const protectedRanges =
     findProtectedUrlRanges(normalized);
@@ -120,10 +260,10 @@ export function splitCueText(
 
   while (start < characters.length) {
     const end =
-      findMaximumUnitBoundary(
+      findMaximumFitBoundary(
         characters,
         start,
-        maxUnits,
+        fitsCue,
       );
 
     if (end >= characters.length) {
@@ -189,15 +329,25 @@ export function wrapCueText(
   text: string,
   maxLineUnits: number =
     MAX_LINE_UNITS,
+  layout?: CaptionWrapLayout,
 ): string {
   const normalized = text
     .replace(/\s+/gu, " ")
     .trim();
+  const fitsLine = createTextFit(
+    maxLineUnits,
+    layout,
+    1,
+  );
+  const fitsTwoLines = createTextFit(
+    maxLineUnits * 2,
+    layout,
+    2,
+  );
 
   if (
     normalized === "" ||
-    displayUnits(normalized) <=
-      maxLineUnits
+    fitsLine(normalized)
   ) {
     return normalized;
   }
@@ -215,25 +365,52 @@ export function wrapCueText(
     const remainingUnits =
       displayUnits(remainingText);
 
-    if (remainingUnits <= maxLineUnits) {
+    if (fitsLine(remainingText)) {
       lines.push(remainingText);
       break;
     }
 
     const maximumLineBoundary =
-      findMaximumUnitBoundary(
+      findMaximumFitBoundary(
         characters,
         start,
-        maxLineUnits,
+        fitsLine,
       );
-    const fitsInTwoLines =
-      remainingUnits <=
-      maxLineUnits * 2;
+    const fitsInTwoLines = fitsTwoLines(
+      remainingText,
+    );
     const target = fitsInTwoLines
-      ? findMaximumUnitBoundary(
+      ? findMaximumFitBoundary(
           characters,
           start,
-          remainingUnits / 2,
+          (candidate) => {
+            if (
+              isCaptionLayoutMeasured(
+                layout,
+              )
+            ) {
+              const remainingWidth =
+                layout.measure(
+                  remainingText,
+                );
+              const width =
+                layout.measure(
+                  candidate,
+                );
+              return (
+                remainingWidth !==
+                  null &&
+                width !== null &&
+                width <=
+                  remainingWidth / 2
+              );
+            }
+
+            return (
+              displayUnits(candidate) <=
+              remainingUnits / 2
+            );
+          },
         )
       : maximumLineBoundary;
     const minimumLineBoundary =
@@ -241,7 +418,7 @@ export function wrapCueText(
         ? findMinimumRemainderBoundary(
             characters,
             start,
-            maxLineUnits,
+            fitsLine,
           )
         : start + 1;
     const suggestedBoundary =
@@ -277,22 +454,19 @@ export function wrapCueText(
 function findMinimumRemainderBoundary(
   characters: readonly string[],
   start: number,
-  maxUnits: number,
+  remainderFits: (text: string) => boolean,
 ): number {
-  let units = 0;
   let boundary = characters.length;
 
   while (boundary > start) {
-    const character =
-      characters[boundary - 1] ?? "";
-    const nextUnits =
-      units + characterUnits(character);
+    const remainder = characters
+      .slice(boundary - 1)
+      .join("");
 
-    if (nextUnits > maxUnits) {
+    if (!remainderFits(remainder)) {
       break;
     }
 
-    units = nextUnits;
     boundary -= 1;
   }
 
@@ -302,25 +476,22 @@ function findMinimumRemainderBoundary(
   );
 }
 
-function findMaximumUnitBoundary(
+function findMaximumFitBoundary(
   characters: readonly string[],
   start: number,
-  maxUnits: number,
+  fits: (text: string) => boolean,
 ): number {
-  let units = 0;
   let end = start;
 
   while (end < characters.length) {
-    const character =
-      characters[end] ?? "";
-    const nextUnits =
-      units + characterUnits(character);
+    const candidate = characters
+      .slice(start, end + 1)
+      .join("");
 
-    if (nextUnits > maxUnits) {
+    if (!fits(candidate)) {
       break;
     }
 
-    units = nextUnits;
     end += 1;
   }
 

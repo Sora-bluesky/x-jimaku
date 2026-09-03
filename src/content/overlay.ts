@@ -19,6 +19,8 @@ import {
 import {
   MAX_CUE_UNITS,
   MAX_LINE_UNITS,
+  createCaptionTextMeasurer,
+  deriveLineUnitBudget,
   displayUnits,
   splitCueText,
   wrapCueText,
@@ -47,6 +49,9 @@ const ORIGINAL_LINE_HEIGHT = 1.18;
 const TENTATIVE_FONT_SCALE = 0.62;
 const TENTATIVE_LINE_HEIGHT = 1.18;
 const MUTATION_DEBOUNCE_MS = 500;
+const CAPTION_PRIMARY_FONT_FAMILY =
+  'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+const CAPTION_PRIMARY_FONT_WEIGHT = "650";
 const MAX_OTHER_VIDEOS = 6;
 const STABLE_FRAMES_BEFORE_IDLE = 10;
 const RECT_COMPARISON_EPSILON_PX = 0.1;
@@ -211,6 +216,10 @@ export class CaptionOverlay {
   private acceleratedUntilDrained = false;
   private captionRevision = 0;
   private captionBarEnabled = true;
+  private lineUnitBudget = MAX_LINE_UNITS;
+  private captionInnerWidth = 0;
+  private readonly textMeasurer =
+    createCaptionTextMeasurer();
   private silentInputHint:
     | SilentInputHintVariant
     | null = null;
@@ -273,6 +282,7 @@ export class CaptionOverlay {
     this.host.setAttribute("popover", "manual");
     this.host.dataset.cueMutations = "0";
     this.host.dataset.cueDrops = "0";
+    this.host.dataset.captionMeasure = "units";
     this.host.style.position = "fixed";
     this.host.style.display = "block";
     this.host.style.margin = "0";
@@ -296,6 +306,8 @@ export class CaptionOverlay {
       document.createElement("div");
     this.captionStack.className =
       "caption-stack";
+    this.captionStack.dataset.captionMeasure =
+      "units";
 
     this.translationBadge =
       document.createElement("div");
@@ -1135,6 +1147,14 @@ export class CaptionOverlay {
       : translated;
   }
 
+  private captionWrapLayout() {
+    return {
+      availableWidth: this.captionInnerWidth,
+      measure: (text: string) =>
+        this.textMeasurer.measure(text),
+    };
+  }
+
   private createCueSegments(
     line: CaptionLine,
     primaryOverride?: string,
@@ -1156,7 +1176,8 @@ export class CaptionOverlay {
 
     const parts = splitCueText(
       primary,
-      MAX_CUE_UNITS,
+      this.lineUnitBudget * 2,
+      this.captionWrapLayout(),
     );
     const fallback =
       line.fallback === true ||
@@ -1183,7 +1204,8 @@ export class CaptionOverlay {
         formattedPrimary:
           wrapCueText(
             part,
-            MAX_LINE_UNITS,
+            this.lineUnitBudget,
+            this.captionWrapLayout(),
           ),
       }),
     );
@@ -1331,7 +1353,8 @@ export class CaptionOverlay {
         {
           maxWaitingCues:
             MAX_WAITING_CUES,
-          maxCueUnits: MAX_CUE_UNITS,
+          maxCueUnits:
+            this.lineUnitBudget * 2,
           accelerationThreshold:
             CUE_ACCELERATION_THRESHOLD,
           mergeSeparatorUnits:
@@ -1388,7 +1411,8 @@ export class CaptionOverlay {
           formattedPrimary:
             wrapCueText(
               combinedPrimary,
-              MAX_LINE_UNITS,
+              this.lineUnitBudget,
+              this.captionWrapLayout(),
             ),
         },
       );
@@ -2365,6 +2389,16 @@ export class CaptionOverlay {
         heightLimitedFontSize,
       ),
     );
+    const innerWidth = Math.max(
+      0,
+      width - horizontalPadding * 2,
+    );
+    this.captionInnerWidth = innerWidth;
+    this.lineUnitBudget =
+      deriveLineUnitBudget(
+        innerWidth,
+        fontSize,
+      );
 
     this.captionStack.style.display =
       "flex";
@@ -2427,6 +2461,40 @@ export class CaptionOverlay {
           : 0
       }px`,
     );
+
+    const computedFont = getComputedStyle(
+      this.primaryLines[0],
+    ).font;
+    this.textMeasurer.setFont(
+      computedFont.trim() === ""
+        ? `${CAPTION_PRIMARY_FONT_WEIGHT} ${fontSize}px ${CAPTION_PRIMARY_FONT_FAMILY}`
+        : computedFont,
+    );
+    const measurePath =
+      this.textMeasurer.isMeasured()
+        ? "canvas"
+        : "units";
+
+    if (
+      measurePath === "canvas" &&
+      this.host.dataset.captionMeasure !==
+        "canvas"
+    ) {
+      console.log(
+        "[overlay]",
+        "caption measure",
+        {
+          path: "canvas",
+          fontSize,
+          innerWidth,
+        },
+      );
+    }
+
+    this.host.dataset.captionMeasure =
+      measurePath;
+    this.captionStack.dataset.captionMeasure =
+      measurePath;
   }
 
   private positionTargetChip(
@@ -2920,12 +2988,7 @@ function getOverlayStyles(): string {
       border-radius: 8px;
       color: #ffffff;
       background: rgba(0, 0, 0, 0.92);
-      font-family:
-        system-ui,
-        -apple-system,
-        BlinkMacSystemFont,
-        "Segoe UI",
-        sans-serif;
+      font-family: ${CAPTION_PRIMARY_FONT_FAMILY};
       text-align: center;
       pointer-events: none;
     }
@@ -3013,7 +3076,7 @@ function getOverlayStyles(): string {
       overflow-wrap: normal;
       font-size: 1em;
       font-style: normal;
-      font-weight: 650;
+      font-weight: ${CAPTION_PRIMARY_FONT_WEIGHT};
       line-height: ${PRIMARY_LINE_HEIGHT};
       white-space: pre-line;
     }
