@@ -98,7 +98,7 @@ function loadKeepLatinTerms() {
 
 function keepLatinPattern(term) {
   const escaped = term.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
-  return new RegExp(`(?<![A-Za-z0-9])${escaped}(?![A-Za-z0-9'])`, "u");
+  return new RegExp(`(?<![A-Za-z0-9])${escaped}(?![A-Za-z0-9'])`, "iu");
 }
 
 function keepLatinTermsIn(text, terms) {
@@ -112,18 +112,33 @@ function countMatches(text, pattern) {
   return [...text.matchAll(new RegExp(pattern.source, flags))].length;
 }
 
-const KATAKANA_NAME_RENDERINGS_AMBIGUOUS = [
-  "オプス",
-  "オパウス",
-  "オピュス",
-  "クラーク",
+const KATAKANA_NAME_RENDERINGS = [
+  { term: "Opus", rendering: "オプス" },
+  { term: "Opus", rendering: "オパウス" },
+  { term: "Opus", rendering: "オピュス" },
+  { term: "Clerk", rendering: "クラーク" },
+  { term: "Claude", rendering: "クロード" },
+  { term: "Anthropic", rendering: "アンソロピック" },
+  { term: "Hugging Face", rendering: "ハルキング" },
+  { term: "Goddard", rendering: "ゴダード" },
 ];
-const KATAKANA_NAME_RENDERINGS_PLAIN = [
-  "クロード",
-  "アンソロピック",
-  "ハルキング",
-  "ゴダード",
-];
+
+function countKatakanaNameHits(text, entries, renderings) {
+  const ambiguousTerms = new Set(
+    entries.filter((entry) => entry.ambiguous).map((entry) => entry.term),
+  );
+  let ambiguous = 0;
+  let plain = 0;
+  for (const { term, rendering } of renderings) {
+    const hits = text.split(rendering).length - 1;
+    if (ambiguousTerms.has(term)) {
+      ambiguous += hits;
+    } else {
+      plain += hits;
+    }
+  }
+  return { ambiguous, plain };
+}
 
 function splitEnglishClauses(text) {
   return text
@@ -1327,6 +1342,15 @@ for (const [index, english] of glossaryEnglishClauses.entries()) {
   }
 }
 
+let keepLatinSourceHits = 0;
+for (const english of glossaryEnglishClauses) {
+  for (const entry of keepLatinEntries) {
+    keepLatinSourceHits += countMatches(
+      english,
+      keepLatinPattern(entry.term),
+    );
+  }
+}
 let maskedNameOccurrences = 0;
 for (const entry of keepLatinEntries) {
   if (entry.ambiguous) continue;
@@ -1335,14 +1359,13 @@ for (const entry of keepLatinEntries) {
     keepLatinPattern(entry.term),
   );
 }
-let katakanaNameHitsAmbiguous = 0;
-for (const rendering of KATAKANA_NAME_RENDERINGS_AMBIGUOUS) {
-  katakanaNameHitsAmbiguous += joined.split(rendering).length - 1;
-}
-let katakanaNameHitsPlain = 0;
-for (const rendering of KATAKANA_NAME_RENDERINGS_PLAIN) {
-  katakanaNameHitsPlain += joined.split(rendering).length - 1;
-}
+const katakanaHits = countKatakanaNameHits(
+  joined,
+  keepLatinEntries,
+  KATAKANA_NAME_RENDERINGS,
+);
+const katakanaNameHitsAmbiguous = katakanaHits.ambiguous;
+const katakanaNameHitsPlain = katakanaHits.plain;
 const katakanaNameHits =
   katakanaNameHitsAmbiguous + katakanaNameHitsPlain;
 
@@ -1360,6 +1383,7 @@ result.observations = {
   phraseBoundaryRate: phraseBoundaryRate(pageBlocks),
   glossaryLatinKept,
   glossaryLatinLost,
+  keepLatinSourceHits,
   maskedNameOccurrences,
   katakanaNameHits,
   katakanaNameHitsAmbiguous,

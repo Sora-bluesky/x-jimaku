@@ -9,6 +9,7 @@ import {
   KEEP_LATIN_ALL_TERMS,
   KEEP_LATIN_MASK_TERMS,
   KEEP_LATIN_MATCH_CAP,
+  countKatakanaNameHits,
   glossaryPromptBlocks,
   selectGlossaryMatches,
 } from "./glossary";
@@ -57,12 +58,32 @@ describe("selectGlossaryMatches", () => {
     );
   });
 
-  it("matches Meta as a whole word and ignores lowercase meta", () => {
-    expect(keepLatinTerms("meta learning"))
-      .toEqual([]);
+  it("selects lowercase meta as the company entry without masking it", () => {
+    expect(
+      selectGlossaryMatches("meta learning")
+        .keepLatin,
+    ).toEqual([
+      { term: "Meta", ambiguous: true },
+    ]);
     expect(
       keepLatinTerms("Meta released Llama"),
     ).toEqual(["Meta", "Llama"]);
+    expect(
+      keepLatinTerms("meta llama"),
+    ).toEqual(["Meta", "Llama"]);
+  });
+
+  it("matches lowercase opus 4.5 and fable 5.1", () => {
+    expect(keepLatinTerms("opus 4.5"))
+      .toEqual(["Opus"]);
+    expect(keepLatinTerms("fable 5.1"))
+      .toEqual(["Fable"]);
+    expect(
+      keepLatinTerms("using clerk"),
+    ).toEqual(["Clerk"]);
+    expect(
+      keepLatinTerms("the blinking cursor"),
+    ).toEqual(["Cursor"]);
   });
 
   it("matches Hugging Face as a phrase, not as two words", () => {
@@ -171,6 +192,57 @@ describe("KEEP_LATIN_MASK_TERMS", () => {
       expect(
         selectGlossaryMatches(term).keepLatin,
       ).toEqual([{ term }]);
+      expect(
+        selectGlossaryMatches(
+          term.toLowerCase(),
+        ).keepLatin,
+      ).toEqual([{ term }]);
     }
+  });
+});
+
+describe("countKatakanaNameHits", () => {
+  const renderings = [
+    { term: "Opus", rendering: "オプス" },
+    { term: "Clerk", rendering: "クラーク" },
+  ];
+  const text = "オプスとクラークとオプス";
+
+  it("buckets by the glossary flag so flipping an entry moves the count", () => {
+    expect(
+      countKatakanaNameHits(
+        text,
+        [
+          { term: "Opus" },
+          {
+            term: "Clerk",
+            ambiguous: true,
+          },
+        ],
+        renderings,
+      ),
+    ).toEqual({
+      ambiguous: 1,
+      plain: 2,
+    });
+    expect(
+      countKatakanaNameHits(
+        text,
+        [
+          {
+            term: "Opus",
+            ambiguous: true,
+          },
+          {
+            term: "Clerk",
+            ambiguous: true,
+          },
+        ],
+        renderings,
+      ),
+    ).toEqual({
+      ambiguous: 3,
+      plain: 0,
+    });
   });
 });

@@ -251,7 +251,7 @@ function findNonOverlappingOccurrences(
   for (const term of normalizeTerms(terms)) {
     const pattern = new RegExp(
       `(?<![A-Za-z0-9])${escapeRegExp(term)}(?![A-Za-z0-9'])`,
-      "gu",
+      "giu",
     );
 
     for (const match of text.matchAll(pattern)) {

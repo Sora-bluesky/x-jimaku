@@ -167,14 +167,14 @@ describe("term masking", () => {
     ]);
   });
 
-  it("does not partially mask possessives, plurals, or lowercase ASR text", () => {
+  it("does not partially mask possessives or plurals", () => {
     const result = createMaskPlan(
       "Roman's Romans roman Roman is",
       ["Roman"],
     );
 
     expect(result.masked).toBe(
-      "Roman's Romans roman %%1%% is",
+      "Roman's Romans %%1%% %%2%% is",
     );
   });
 
@@ -225,6 +225,76 @@ describe("term masking", () => {
     expect(result.maskPlan?.entries).toEqual([
       { number: 1, term: "Opus" },
     ]);
+  });
+
+  it("masks lowercase opus and restores Opus", () => {
+    const result = planKeepLatin(
+      "a new version of opus",
+    );
+
+    expect(result.masked).toBe(
+      "a new version of %%1%%",
+    );
+    expect(result.maskPlan?.entries).toEqual([
+      { number: 1, term: "Opus" },
+    ]);
+    expect(
+      restoreMaskedTranslation(
+        "%%1%%です",
+        result.maskPlan,
+      ),
+    ).toBe("Opusです");
+  });
+
+  it("masks lowercase opus 4.5 and fable 5.1", () => {
+    const opus = planKeepLatin("opus 4.5");
+    expect(opus.masked).toBe("%%1%% 4.5");
+    expect(opus.maskPlan?.entries).toEqual([
+      { number: 1, term: "Opus" },
+    ]);
+
+    const fable = planKeepLatin("fable 5.1");
+    expect(fable.masked).toBe("%%1%% 5.1");
+    expect(fable.maskPlan?.entries).toEqual([
+      { number: 1, term: "Fable" },
+    ]);
+
+    expect(
+      planKeepLatin("cursor 4.5").masked,
+    ).toBe("%%1%% 4.5");
+    expect(
+      planKeepLatin("cursor 4.5").maskPlan
+        ?.entries,
+    ).toEqual([
+      { number: 1, term: "Cursor" },
+    ]);
+  });
+
+  it("does not mask ordinary meta; version evidence restores Meta", () => {
+    const ordinary = "meta learning";
+    expect(planKeepLatin(ordinary)).toEqual({
+      original: ordinary,
+      masked: ordinary,
+      maskPlan: null,
+    });
+
+    const evidenced = planKeepLatin(
+      "meta 4.5",
+    );
+    expect(evidenced.masked).toBe(
+      "%%1%% 4.5",
+    );
+    expect(
+      evidenced.maskPlan?.entries,
+    ).toEqual([
+      { number: 1, term: "Meta" },
+    ]);
+    expect(
+      restoreMaskedTranslation(
+        "%%1%%です",
+        evidenced.maskPlan,
+      ),
+    ).toBe("Metaです");
   });
 
   it("does not mask an ambiguous glossary name", () => {
@@ -432,7 +502,7 @@ describe("term masking", () => {
   });
 
   it("leaves a no-match clause untouched", () => {
-    const original = "roman stays";
+    const original = "hello stays";
     const result = createMaskPlan(
       original,
       ["Roman"],
@@ -509,6 +579,33 @@ describe("term masking", () => {
     ).toBe(
       "%%1%% followed %%2%% and Roman's",
     );
+  });
+
+  it("remasks lowercase history and restores the canonical spelling", () => {
+    const result = createMaskPlan(
+      "opus met opus",
+      [],
+      KEEP_LATIN_MASK_TERMS,
+    );
+
+    expect(result.maskPlan?.entries).toEqual([
+      { number: 1, term: "Opus" },
+      { number: 2, term: "Opus" },
+    ]);
+    expect(
+      remaskPlannedTerms(
+        "opus followed Opus and opus's",
+        result.maskPlan!,
+      ),
+    ).toBe(
+      "%%1%% followed %%2%% and opus's",
+    );
+    expect(
+      restoreMaskedTranslation(
+        "%%1%% then %%2%%",
+        result.maskPlan,
+      ),
+    ).toBe("Opus then Opus");
   });
 });
 

@@ -97,7 +97,7 @@ function pageNamesTerm(
 ): boolean {
   const pattern = new RegExp(
     `(?<![A-Za-z0-9])${escapeRegExp(term)}(?![A-Za-z0-9'])`,
-    "u",
+    "iu",
   );
 
   return properNouns.some(
@@ -137,11 +137,11 @@ function hasFamilyNeighbour(
   // this still treats it as a neighbour.
   const before = new RegExp(
     `(?<![A-Za-z0-9])(?:${source})(?:['’]s)?(?:\\s+\\d+(?:\\.\\d+)*)?\\s+$`,
-    "u",
+    "iu",
   );
   const after = new RegExp(
     `^\\s+(?:${source})(?![A-Za-z0-9'])`,
-    "u",
+    "iu",
   );
 
   return (
@@ -247,7 +247,7 @@ export function selectGlossaryMatches(
       locateTerms(
         clause,
         KEEP_LATIN_TERMS,
-        false,
+        true,
       ),
       KEEP_LATIN_MATCH_CAP,
     ),
@@ -331,4 +331,47 @@ export function glossaryPromptBlocks(
   }
 
   return blocks;
+}
+
+export interface KatakanaNameRendering {
+  readonly term: string;
+  readonly rendering: string;
+}
+
+export function countKatakanaNameHits(
+  text: string,
+  entries: readonly KeepLatinTerm[],
+  renderings: readonly KatakanaNameRendering[],
+): {
+  readonly ambiguous: number;
+  readonly plain: number;
+} {
+  const ambiguousTerms = new Set(
+    entries
+      .filter(
+        (entry) =>
+          entry.ambiguous === true,
+      )
+      .map((entry) => entry.term),
+  );
+  let ambiguous = 0;
+  let plain = 0;
+
+  for (const rendering of renderings) {
+    const hits =
+      text.split(rendering.rendering)
+        .length - 1;
+
+    if (
+      ambiguousTerms.has(
+        rendering.term,
+      )
+    ) {
+      ambiguous += hits;
+    } else {
+      plain += hits;
+    }
+  }
+
+  return { ambiguous, plain };
 }
