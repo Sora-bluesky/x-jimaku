@@ -141,13 +141,17 @@ export function restoreMaskedTranslation(
   let unknownNumber = false;
 
   const restored = output.replace(
-    /%%\s*([0-9]+)\s*%%/gu,
+    placeholderRegex(),
     (
       placeholder: string,
       numberText: string,
     ) => {
+      const numberKey =
+        asciiPlaceholderNumber(
+          numberText,
+        );
       const entry =
-        entriesByNumber.get(numberText);
+        entriesByNumber.get(numberKey);
 
       if (entry === undefined) {
         unknownNumber = true;
@@ -155,8 +159,8 @@ export function restoreMaskedTranslation(
       }
 
       counts.set(
-        numberText,
-        (counts.get(numberText) ?? 0) + 1,
+        numberKey,
+        (counts.get(numberKey) ?? 0) + 1,
       );
       return entry.term;
     },
@@ -165,6 +169,7 @@ export function restoreMaskedTranslation(
   if (
     unknownNumber ||
     restored.includes("%%") ||
+    restored.includes("％％") ||
     maskPlan.entries.some(
       (entry) =>
         counts.get(String(entry.number)) !==
@@ -175,6 +180,62 @@ export function restoreMaskedTranslation(
   }
 
   return restored;
+}
+
+export function countIntactPlaceholders(
+  output: string,
+  maskPlan: MaskPlan | null,
+): {
+  sent: number;
+  returned: number;
+} {
+  if (maskPlan === null) {
+    return {
+      sent: 0,
+      returned: 0,
+    };
+  }
+
+  const planned = new Set(
+    maskPlan.entries.map((entry) =>
+      String(entry.number),
+    ),
+  );
+  const seen = new Set<string>();
+
+  for (const match of output.matchAll(
+    placeholderRegex(),
+  )) {
+    const numberKey =
+      asciiPlaceholderNumber(
+        match[1] ?? "",
+      );
+
+    if (planned.has(numberKey)) {
+      seen.add(numberKey);
+    }
+  }
+
+  return {
+    sent: maskPlan.entries.length,
+    returned: seen.size,
+  };
+}
+
+function placeholderRegex(): RegExp {
+  return /[%％]{2}\s*([0-9０-９]+)\s*[%％]{2}/gu;
+}
+
+function asciiPlaceholderNumber(
+  numberText: string,
+): string {
+  return numberText.replace(
+    /[０-９]/gu,
+    (digit) =>
+      String(
+        digit.charCodeAt(0) - 0xff10,
+      ),
+  );
 }
 
 export function remaskPlannedTerms(

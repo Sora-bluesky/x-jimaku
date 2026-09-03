@@ -191,3 +191,40 @@ describe("drain message compatibility", () => {
     ).toBe(false);
   });
 });
+
+describe("OFF_DEV_LOG placeholder-survival", () => {
+  const survival = {
+    t: "OFF_DEV_LOG",
+    level: "info",
+    tag: "translate",
+    message: "placeholder survival",
+    data: {
+      kind: "placeholder-survival",
+      requestId: "request-1",
+      lineId: 1,
+      path: "language-model",
+      sent: 2,
+      returned: 1,
+    },
+  };
+
+  it("accepts a survival record", () => {
+    expect(isM1Message(survival)).toBe(
+      true,
+    );
+  });
+
+  it("rejects a survival record without counts", () => {
+    expect(
+      isM1Message({
+        ...survival,
+        data: {
+          kind: "placeholder-survival",
+          requestId: "request-1",
+          lineId: 1,
+          path: "language-model",
+        },
+      }),
+    ).toBe(false);
+  });
+});

@@ -16,6 +16,7 @@ import {
   allowKeepLatinMaskOccurrence,
 } from "./glossary";
 import {
+  countIntactPlaceholders,
   createMaskPlan,
   MAX_MASKED_OCCURRENCES,
   remaskPlannedTerms,
@@ -73,9 +74,15 @@ function createTestEngine(
   properNouns: string[],
   onTranslated:
     TranslationEngineOptions["onTranslated"],
+  onDevLog?:
+    TranslationEngineOptions["onDevLog"],
 ): TranslationEngine {
   return new TranslationEngine({
     backend,
+    requestId:
+      onDevLog === undefined
+        ? undefined
+        : "request-mask",
     getContext: () => ({
       recentPairs: [],
       properNouns,
@@ -87,6 +94,7 @@ function createTestEngine(
       })),
     onTranslated,
     onPathChanged: vi.fn(),
+    onDevLog,
   });
 }
 
@@ -616,11 +624,108 @@ describe("term masking", () => {
     ).toBe("Romanです");
   });
 
+  it("restores fullwidth percent placeholders", () => {
+    const result = createMaskPlan(
+      "Roman is here",
+      ["Roman"],
+    );
+
+    expect(
+      restoreMaskedTranslation(
+        "％％1％％です",
+        result.maskPlan,
+      ),
+    ).toBe("Romanです");
+    expect(
+      restoreMaskedTranslation(
+        "％％ 1 ％％です",
+        result.maskPlan,
+      ),
+    ).toBe("Romanです");
+    expect(
+      restoreMaskedTranslation(
+        "％％1%%です",
+        result.maskPlan,
+      ),
+    ).toBe("Romanです");
+  });
+
+  it("restores fullwidth digit placeholders", () => {
+    const result = createMaskPlan(
+      "Roman is here",
+      ["Roman"],
+    );
+
+    expect(
+      restoreMaskedTranslation(
+        "%%１%%です",
+        result.maskPlan,
+      ),
+    ).toBe("Romanです");
+  });
+
+  it("restores fullwidth placeholders to the numbered names", () => {
+    const result = createMaskPlan(
+      "Roman met NASA",
+      ["Roman", "NASA"],
+    );
+
+    expect(result.masked).toBe(
+      "%%1%% met %%2%%",
+    );
+    expect(
+      restoreMaskedTranslation(
+        "％％2％％と％％1％％",
+        result.maskPlan,
+      ),
+    ).toBe("NASAとRoman");
+    expect(
+      restoreMaskedTranslation(
+        "%%１%%と%%２%%",
+        result.maskPlan,
+      ),
+    ).toBe("RomanとNASA");
+  });
+
+  it("counts how many planned placeholders came back", () => {
+    const result = createMaskPlan(
+      "Roman met NASA",
+      ["Roman", "NASA"],
+    );
+
+    expect(
+      countIntactPlaceholders(
+        "%%1%%です",
+        result.maskPlan,
+      ),
+    ).toEqual({ sent: 2, returned: 1 });
+    expect(
+      countIntactPlaceholders(
+        "％％1％％と％％2％％",
+        result.maskPlan,
+      ),
+    ).toEqual({ sent: 2, returned: 2 });
+    expect(
+      countIntactPlaceholders(
+        "ここです",
+        result.maskPlan,
+      ),
+    ).toEqual({ sent: 2, returned: 0 });
+    expect(
+      countIntactPlaceholders(
+        "%1%です",
+        result.maskPlan,
+      ),
+    ).toEqual({ sent: 2, returned: 0 });
+  });
+
   it.each([
     ["unknown number", "%%2%%です"],
     ["duplicate number", "%%1%%%%1%%です"],
     ["missing number", "ここです"],
     ["unresolved marker", "%%x%%です"],
+    ["single percent", "%1%です"],
+    ["brace number", "{1}です"],
   ])(
     "rejects %s",
     (_case, output) => {
@@ -761,6 +866,181 @@ describe("TranslationEngine masking ladder", () => {
     expect(onTranslated).toHaveBeenCalledWith(
       expect.objectContaining({ id: 2 }),
       "ローマです",
+    );
+
+    engine.destroy();
+  });
+
+  it("records how many placeholders came back on a masked attempt", async () => {
+    installLanguageModel(
+      async (sent) =>
+        sent.includes("%%")
+          ? "ここです"
+          : "ローマです",
+    );
+    const onTranslated = vi.fn();
+    const onDevLog = vi.fn();
+    const engine = createTestEngine(
+      "prompt-api",
+      ["Roman"],
+      onTranslated,
+      onDevLog,
+    );
+
+    await engine.initialize();
+    await translateClause(
+      engine,
+      21,
+      "Roman is here.",
+    );
+
+    const survival = onDevLog.mock.calls
+      .map(([message]) => message)
+      .filter(
+        (message) =>
+          message.data?.kind ===
+          "placeholder-survival",
+      );
+
+    expect(survival).toEqual([
+      {
+        t: "OFF_DEV_LOG",
+        level: "info",
+        tag: "translate",
+        message: "placeholder survival",
+        data: {
+          kind: "placeholder-survival",
+          requestId: "request-mask",
+          lineId: 21,
+          path: "language-model",
+          sent: 1,
+          returned: 0,
+        },
+      },
+    ]);
+    expect(onTranslated).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 21 }),
+      "ローマです",
+    );
+
+    engine.destroy();
+  });
+
+  it("records a partial return against what went out", async () => {
+    installLanguageModel(
+      async () => "%%1%%です",
+    );
+    const onDevLog = vi.fn();
+    const engine = createTestEngine(
+      "prompt-api",
+      ["Roman", "NASA"],
+      vi.fn(),
+      onDevLog,
+    );
+
+    await engine.initialize();
+    await translateClause(
+      engine,
+      22,
+      "Roman met NASA.",
+    );
+
+    const survival = onDevLog.mock.calls
+      .map(([message]) => message)
+      .filter(
+        (message) =>
+          message.data?.kind ===
+          "placeholder-survival",
+      );
+
+    expect(survival[0]?.data).toEqual({
+      kind: "placeholder-survival",
+      requestId: "request-mask",
+      lineId: 22,
+      path: "language-model",
+      sent: 2,
+      returned: 1,
+    });
+
+    engine.destroy();
+  });
+
+  it("restores a fullwidth placeholder without retrying", async () => {
+    const prompt = installLanguageModel(
+      async () => "％％1％％です",
+    );
+    const onTranslated = vi.fn();
+    const onDevLog = vi.fn();
+    const engine = createTestEngine(
+      "prompt-api",
+      ["Roman"],
+      onTranslated,
+      onDevLog,
+    );
+
+    await engine.initialize();
+    await translateClause(
+      engine,
+      23,
+      "Roman is here.",
+    );
+
+    expect(prompt).toHaveBeenCalledTimes(1);
+    expect(onTranslated).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 23 }),
+      "Romanです",
+    );
+    expect(
+      onDevLog.mock.calls
+        .map(([message]) => message)
+        .filter(
+          (message) =>
+            message.data?.kind ===
+            "placeholder-survival",
+        )[0]?.data,
+    ).toEqual({
+      kind: "placeholder-survival",
+      requestId: "request-mask",
+      lineId: 23,
+      path: "language-model",
+      sent: 1,
+      returned: 1,
+    });
+
+    engine.destroy();
+  });
+
+  it("retries when a single-percent mark is not a placeholder", async () => {
+    const prompt = installLanguageModel(
+      async (sent) =>
+        sent.includes("%%")
+          ? "コストは%1%です"
+          : "ローマです",
+    );
+    const onTranslated = vi.fn();
+    const engine = createTestEngine(
+      "prompt-api",
+      ["Roman"],
+      onTranslated,
+    );
+
+    await engine.initialize();
+    await translateClause(
+      engine,
+      24,
+      "Roman is here.",
+    );
+
+    expect(prompt).toHaveBeenCalledTimes(2);
+    expect(onTranslated).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 24 }),
+      "ローマです",
+    );
+    expect(
+      onTranslated,
+    ).not.toHaveBeenCalledWith(
+      expect.objectContaining({ id: 24 }),
+      "コストはRomanです",
     );
 
     engine.destroy();

@@ -1253,6 +1253,7 @@ const devLogKindCounts = {
   "rescue-failure": 0,
   passthrough: 0,
   "clause-timing": 0,
+  "placeholder-survival": 0,
   other: 0,
 };
 for (
@@ -1400,8 +1401,34 @@ function phraseBoundaryRate(blocks) {
   };
 }
 
+function placeholderSurvival(devLog) {
+  let sent = 0;
+  let returned = 0;
+  for (const entry of devLog) {
+    if (entry.data?.kind !== "placeholder-survival") continue;
+    const nextSent = entry.data.sent;
+    const nextReturned = entry.data.returned;
+    if (
+      !Number.isFinite(nextSent)
+      || !Number.isFinite(nextReturned)
+      || nextSent < 0
+      || nextReturned < 0
+    ) {
+      continue;
+    }
+    sent += nextSent;
+    returned += nextReturned;
+  }
+  return {
+    rate: sent === 0 ? null : returned / sent,
+    samples: sent,
+  };
+}
+
 const phraseBoundarySummary =
   phraseBoundaryRate(pageBlocks);
+const placeholderSurvivalSummary =
+  placeholderSurvival(result.diagnostics.devLog);
 
 const captionMeasureSeen = new Set(
   samples
@@ -1502,6 +1529,10 @@ result.observations = {
     phraseBoundarySummary.rate,
   phraseBoundarySamples:
     phraseBoundarySummary.samples,
+  placeholderSurvivalRate:
+    placeholderSurvivalSummary.rate,
+  placeholderSurvivalSamples:
+    placeholderSurvivalSummary.samples,
   captionLogEntries,
   captionLogDwell,
   glossaryLatinKept,

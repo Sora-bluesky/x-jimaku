@@ -261,7 +261,8 @@ export type OffDevLogKind =
   | "rescue-failure"
   | "passthrough"
   | "queue-drop"
-  | "clause-timing";
+  | "clause-timing"
+  | "placeholder-survival";
 
 export type ClauseTimingOutcome =
   | "translated"
@@ -276,6 +277,8 @@ export interface OffDevLogData {
   enqueueToTerminalMs?: number;
   modelCallMs?: number;
   deadlineExpired?: boolean;
+  sent?: number;
+  returned?: number;
 }
 
 export interface OffDevLogMessage {
@@ -780,7 +783,9 @@ export function isM1Message(
               value.data.kind ===
                 "queue-drop" ||
               value.data.kind ===
-                "clause-timing"
+                "clause-timing" ||
+              value.data.kind ===
+                "placeholder-survival"
             ) &&
             typeof value.data.requestId ===
               "string" &&
@@ -836,6 +841,31 @@ export function isM1Message(
                   value.data.outcome ===
                     "fallback"
                 )
+              )
+            ) &&
+            (
+              value.data.kind !==
+                "placeholder-survival" ||
+              (
+                isTranslationPath(
+                  value.data.path,
+                ) &&
+                typeof value.data.sent ===
+                  "number" &&
+                Number.isSafeInteger(
+                  value.data.sent,
+                ) &&
+                value.data.sent >= 0 &&
+                typeof value.data
+                  .returned ===
+                  "number" &&
+                Number.isSafeInteger(
+                  value.data.returned,
+                ) &&
+                value.data.returned >=
+                  0 &&
+                value.data.returned <=
+                  value.data.sent
               )
             )
           )

@@ -20,6 +20,7 @@ import {
   selectGlossaryMatches,
 } from "./glossary";
 import {
+  countIntactPlaceholders,
   createMaskPlan,
   remaskPlannedTerms,
   restoreMaskedTranslation,
@@ -1028,6 +1029,13 @@ export class TranslationEngine {
       normalizeLanguageModelResponse(
         rawResponse,
       );
+    this.recordPlaceholderSurvival(
+      normalized,
+      request,
+      lineId,
+      "language-model",
+      attempt,
+    );
     const restored =
       restoreMaskedTranslation(
         normalized,
@@ -1395,6 +1403,14 @@ export class TranslationEngine {
               : result.ja
           ).trim();
 
+        this.recordPlaceholderSurvival(
+          ja,
+          request,
+          lineId,
+          rescuePath,
+          attempt,
+        );
+
         if (ja === "") {
           throw new Error(
             "Translator rescue returned an empty result",
@@ -1523,6 +1539,41 @@ export class TranslationEngine {
       this.assertAttemptCurrent(attempt);
       return null;
     }
+  }
+
+  private recordPlaceholderSurvival(
+    output: string,
+    request: MaskedTranslationLine,
+    lineId: number,
+    path: TranslationPath,
+    attempt: TranslationAttempt,
+  ): void {
+    if (request.maskPlan === null) {
+      return;
+    }
+
+    const { sent, returned } =
+      countIntactPlaceholders(
+        output,
+        request.maskPlan,
+      );
+
+    this.emitDevLog(
+      {
+        level: "info",
+        tag: "translate",
+        message:
+          "placeholder survival",
+        data: {
+          kind: "placeholder-survival",
+          lineId,
+          path,
+          sent,
+          returned,
+        },
+      },
+      attempt,
+    );
   }
 
   private emitDevLog(
