@@ -93,6 +93,7 @@ A-6-5 は次の値で表示を判定または観測する。
 | `observations.primaryClippedVertical` | 非空の `.caption-primary` で `scrollHeight > clientHeight + 1` だった件数。合否には使わない。 |
 | `observations.primaryClippedHorizontal` | 非空の `.caption-primary` で `scrollWidth > clientWidth + 1` だった件数。合否には使わない。 |
 | `observations.phraseBoundaryRate` | 表示された行の改行のうち、BudouX（`.references/budoux`）の文節境界に落ちた割合。合否には使わない。文節境界での折返しは別変更であり、入るまでこの値は現行付近のままになる想定。 |
+| `observations.phraseBoundarySamples` | その割合の**分母**（走行中の改行回数）。1 走行で 4〜15 回しか出ないことがあり、分母を見ずに率だけ読むと 4 回の全一致を「100%」と書いてしまう。率を引用するときは必ず添えること。 |
 | `observations.glossaryLatinKept` | 英語側に KEEP_LATIN_TERMS の語があった節のうち、日本語出力にもその語がラテン文字で残っている件数。合否には使わない。 |
 | `observations.glossaryLatinLost` | 英語側にあった語が日本語出力にラテン文字で残っていない件数。曖昧語では正しい判断のこともあるので、閾値にはしない。 |
 | `observations.keepLatinSourceHits` | 英語原文（表示行または台本）に KEEP_LATIN 語が大小無視で出現した回数。マスク成否ではなく、認識側に名前があった回数。合否には使わない。 |

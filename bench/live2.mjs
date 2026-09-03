@@ -1282,8 +1282,14 @@ function phraseBoundaryRate(blocks) {
       if (boundaries.has(offset)) phraseBreaks += 1;
     }
   }
-  return lineBreaks === 0 ? null : phraseBreaks / lineBreaks;
+  return {
+    rate: lineBreaks === 0 ? null : phraseBreaks / lineBreaks,
+    samples: lineBreaks,
+  };
 }
+
+const phraseBoundarySummary =
+  phraseBoundaryRate(pageBlocks);
 
 const captionMeasureSeen = new Set(
   samples
@@ -1380,7 +1386,10 @@ result.observations = {
   captionLineMeasure,
   primaryClippedVertical,
   primaryClippedHorizontal,
-  phraseBoundaryRate: phraseBoundaryRate(pageBlocks),
+  phraseBoundaryRate:
+    phraseBoundarySummary.rate,
+  phraseBoundarySamples:
+    phraseBoundarySummary.samples,
   glossaryLatinKept,
   glossaryLatinLost,
   keepLatinSourceHits,
