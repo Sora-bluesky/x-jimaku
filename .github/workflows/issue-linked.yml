@@ -1,0 +1,56 @@
+# Every pull request has to name the issue it closes.
+#
+# This exists because the rule was stated and then not kept. On 2026-09-03 a
+# branch grew seventeen commits across four separate concerns while its pull
+# request still said only "Closes #71", and none of the other work had an issue
+# at all. Nobody noticed until it was asked about directly.
+#
+# A local hook would catch it earlier, but only on the machine that has the hook
+# installed. This runs on the pull request itself, so it holds whoever pushes and
+# from wherever.
+name: issue-linked
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - edited
+      - reopened
+      - synchronize
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  closes-an-issue:
+    runs-on: ubuntu-latest
+    steps:
+      - name: The body must close at least one issue
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          printf '%s' "$PR_BODY" > body.txt
+
+          # GitHub only closes an issue for these verbs, so accept exactly them.
+          if grep -qiE '\b(close[sd]?|fix(e[sd])?|resolve[sd]?)\b[[:space:]]*:?[[:space:]]*#[0-9]+' body.txt; then
+            echo "Linked issues:"
+            grep -oiE '\b(close[sd]?|fix(e[sd])?|resolve[sd]?)\b[[:space:]]*:?[[:space:]]*#[0-9]+' body.txt | sort -u
+            exit 0
+          fi
+
+          echo "::error title=No issue linked::This pull request does not close an issue."
+          echo ""
+          echo "The rule is: open the issue first, then the pull request."
+          echo ""
+          echo "Add a line to the body naming what this closes, for example:"
+          echo "  Closes #123."
+          echo ""
+          echo "If the work outgrew the issue it started from, that is the case"
+          echo "this check is for: open issues for the rest and list them all."
+          echo ""
+          echo "Title: $PR_TITLE"
+          exit 1
