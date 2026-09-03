@@ -16,6 +16,7 @@ import {
   KEEP_LATIN_ALL_TERMS,
   allowKeepLatinMaskOccurrence,
   glossaryPromptBlocks,
+  keepLatinEntriesForTerms,
   selectGlossaryMatches,
 } from "./glossary";
 import {
@@ -1482,6 +1483,9 @@ export class TranslationEngine {
             request.original,
             context,
             null,
+            request.maskPlan?.entries.map(
+              (entry) => entry.term,
+            ) ?? [],
           ),
           attempt,
         );
@@ -2099,6 +2103,7 @@ function createTranslationPrompt(
   text: string,
   context: TranslationContext,
   maskPlan: MaskPlan | null,
+  unmaskedTerms: readonly string[] = [],
 ): string {
   const blocks: string[] = [];
   const maskedTerms = new Set(
@@ -2131,13 +2136,33 @@ function createTranslationPrompt(
 
   const glossaryMatch =
     selectGlossaryMatches(text);
+  const visibleKeepLatin =
+    glossaryMatch.keepLatin.filter(
+      (entry) =>
+        !maskedTerms.has(entry.term),
+    );
+  const visibleKeepLatinTerms = new Set(
+    visibleKeepLatin.map(
+      (entry) => entry.term,
+    ),
+  );
+  const revealedKeepLatin =
+    maskPlan === null
+      ? keepLatinEntriesForTerms(
+          unmaskedTerms,
+        ).filter(
+          (entry) =>
+            !visibleKeepLatinTerms.has(
+              entry.term,
+            ),
+        )
+      : [];
   blocks.push(
     ...glossaryPromptBlocks({
-      keepLatin:
-        glossaryMatch.keepLatin.filter(
-          (entry) =>
-            !maskedTerms.has(entry.term),
-        ),
+      keepLatin: [
+        ...visibleKeepLatin,
+        ...revealedKeepLatin,
+      ],
       glossary:
         glossaryMatch.glossary.filter(
           (entry) =>

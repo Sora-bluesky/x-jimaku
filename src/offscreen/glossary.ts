@@ -262,6 +262,37 @@ export function selectGlossaryMatches(
   };
 }
 
+export function keepLatinEntriesForTerms(
+  terms: readonly string[],
+): KeepLatinTerm[] {
+  const byTerm = new Map(
+    KEEP_LATIN_TERMS.map((entry) => [
+      entry.term.toLowerCase(),
+      entry,
+    ]),
+  );
+  const seen = new Set<string>();
+  const entries: KeepLatinTerm[] = [];
+
+  for (const term of terms) {
+    const entry = byTerm.get(
+      term.toLowerCase(),
+    );
+
+    if (
+      entry === undefined ||
+      seen.has(entry.term)
+    ) {
+      continue;
+    }
+
+    seen.add(entry.term);
+    entries.push(entry);
+  }
+
+  return entries;
+}
+
 function formatKeepLatinBlock(
   entries: readonly KeepLatinTerm[],
 ): string | null {

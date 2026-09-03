@@ -12,6 +12,7 @@ import type {
 import {
   KEEP_LATIN_ALL_TERMS,
   KEEP_LATIN_MASK_TERMS,
+  KEEP_LATIN_MATCH_CAP,
   allowKeepLatinMaskOccurrence,
 } from "./glossary";
 import {
@@ -104,6 +105,79 @@ async function translateClause(
   await expect(
     engine.drain(),
   ).resolves.toBe(true);
+}
+
+function keepLatinBlock(
+  prompt: string,
+): string {
+  const start = prompt.indexOf("[原綴り]");
+
+  if (start === -1) {
+    return "";
+  }
+
+  const end = prompt.indexOf(
+    "[今訳す節]",
+    start,
+  );
+
+  return prompt.slice(
+    start,
+    end === -1 ? undefined : end,
+  );
+}
+
+function keepLatinCrowding(
+  longerThan: string,
+): string[] {
+  return KEEP_LATIN_MASK_TERMS.filter(
+    (term) =>
+      term.length > longerThan.length,
+  )
+    .sort(
+      (left, right) =>
+        right.length - left.length,
+    )
+    .slice(0, KEEP_LATIN_MATCH_CAP);
+}
+
+async function languageModelRetryPrompts(
+  text: string,
+  properNouns: string[],
+): Promise<{
+  first: string;
+  retry: string;
+}> {
+  const prompt = installLanguageModel(
+    async (sent) =>
+      sent.includes("%%")
+        ? "ここです"
+        : "到着した",
+  );
+  const engine = createTestEngine(
+    "prompt-api",
+    properNouns,
+    vi.fn(),
+  );
+
+  await engine.initialize();
+  await translateClause(
+    engine,
+    1,
+    text,
+  );
+  engine.destroy();
+
+  expect(prompt).toHaveBeenCalledTimes(2);
+
+  return {
+    first: String(
+      prompt.mock.calls[0]?.[0] ?? "",
+    ),
+    retry: String(
+      prompt.mock.calls[1]?.[0] ?? "",
+    ),
+  };
 }
 
 function planKeepLatin(
@@ -690,6 +764,74 @@ describe("TranslationEngine masking ladder", () => {
     );
 
     engine.destroy();
+  });
+
+  it("names unmasked keep-Latin terms on LanguageModel retry", async () => {
+    const crowding = keepLatinCrowding(
+      "Roman",
+    );
+    expect(crowding).toHaveLength(
+      KEEP_LATIN_MATCH_CAP,
+    );
+
+    const { first, retry } =
+      await languageModelRetryPrompts(
+        `${crowding.join(" ")} Roman arrived.`,
+        ["Roman"],
+      );
+
+    expect(first).not.toContain("Roman");
+    expect(keepLatinBlock(first)).not.toContain(
+      "Roman",
+    );
+    expect(keepLatinBlock(retry)).toContain(
+      "Roman",
+    );
+  });
+
+  it("leaves masked keep-Latin terms out of the first prompt", async () => {
+    const { first } =
+      await languageModelRetryPrompts(
+        "Claude is here.",
+        [],
+      );
+
+    expect(first).toContain("%%");
+    expect(first).not.toContain("[原綴り]");
+    expect(first).not.toContain("Claude");
+  });
+
+  it("keeps conditional phrasing for unmasked retry terms", async () => {
+    const crowding = keepLatinCrowding(
+      "Roman",
+    );
+    expect(crowding).toHaveLength(
+      KEEP_LATIN_MATCH_CAP,
+    );
+
+    const { retry } =
+      await languageModelRetryPrompts(
+        `${crowding.join(" ")} Roman arrived.`,
+        ["Roman"],
+      );
+
+    expect(keepLatinBlock(retry)).toContain(
+      "モデル・製品・組織名のときだけ原綴り（一般語は訳す）: Roman",
+    );
+  });
+
+  it("adds no keep-Latin section when the dropped mask has none", async () => {
+    const { retry } =
+      await languageModelRetryPrompts(
+        "U.S. is here.",
+        ["U.S."],
+      );
+
+    expect(retry).toContain(
+      "[今訳す節]\nU.S. is here.",
+    );
+    expect(retry).not.toContain("[原綴り]");
+    expect(keepLatinBlock(retry)).toBe("");
   });
 
   it("retries Translator without the mask when placeholders are lost", async () => {

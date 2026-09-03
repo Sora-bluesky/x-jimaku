@@ -11,6 +11,7 @@ import {
   KEEP_LATIN_MATCH_CAP,
   countKatakanaNameHits,
   glossaryPromptBlocks,
+  keepLatinEntriesForTerms,
   selectGlossaryMatches,
 } from "./glossary";
 
@@ -152,6 +153,25 @@ describe("selectGlossaryMatches", () => {
         keepLatin: [],
         glossary: [],
       }),
+    ).toEqual([]);
+  });
+});
+
+describe("keepLatinEntriesForTerms", () => {
+  it("keeps conditional metadata and skips unknown terms", () => {
+    expect(
+      keepLatinEntriesForTerms([
+        "Claude",
+        "Roman",
+        "roman",
+        "U.S.",
+      ]),
+    ).toEqual([
+      { term: "Claude" },
+      { term: "Roman", ambiguous: true },
+    ]);
+    expect(
+      keepLatinEntriesForTerms([]),
     ).toEqual([]);
   });
 });
