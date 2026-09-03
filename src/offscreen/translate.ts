@@ -546,8 +546,15 @@ export class TranslationEngine {
         );
       }
 
+      // An exhausted rescue hands back the English original. The display
+      // decides how a later revision relates to what is on screen from this
+      // flag, and without it an English line looks like a finished
+      // translation: the revision cannot remove it as a prefix and the
+      // content shows twice.
       this.options.onTranslated(
-        line,
+        result.recordHistory
+          ? line
+          : { ...line, fallback: true },
         result.ja,
       );
     } finally {

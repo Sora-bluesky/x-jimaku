@@ -117,10 +117,10 @@ function createRescueHarness(
     available: boolean;
     ja: string;
   }>,
+  promptRespond: () => Promise<string> = async () =>
+    "ここです",
 ) {
-  const prompt = vi.fn(
-    async () => "ここです",
-  );
+  const prompt = vi.fn(promptRespond);
   const translator = {
     translate: vi.fn(translatorRespond),
     destroy: vi.fn(),
@@ -752,6 +752,54 @@ describe(
             message:
               "Translator line rescue exhausted; passing through original",
           }),
+        );
+
+        harness.engine.destroy();
+      },
+    );
+
+    it(
+      "marks an exhausted rescue as a fallback",
+      async () => {
+        const harness = createRescueHarness(
+          async () => "",
+          async () => ({
+            available: false,
+            ja: "",
+          }),
+          async () => "",
+        );
+
+        await harness.engine.initialize();
+        harness.engine.enqueue({
+          id: 21,
+          text: "Roman is ready.",
+          final: true,
+          at: "2026-09-04T00:00:01.000Z",
+        });
+        await expect(
+          harness.engine.drain(),
+        ).resolves.toBe(true);
+
+        expect(
+          harness.onDevLog,
+        ).toHaveBeenCalledWith(
+          expect.objectContaining({
+            message:
+              "Translator line rescue exhausted; passing through original",
+          }),
+        );
+        // The display decides how a later revision relates to what is on
+        // screen from this flag; without it the English line reads as a
+        // finished translation.
+        expect(
+          harness.onTranslated,
+        ).toHaveBeenCalledWith(
+          expect.objectContaining({
+            id: 21,
+            fallback: true,
+          }),
+          "Roman is ready.",
         );
 
         harness.engine.destroy();
