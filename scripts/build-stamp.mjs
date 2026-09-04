@@ -71,3 +71,75 @@ export function checkProvenance(stamp, expected) {
 
   return null;
 }
+
+/**
+ * The files a manifest promises the browser it will find, and whether dist/
+ * actually holds them.
+ *
+ * `npm run build` is two vite passes. The first empties dist/ and writes the
+ * stamped manifest; the second emits the content script. If the second fails,
+ * dist/ is left holding a manifest that names a content.js which is not there,
+ * and a check that only asks whether manifest.json exists waves it through.
+ * The archive then installs and the extension does nothing on the page, which
+ * is a bad thing to learn from a store listing.
+ *
+ * Checking the manifest's own references rather than a completion marker means
+ * the check keeps working when the build gains or loses an entry point.
+ */
+export function missingReferences(manifest, files) {
+  const present = new Set(files);
+  const missing = [];
+
+  const require = (reference) => {
+    if (typeof reference !== "string" || reference === "") {
+      return;
+    }
+
+    if (!reference.includes("*")) {
+      if (!present.has(reference)) {
+        missing.push(reference);
+      }
+
+      return;
+    }
+
+    // Chrome lets * span slashes, so `ort/*` covers the whole directory.
+    const pattern = new RegExp(
+      `^${reference
+        .split("*")
+        .map((part) => part.replace(/[.+?^${}()|[\]\\]/gu, "\\$&"))
+        .join(".*")}$`,
+      "u",
+    );
+
+    if (!files.some((file) => pattern.test(file))) {
+      missing.push(reference);
+    }
+  };
+
+  require(manifest.background?.service_worker);
+  require(manifest.options_page);
+  require(manifest.options_ui?.page);
+  require(manifest.action?.default_popup);
+
+  for (const script of manifest.content_scripts ?? []) {
+    for (const file of [
+      ...(script.js ?? []),
+      ...(script.css ?? []),
+    ]) {
+      require(file);
+    }
+  }
+
+  for (const icon of Object.values(manifest.icons ?? {})) {
+    require(icon);
+  }
+
+  for (const entry of manifest.web_accessible_resources ?? []) {
+    for (const resource of entry.resources ?? []) {
+      require(resource);
+    }
+  }
+
+  return missing;
+}

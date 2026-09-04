@@ -41,6 +41,7 @@ import { execFileSync } from "node:child_process";
 import {
   checkProvenance,
   describeBuild,
+  missingReferences,
 } from "./build-stamp.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -145,6 +146,20 @@ if (files.length === 0) {
 
 if (!files.includes("manifest.json")) {
   fail("manifest.json is not at the root of dist/.");
+}
+
+// The build is two vite passes and the manifest is written by the first, so a
+// second pass that dies leaves a manifest naming files nobody emitted.
+const absent = missingReferences(manifest, files);
+
+if (absent.length > 0) {
+  for (const reference of absent) {
+    console.error(
+      `[build-zip] the manifest names ${reference}, which dist/ does not have`,
+    );
+  }
+
+  fail("the build did not finish. Run `npm run build` again.");
 }
 
 console.log(`[build-zip] version ${version}`);

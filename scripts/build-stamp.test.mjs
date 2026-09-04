@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   checkProvenance,
   describeBuild,
+  missingReferences,
 } from "./build-stamp.mjs";
 
 describe("describeBuild", () => {
@@ -102,5 +103,60 @@ describe("checkProvenance", () => {
         headRevision: null,
       }),
     ).toMatch(/git checkout/u);
+  });
+});
+
+describe("missingReferences", () => {
+  const manifest = {
+    background: { service_worker: "background.js" },
+    options_page: "options.html",
+    content_scripts: [{ js: ["content.js"] }],
+    web_accessible_resources: [
+      { resources: ["ort/*", "pcm-worklet.js"] },
+    ],
+  };
+  const complete = [
+    "manifest.json",
+    "background.js",
+    "content.js",
+    "options.html",
+    "pcm-worklet.js",
+    "ort/ort.mjs",
+  ];
+
+  it("is empty when the build finished", () => {
+    expect(missingReferences(manifest, complete)).toEqual([]);
+  });
+
+  it("catches a second build pass that died", () => {
+    // The first vite pass empties dist/ and writes the stamped manifest; the
+    // second emits the content script. When the second fails, dist/ holds a
+    // manifest naming a content.js nobody wrote, and the extension installs
+    // and then does nothing on the page.
+    expect(
+      missingReferences(
+        manifest,
+        complete.filter((file) => file !== "content.js"),
+      ),
+    ).toEqual(["content.js"]);
+  });
+
+  it("treats a wildcard as satisfied by any one file", () => {
+    expect(
+      missingReferences(
+        manifest,
+        complete.filter((file) => !file.startsWith("ort/")),
+      ),
+    ).toEqual(["ort/*"]);
+    expect(
+      missingReferences(manifest, [
+        ...complete,
+        "ort/nested/deep.wasm",
+      ]),
+    ).toEqual([]);
+  });
+
+  it("ignores entries the manifest does not have", () => {
+    expect(missingReferences({}, [])).toEqual([]);
   });
 });
