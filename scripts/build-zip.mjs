@@ -19,6 +19,8 @@
 // Usage:
 //   node scripts/build-zip.mjs            writes dist-zip/x-jimaku-<version>.zip
 //   node scripts/build-zip.mjs --list     prints the file list and writes nothing
+//   node scripts/build-zip.mjs --allow-dirty   packs a build made from an
+//                                              uncommitted tree anyway
 import {
   existsSync,
   mkdirSync,
@@ -35,6 +37,7 @@ import {
   deflateRawSync,
   inflateRawSync,
 } from "node:zlib";
+import { describeBuild } from "./build-stamp.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, "..");
@@ -76,6 +79,26 @@ if (typeof version !== "string" || !/^\d+\.\d+\.\d+$/u.test(version)) {
   fail(`dist/manifest.json has an unusable version: ${version}`);
 }
 
+const stamp = describeBuild(manifest.version_name);
+
+if (stamp === null) {
+  fail(
+    "dist/manifest.json carries no build stamp, so there is no way to say " +
+      "which source it came from. Run `npm run build`.",
+  );
+}
+
+// A zip built from a tree with uncommitted changes cannot be rebuilt by anyone
+// else, including us next week. Nothing downstream would show it: the archive
+// installs, runs, and reports the version it was told to.
+if (stamp.dirty && !process.argv.includes("--allow-dirty")) {
+  fail(
+    `dist/ was built from ${stamp.revision} with uncommitted changes. ` +
+      "Commit them and build again, or pass --allow-dirty to package it " +
+      "anyway.",
+  );
+}
+
 function walk(directory) {
   const found = [];
 
@@ -104,6 +127,11 @@ if (!files.includes("manifest.json")) {
 }
 
 console.log(`[build-zip] version ${version}`);
+console.log(
+  `[build-zip] built from ${stamp.revision}` +
+    `${stamp.dirty ? " with uncommitted changes" : ""} ` +
+    `at ${stamp.builtAt}`,
+);
 console.log(`[build-zip] ${files.length} files`);
 
 for (const file of files) {
