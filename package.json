@@ -25,6 +25,9 @@
     "url": "https://github.com/Sora-bluesky/x-jimaku/issues"
   },
   "homepage": "https://github.com/Sora-bluesky/x-jimaku#readme",
+  "engines": {
+    "node": "^20.19.0 || >=22.12.0"
+  },
   "devDependencies": {
     "@types/chrome": "^0.2.7",
     "concurrently": "^10.0.5",

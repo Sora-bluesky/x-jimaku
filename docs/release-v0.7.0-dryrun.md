@@ -44,7 +44,7 @@ npm run zip
 
 `npm run zip -- --list` はファイル一覧を出すだけで書き込みません。
 
-未コミットの変更がある状態でビルドした `dist/` は拒否します。`version_name` の `-dirty` で判定しています。その zip は誰も作り直せませんが、入れてしまえば普通に動いて普通の版を名乗るので、あとからは見分けがつきません。開発中に試すときは `--allow-dirty` を付けます（実測: 拒否時の exit code は 1）。
+未コミットの変更がある状態でビルドした `dist/` は拒否します。それだけでは足りないことがレビューで分かりました。`dist/` は gitignore されているので、ブランチを切り替えても版を上げても、**古いビルドがそのまま健全に見えて残ります**。いまは `version_name` の commit を HEAD と、版を `public/manifest.json` とも照合します。`version_name` の `-dirty` で判定しています。その zip は誰も作り直せませんが、入れてしまえば普通に動いて普通の版を名乗るので、あとからは見分けがつきません。開発中に試すときは `--allow-dirty` を付けます（実測: 拒否時の exit code は 1）。
 
 ### v0.7.0 の zip（実測）
 
@@ -67,15 +67,17 @@ Python の `zipfile` で `testzip()` も通しました（全エントリ合格�
 
 1. ~~#72 を main にマージ~~（済・`dad9fca`）
 2. ~~`public/manifest.json` と `package.json` を `0.7.0` に~~（済・#86）
-3. `npm run typecheck && npm test && npm run build`（済・エラー 0 / 464 件通過）
-4. `dist/manifest.json` の `version_name` が `0.7.0 <sha> <時刻>` になっていることを目視（済・`0.7.0 dad9fca-dirty 2026-09-04T04:15:19Z`）
+3. `npm run typecheck && npm test && npm run build`
+4. `dist/manifest.json` の `version_name` が `0.7.0 <sha> <時刻>` になっていることを目視
 5. ~~Chrome で 1 本走らせて確認~~（済・下記）
-6. `npm run zip`（済）
+6. `npm run zip`
 7. tag `v0.7.0` を打ち、release を作成
 8. リリースノートに、**字幕ログが既定でオンである**ことを必ず入れる（文面は `docs/caption-log-notice-surfaces.md` の 3 面目）
 9. `node .claude/local/wbs/build-release-matrix.mjs` で関連表を更新
 
 7 以降は公開行為なので sora の判断を待ちます。
+
+**3 ・ 4 ・ 6 は、tag を打つ最終コミットで回し直します。** ここまでに回した分は検証のためで、`dad9fca` の・しかも未コミットの状態で作ったものです。そのまま上げると、配布される拡張が `0.7.0 dad9fca-dirty ...` と名乗り、中身を tag に辿れなくなります（レビュー指摘）。いまは `npm run zip` 自体がこれを拒否します — `version_name` の commit を HEAD と、版を `public/manifest.json` と照合します。
 
 ## マージ直後に Chrome で 1 本走らせた結果
 

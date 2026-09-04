@@ -37,7 +37,11 @@ import {
   deflateRawSync,
   inflateRawSync,
 } from "node:zlib";
-import { describeBuild } from "./build-stamp.mjs";
+import { execFileSync } from "node:child_process";
+import {
+  checkProvenance,
+  describeBuild,
+} from "./build-stamp.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, "..");
@@ -81,22 +85,30 @@ if (typeof version !== "string" || !/^\d+\.\d+\.\d+$/u.test(version)) {
 
 const stamp = describeBuild(manifest.version_name);
 
-if (stamp === null) {
-  fail(
-    "dist/manifest.json carries no build stamp, so there is no way to say " +
-      "which source it came from. Run `npm run build`.",
-  );
+function readHeadRevision() {
+  try {
+    return execFileSync("git", ["rev-parse", "--short", "HEAD"], {
+      cwd: root,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+  } catch {
+    return null;
+  }
 }
 
-// A zip built from a tree with uncommitted changes cannot be rebuilt by anyone
-// else, including us next week. Nothing downstream would show it: the archive
-// installs, runs, and reports the version it was told to.
-if (stamp.dirty && !process.argv.includes("--allow-dirty")) {
-  fail(
-    `dist/ was built from ${stamp.revision} with uncommitted changes. ` +
-      "Commit them and build again, or pass --allow-dirty to package it " +
-      "anyway.",
-  );
+const sourceManifest = JSON.parse(
+  readFileSync(path.join(root, "public/manifest.json"), "utf8"),
+);
+
+const refusal = checkProvenance(stamp, {
+  manifestVersion: sourceManifest.version,
+  headRevision: readHeadRevision() || null,
+  allowDirty: process.argv.includes("--allow-dirty"),
+});
+
+if (refusal !== null) {
+  fail(refusal);
 }
 
 function walk(directory) {
