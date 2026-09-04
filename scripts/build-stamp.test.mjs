@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   checkProvenance,
   describeBuild,
+  missingOnnxAssets,
   missingReferences,
 } from "./build-stamp.mjs";
 
@@ -158,5 +159,46 @@ describe("missingReferences", () => {
 
   it("ignores entries the manifest does not have", () => {
     expect(missingReferences({}, [])).toEqual([]);
+  });
+});
+
+describe("missingOnnxAssets", () => {
+  const source = [
+    "ort.mjs",
+    "ort-wasm-simd-threaded.wasm",
+    "ort.all.min.mjs",
+    "README.md",
+    "types",
+  ];
+
+  it("is empty when every runtime file was copied", () => {
+    expect(
+      missingOnnxAssets(source, [
+        "manifest.json",
+        "ort/ort.mjs",
+        "ort/ort-wasm-simd-threaded.wasm",
+        "ort/ort.all.min.mjs",
+      ]),
+    ).toEqual([]);
+  });
+
+  it("catches a copy that stopped partway", () => {
+    // The manifest asks for ort/*, and one file satisfies a wildcard, so a
+    // half-finished copy reads as complete. The archive then installs and
+    // recognition cannot start.
+    expect(
+      missingOnnxAssets(source, ["ort/ort.mjs"]),
+    ).toEqual([
+      "ort/ort-wasm-simd-threaded.wasm",
+      "ort/ort.all.min.mjs",
+    ]);
+  });
+
+  it("ignores what the build does not copy", () => {
+    // copyOnnxRuntimeAssets takes only .wasm and .mjs, so a README next to
+    // them must not be demanded of dist/.
+    expect(
+      missingOnnxAssets(["README.md", "types"], []),
+    ).toEqual([]);
   });
 });

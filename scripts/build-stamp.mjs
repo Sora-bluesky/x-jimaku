@@ -143,3 +143,29 @@ export function missingReferences(manifest, files) {
 
   return missing;
 }
+
+/**
+ * The onnxruntime files that should have been copied into dist/ort but were
+ * not.
+ *
+ * `copyOnnxRuntimeAssets` in vite.config.ts copies every .wasm and .mjs out of
+ * node_modules/onnxruntime-web/dist, 26 files at the version in the lockfile.
+ * A wildcard check against the manifest's `ort/*` is satisfied by one of them,
+ * so a copy that stopped partway reads as complete and the archive ships an
+ * extension whose speech recognition cannot start.
+ *
+ * Comparing against the source directory checks the thing that has to be true,
+ * rather than a marker saying it is.
+ */
+export function missingOnnxAssets(sourceNames, files) {
+  const present = new Set(files);
+
+  return sourceNames
+    .filter(
+      (name) =>
+        name.endsWith(".wasm") || name.endsWith(".mjs"),
+    )
+    .map((name) => `ort/${name}`)
+    .filter((path) => !present.has(path))
+    .sort();
+}

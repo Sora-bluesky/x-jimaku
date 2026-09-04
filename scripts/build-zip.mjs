@@ -41,6 +41,7 @@ import { execFileSync } from "node:child_process";
 import {
   checkProvenance,
   describeBuild,
+  missingOnnxAssets,
   missingReferences,
 } from "./build-stamp.mjs";
 
@@ -160,6 +161,37 @@ if (absent.length > 0) {
   }
 
   fail("the build did not finish. Run `npm run build` again.");
+}
+
+// The manifest asks for `ort/*`, and one file satisfies a wildcard. What has
+// to be true is that every runtime file was copied, so it is checked against
+// the directory they are copied from.
+const onnxSource = path.join(
+  root,
+  "node_modules/onnxruntime-web/dist",
+);
+
+if (!existsSync(onnxSource)) {
+  fail(
+    "node_modules/onnxruntime-web is missing, so the runtime files in " +
+      "dist/ort cannot be checked. Run `npm install`.",
+  );
+}
+
+const absentAssets = missingOnnxAssets(
+  readdirSync(onnxSource),
+  files,
+);
+
+if (absentAssets.length > 0) {
+  for (const asset of absentAssets) {
+    console.error(`[build-zip] the build did not copy ${asset}`);
+  }
+
+  fail(
+    `dist/ort is missing ${absentAssets.length} runtime files. ` +
+      "Run `npm run build` again.",
+  );
 }
 
 console.log(`[build-zip] version ${version}`);
