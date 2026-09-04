@@ -4,6 +4,7 @@ import {
   it,
 } from "vitest";
 import {
+  CAPTION_DISPLAY_LOG_ENABLED_KEY,
   CAPTION_DISPLAY_LOG_STORAGE_KEY,
   createCaptionDisplayLog,
   type CaptionDisplayLogStorage,
@@ -67,6 +68,79 @@ describe("caption display log", () => {
           (page) => page.cueId,
         ),
       ).toEqual(["2:0", "3:0"]);
+    },
+  );
+
+  it(
+    "keeps nothing recorded before a stored opt-out was read",
+    async () => {
+      const storage = createMemoryStorage();
+      await storage.set(
+        CAPTION_DISPLAY_LOG_ENABLED_KEY,
+        false,
+      );
+
+      const log = createCaptionDisplayLog({
+        storage,
+        now: () => 0,
+        flushDelayMs: 60_000,
+      });
+
+      // The stored preference is two reads away; a capture already running
+      // fills the buffer in that window.
+      log.recordPageShown(samplePage());
+      await log.flush();
+
+      expect(log.getPages()).toHaveLength(0);
+      expect(
+        await storage.get(
+          CAPTION_DISPLAY_LOG_STORAGE_KEY,
+        ),
+      ).toBeUndefined();
+    },
+  );
+
+  it(
+    "keeps another writer's pages when it flushes",
+    async () => {
+      const storage = createMemoryStorage();
+
+      // Both tabs are already open and hydrated from an empty store, which is
+      // the real case: a tab hydrates once, when it loads.
+      const tabA = createCaptionDisplayLog({
+        storage,
+        now: () => 1000,
+        flushDelayMs: 60_000,
+      });
+      const tabB = createCaptionDisplayLog({
+        storage,
+        now: () => 2000,
+        flushDelayMs: 60_000,
+      });
+      await tabA.flush();
+      await tabB.flush();
+
+      tabA.recordPageShown({
+        ...samplePage(),
+        cueId: "a:0",
+      });
+      await tabA.flush();
+
+      tabB.recordPageShown({
+        ...samplePage(),
+        cueId: "b:0",
+      });
+      await tabB.flush();
+
+      const stored = (await storage.get(
+        CAPTION_DISPLAY_LOG_STORAGE_KEY,
+      )) as { pages: { cueId: string }[] };
+
+      expect(
+        stored.pages.map(
+          (page) => page.cueId,
+        ),
+      ).toEqual(["a:0", "b:0"]);
     },
   );
 

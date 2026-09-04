@@ -246,6 +246,7 @@ class CaptionDisplayLogWriter
   private openIndex: number | null = null;
   private enabled: boolean;
   private dirty = false;
+  private replaceOnFlush = false;
   private flushing = false;
   private flushTimerId:
     | ReturnType<typeof setTimeout>
@@ -351,25 +352,83 @@ class CaptionDisplayLogWriter
     this.flushing = true;
 
     try {
+      const pages = this.replaceOnFlush
+        ? this.pages.map((page) => ({
+            ...page,
+          }))
+        : await this.mergedWithStored();
+
       await this.storage.set(
         CAPTION_DISPLAY_LOG_STORAGE_KEY,
         {
           version: 1,
-          pages: this.pages.map(
-            (page) => ({ ...page }),
-          ),
+          pages,
         } satisfies CaptionDisplayLogDocument,
       );
       this.dirty = false;
     } finally {
       this.flushing = false;
+      this.replaceOnFlush = false;
     }
+  }
+
+  /**
+   * This writer's pages joined with whatever is stored.
+   *
+   * Every tab with the extension loaded owns its own writer, hydrated from the
+   * snapshot it saw when it started. Writing this writer's array wholesale
+   * erases what another tab recorded since, and the tabs then take turns
+   * destroying each other's history. Someone reporting a defect would hand over
+   * a log missing the part they were describing.
+   */
+  private async mergedWithStored(): Promise<
+    CaptionDisplayLogPage[]
+  > {
+    const stored = await this.storage?.get(
+      CAPTION_DISPLAY_LOG_STORAGE_KEY,
+    );
+    const storedPages =
+      parseCaptionDisplayLogPages(stored);
+    const seen = new Set<string>();
+    const merged: CaptionDisplayLogPage[] = [];
+
+    for (
+      const page of [
+        ...storedPages,
+        ...this.pages,
+      ]
+    ) {
+      const identity = [
+        page.appearedAt,
+        page.cueId,
+        page.pageId,
+      ].join("|");
+
+      if (seen.has(identity)) {
+        continue;
+      }
+
+      seen.add(identity);
+      merged.push({ ...page });
+    }
+
+    merged.sort((left, right) =>
+      left.appearedAt < right.appearedAt
+        ? -1
+        : left.appearedAt > right.appearedAt
+          ? 1
+          : 0,
+    );
+
+    return this.capPages(merged);
   }
 
   async clear(): Promise<void> {
     this.pages = [];
     this.openIndex = null;
     this.dirty = true;
+    // Clearing replaces; merging would put back what was just discarded.
+    this.replaceOnFlush = true;
     this.cancelFlush();
     await this.flush();
   }
@@ -407,6 +466,15 @@ class CaptionDisplayLogWriter
       typeof enabledStored === "boolean"
     ) {
       this.enabled = enabledStored;
+    }
+
+    if (!this.enabled) {
+      // Captions recorded while this read was in flight belong to someone who
+      // had turned recording off. Nothing kept, nothing to flush: an opt-out
+      // honoured a few storage reads late is not an opt-out.
+      this.pages = [];
+      this.openIndex = null;
+      this.dirty = false;
     }
   }
 
