@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "x-jimaku — X Live Subtitles (JA)",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "minimum_chrome_version": "138",
   "background": {
     "service_worker": "background.js",

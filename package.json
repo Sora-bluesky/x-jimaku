@@ -1,6 +1,6 @@
 {
   "name": "x-jimaku",
-  "version": "1.0.0",
+  "version": "0.7.0",
   "description": "[English](README.md) | [日本語](README.ja.md)",
   "main": "index.js",
   "directories": {
@@ -11,6 +11,7 @@
     "dev": "concurrently \"vite build --watch\" \"vite build -c vite.config.iife.ts --watch\"",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "zip": "node scripts/build-zip.mjs",
     "bench:smoke": "node bench/run-bench.mjs --case tts --model tiny --duration 30",
     "bench:quality": "node bench/run-bench.mjs --case tts --model base --duration 90"
   },
@@ -24,6 +25,9 @@
     "url": "https://github.com/Sora-bluesky/x-jimaku/issues"
   },
   "homepage": "https://github.com/Sora-bluesky/x-jimaku#readme",
+  "engines": {
+    "node": "^20.19.0 || >=22.12.0"
+  },
   "devDependencies": {
     "@types/chrome": "^0.2.7",
     "concurrently": "^10.0.5",

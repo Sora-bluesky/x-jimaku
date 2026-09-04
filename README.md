@@ -48,7 +48,21 @@ Pick a model on the options page: `tiny`, `base` (default, ~150MB), `small`, or 
 
 ## Privacy
 
-Audio and recognized text never leave your device. Whisper speech recognition runs locally in an offscreen document (the model is downloaded once from Hugging Face and cached), and translation uses Chrome's built-in on-device models: Gemini Nano by default, the Translator model as fallback. There is no server component and no telemetry.
+Audio and recognized text never leave your device. Whisper speech recognition runs locally in an offscreen document (the model is downloaded once from Hugging Face and cached), and translation uses Chrome's built-in on-device models: Gemini Nano by default, the Translator model as fallback. There is no server component and no telemetry. What did reach the screen is recorded on this device, though; see Display log below.
+
+## Display log
+
+Captions that reached the screen are kept in this browser's storage. **On by default.**
+
+Every page is recorded as it appears: the first and second Japanese lines exactly as they were wrapped, the English sentence behind them, which page of which cue it was, and the times it appeared and went away. Wrap positions and durations are not the whole of it. The subtitles of whatever was watched are kept in full.
+
+The last 400 pages, roughly twenty minutes at three seconds a page. Older ones are dropped. Nothing is sent anywhere.
+
+It exists for bug reports. Until now those were fixed from someone's memory of what they saw, which left us looking for a scene that matched the description.
+
+The switch, along with copy, download and erase, sits under 表示ログ on the options page. Unchecking it stops new records but keeps the ones already there; 表示ログを消す empties the storage.
+
+Anyone who shares this Chrome profile can read the log from the options page.
 
 ## Requirements
 
@@ -72,7 +86,7 @@ For fast-talking videos, lowering the X player's playback speed (e.g. to 0.75x) 
 
 ## Scope of use
 
-x-jimaku is built for personal, local use. It only post-processes what your own browser is already displaying, entirely on your machine: no audio, transcript, or translation ever leaves your device, nothing is stored, and the extension makes no requests of its own to x.com (no X APIs, no crawling, no downloads). We reviewed this design against X's Terms of Service (effective April 10, 2026) and Japanese copyright law's private-use provisions before publishing.
+x-jimaku is built for personal, local use. It only post-processes what your own browser is already displaying, entirely on your machine: no audio, transcript, or translation ever leaves your device, and the extension makes no requests of its own to x.com (no X APIs, no crawling, no downloads). The audio itself is never kept, but the captions that reached the screen and the English sentences behind them are recorded on this device; see Display log above. We reviewed this design against X's Terms of Service (effective April 10, 2026) and Japanese copyright law's private-use provisions before publishing.
 
 Please keep it that way when using or forking this project. Features such as saving or sharing transcripts, downloading media, or automated browsing are out of scope here — they would put the project on the wrong side of those terms.
 

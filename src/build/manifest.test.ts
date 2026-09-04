@@ -4,6 +4,7 @@ import {
   it,
 } from "vitest";
 import {
+  isChromeVersion,
   stampManifest,
 } from "./manifest";
 
@@ -61,4 +62,65 @@ describe("stampManifest", () => {
       );
     },
   );
+});
+
+describe("isChromeVersion", () => {
+  it("accepts what Chrome accepts", () => {
+    expect(isChromeVersion("0.7.0")).toBe(true);
+    expect(isChromeVersion("1.2.3.4")).toBe(true);
+    expect(isChromeVersion("0.0.65535")).toBe(true);
+    // Chrome's own example of a valid all-but-one-zero version.
+    expect(isChromeVersion("0.1.0.0")).toBe(true);
+  });
+
+  it("rejects a version that is all zeros", () => {
+    // Chrome names 0 and 0.0.0.0 as invalid. The first version of this check
+    // accepted both, and the test written with it said "0" was fine, so the
+    // mistake had a passing test defending it.
+    expect(isChromeVersion("0")).toBe(false);
+    expect(isChromeVersion("0.0")).toBe(false);
+    expect(isChromeVersion("0.0.0.0")).toBe(false);
+  });
+
+  it("rejects a leading zero on a non-zero part", () => {
+    // 0.07.0 matches a three-integer pattern and is rejected at upload, which
+    // is the point where finding out costs the most.
+    expect(isChromeVersion("0.07.0")).toBe(false);
+  });
+
+  it("rejects a part above 65535", () => {
+    expect(isChromeVersion("999999.0.0")).toBe(false);
+    expect(isChromeVersion("0.65536.0")).toBe(false);
+  });
+
+  it("rejects shapes that are not versions", () => {
+    expect(isChromeVersion("1.2.3.4.5")).toBe(false);
+    expect(isChromeVersion("1.2.-3")).toBe(false);
+    expect(isChromeVersion("1.2.x")).toBe(false);
+    expect(isChromeVersion("")).toBe(false);
+    expect(isChromeVersion(7)).toBe(false);
+  });
+});
+
+describe("stampManifest version guard", () => {
+  it("refuses to stamp a version Chrome rejects", () => {
+    // The build is the last place this costs nothing. After it, the version
+    // is inside a zip on its way to the store.
+    expect(() =>
+      stampManifest(
+        JSON.stringify({
+          manifest_version: 3,
+          name: "x-jimaku",
+          version: "0.07.0",
+        }),
+        {
+          revision: "abc1234",
+          dirty: false,
+          builtAt: new Date(
+            "2026-09-02T03:04:05.000Z",
+          ),
+        },
+      ),
+    ).toThrow(/65535/u);
+  });
 });

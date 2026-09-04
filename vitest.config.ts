@@ -8,6 +8,7 @@ export default defineConfig({
     include: [
       "src/**/*.test.ts",
       "bench/**/*.test.mjs",
+      "scripts/**/*.test.mjs",
     ],
   },
 });
