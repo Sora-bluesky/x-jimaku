@@ -2072,13 +2072,78 @@ describe(
   "CaptionOverlay display log",
   () => {
     it(
+      "closes the logged page while the caption is off screen",
+      () => {
+        const log = createCaptionDisplayLog({
+          storage: null,
+        });
+        const video =
+          document.createElement("video");
+        let visible = true;
+        video.getBoundingClientRect = () =>
+          visible
+            ? new DOMRect(0, 0, 960, 540)
+            : new DOMRect(
+                0,
+                -4000,
+                960,
+                540,
+              );
+        document.body.append(video);
+
+        const overlay = createOverlay({
+          displayLog: log,
+          getTargetVideo: () => video,
+        });
+        overlay.setTranslationPath(
+          "language-model",
+        );
+        showFinal(overlay, 1, "見えている");
+
+        expect(log.getPages()).toHaveLength(1);
+        expect(
+          log.getPages()[0]?.replacedAt,
+        ).toBeNull();
+
+        visible = false;
+        document.dispatchEvent(
+          new Event("fullscreenchange"),
+        );
+
+        expect(
+          log.getPages()[0]?.replacedAt,
+        ).not.toBeNull();
+
+        visible = true;
+        document.dispatchEvent(
+          new Event("fullscreenchange"),
+        );
+
+        const pages = log.getPages();
+        expect(pages).toHaveLength(2);
+        expect(pages[1]?.line0).toBe(
+          "見えている",
+        );
+        expect(pages[1]?.replacedAt).toBeNull();
+
+        overlay.destroy();
+      },
+    );
+
+    it(
       "records both lines, cue, page, and appearance time",
       () => {
         const log = createCaptionDisplayLog({
           storage: null,
         });
+        const video =
+          document.createElement("video");
+        video.getBoundingClientRect = () =>
+          new DOMRect(0, 0, 960, 540);
+        document.body.append(video);
         const overlay = createOverlay({
           displayLog: log,
+          getTargetVideo: () => video,
         });
         overlay.setTranslationPath(
           "language-model",
@@ -2177,8 +2242,14 @@ describe(
         const log = createCaptionDisplayLog({
           storage: null,
         });
+        const video =
+          document.createElement("video");
+        video.getBoundingClientRect = () =>
+          new DOMRect(0, 0, 960, 540);
+        document.body.append(video);
         const overlay = createOverlay({
           displayLog: log,
+          getTargetVideo: () => video,
           showOriginal: true,
           showTentative: true,
         });

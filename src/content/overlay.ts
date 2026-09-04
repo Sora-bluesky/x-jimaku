@@ -198,6 +198,20 @@ export class CaptionOverlay {
     | null = null;
   private progress: number | undefined;
   private activeCue: ActiveCue | null = null;
+  /**
+   * The page currently on screen, kept so it can be logged again when the
+   * layout hides the stack and later shows it. Dwell is what the reading-speed
+   * numbers are computed from, so an interval where nothing was visible must
+   * not sit inside one.
+   */
+  private shownPage: {
+    activeCue: ActiveCue;
+    pageIndex: number;
+    firstLine: string;
+    secondLine: string;
+    originalText: string;
+  } | null = null;
+  private captionStackVisible = true;
   private highestSeenFinalId:
     | number
     | null = null;
@@ -1669,6 +1683,14 @@ export class CaptionOverlay {
     secondLine: string,
     originalText: string,
   ): void {
+    this.shownPage = {
+      activeCue,
+      pageIndex,
+      firstLine,
+      secondLine,
+      originalText,
+    };
+
     this.options.displayLog?.recordPageShown(
       {
         cueId: activeCue.data.cueId,
@@ -1696,6 +1718,44 @@ export class CaptionOverlay {
   private notifyPageHidden(): void {
     this.options.displayLog
       ?.recordPageHidden();
+    this.shownPage = null;
+  }
+
+  /**
+   * Tracks whether the caption stack is on screen, closing the logged page when
+   * it goes and opening it again when it returns.
+   *
+   * The stack is hidden whenever the captured video scrolls out of view, which
+   * is ordinary on a feed. Without this the logged dwell spans the scroll.
+   */
+  private setCaptionStackVisible(
+    visible: boolean,
+  ): void {
+    if (visible === this.captionStackVisible) {
+      return;
+    }
+
+    this.captionStackVisible = visible;
+
+    if (!visible) {
+      const page = this.shownPage;
+      this.options.displayLog
+        ?.recordPageHidden();
+      this.shownPage = page;
+      return;
+    }
+
+    const page = this.shownPage;
+
+    if (page !== null) {
+      this.notifyDisplayedPage(
+        page.activeCue,
+        page.pageIndex,
+        page.firstLine,
+        page.secondLine,
+        page.originalText,
+      );
+    }
   }
 
   private resetDisplayBlock(): void {
@@ -2339,6 +2399,7 @@ export class CaptionOverlay {
         "none";
       this.targetChip.style.display =
         "none";
+      this.setCaptionStackVisible(false);
       this.hideOtherBadges();
       return;
     }
@@ -2352,9 +2413,11 @@ export class CaptionOverlay {
         "none";
       this.targetChip.style.display =
         "none";
+      this.setCaptionStackVisible(false);
     } else {
       this.positionCaptionStack(rect);
       this.positionTargetChip(rect);
+      this.setCaptionStackVisible(true);
     }
 
     this.positionOtherBadges(
