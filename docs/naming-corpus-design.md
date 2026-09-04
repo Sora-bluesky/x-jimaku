@@ -1,11 +1,24 @@
 # 設計: 固有名詞の表記コーパス（桶の規則・無人採取・受け入れ）
 
-Status: rev2（設計案。敵対レビュー 2 巡を反映・実装未着手）
+Status: rev3（設計案。敵対レビュー 3 巡を反映・実装未着手）
 Date: 2026-09-04
-Branch: `i91-naming-design`（`dad9fca` 起点・rev2 の HEAD は `5e0f71e`）。読解の基準は `cfbcf4f`。
+Branch: `i91-naming-design`（`dad9fca` 起点・rev2 の HEAD は `bae81f8`）。読解の基準は `cfbcf4f`。
 `scripts/build-stamp.mjs`（`4731eab`）は `i86-release-prep` にあり、本ブランチには未到達です（§4-4）。
 本文が引く file:line に変更はありません。
 関連: `docs/issue-49-design.md`（masking 方式の原理・誤義撲滅の裁定）/ `docs/issue-63-design.md`（DEV ログ中継）
+
+rev3 で変えたこと:
+
+- 分母を「表示に届いたページ」から「overlay が受理した行」に移しました（§4-1-6・§5-2）。ページの `sources[]` だけを
+  分母にすると、待ち行列の圧力で表示前に落ちた cue（`overlay.ts:1454-1469`）と、翻訳前に offscreen で捨てられた節
+  （`translate.ts:331-353`）の中の名前が `missing` にならず計測から消え、`nameExpectedRate` が上がります。
+  採れなかった走行が全問題ゼロを報告する #89 と同じ向きの損失です。事実は §1-16 に置きました。
+- 「後退なし」の判定を「ベースラインの最大値以下」からやめました（§5-2・§5-3）。tts2 original-on 11 走行の
+  `wrongSenseRoma` は 0 / 5 / 6 / 3 / 3 / 2 / 3 / 2 / 9 / 9 / 8（最大 9・平均 4.5・中央値 3）で、新しい 5 走行が
+  すべて 9 でも rev2 の規則は通します。`englishPassthrough` は 12 / 0 / 0 / 2 / 0 / 0 / 0 / 0 / 0 / 0 / 0 で、
+  上限 2 は 1 本の走行の値を全走行に許します。比較は走行ごとの率の分布に対する順位検定にし、走行数と、
+  数が足りないときの結果（合格ではなく判定不能）を書きました。閾値は 1 つも新設していません。
+  同じ形（ベースラインの点推定を床にする）だった `nameExpectedRate` の 81% も同じ比較に置き換えました。
 
 rev2 で変えたこと:
 
@@ -53,6 +66,8 @@ sora の問いは 2 つです。①原綴りで残す名前とカタカナで書
 - 受け入れは**名前単位**で読みます。ベースラインは Roman で既に赤（§1-13）なので、走行全体の
   `nameWrongKnown = 0` を変更ごとの合否にすると何も通りません。名前の指標は占位子の生存率に上限を持ち、
   必ず**英語素通しと対**で読みます（`c196641` が素通し 12→0 と引き換えに誤義 0→5 を買った実測がある）。
+  後退の有無はベースラインの最大値でなく走行ごとの率の分布で判定し（§5-3）、分母は表示に届いた行でなく
+  受理した行から取ります（§1-16）。
 
 ---
 
@@ -142,12 +157,27 @@ sora の問いは 2 つです。①原綴りで残す名前とカタカナで書
     いま**同じ資源を奪い合って**います。
 14. tts2 の英語側の密度: 台本（`bench/refs/tts2-script.txt`）1 周に Roman 4 / Goddard 2 / Kennedy Space
     Center 1 / coronagraph 1。fixture は `video.loop = true`（`live2.mjs:519`）で 95 秒に 3〜4 周するので、
-    1 走行の英語側出現は Roman 12〜17 / Goddard 6〜9 / Kennedy 3〜4 になります。**分母は台本でなく、その走行の
-    `sourceText` から取る**必要があります（周回数は走行ごとに違う）。
+    1 走行の英語側出現は Roman 12〜17 / Goddard 6〜9 / Kennedy 3〜4 になります。**分母は台本でなく、その走行が
+    受理した行**（rev3 の `lines[]`・§4-1-6）**から取る**必要があります（周回数は走行ごとに違う）。表示に届いた
+    ページの `sourceText` からでは足りません（§1-16）。
 15. 走行の所要時間（連続する走行ファイルの `generatedAt` 差・tts2）: 118 / 132 / 134 / 160 / 165 / 166 s。
     採取 95 s + 停止 drain ≈ 103 s（`samples[0]` → `generatedAt`）を含みます。つまり 1 走行は**実測 2.0〜2.8 分**。
     `043224` → `043759` の 5.5 分は、間に失敗走行 `043547`（排出 timeout）を挟んだ 2 本の差で、
     走行間隔ではありません。失敗を挟んだ差を間隔と読まないこと。
+16. 表示に届く前に行が落ちる点は 2 つあり、どちらも字幕ログ（`recordPageShown`・`overlay.ts:1701`）より上流です。
+    ①offscreen の翻訳待ち行列（`translate.ts:331-353`）: 保留が `MAX_PENDING_TRANSLATIONS`（`:175`・2）に達すると
+    最古の確定節を `shift()` して `settleIds` し、content には送りません。DEV ログ `queue-drop` に `lineId` だけが
+    載り（`:349-351`）、英語本文は `console.warn` の `textLength` にしかありません。ベンチの `devLogQueueDrop`
+    （`live2.mjs:1587`）が数えているのは**この**落下です。②content の待ち行列（`overlay.ts:1454-1469`）:
+    `MAX_WAITING_CUES`（`explicit-stop-drain.ts:10`・6）を超えて merge でも収まらない分だけ `waitingCues.shift()`
+    します（`cue-queue.ts:94-98`）。記録は `host.dataset.cueDrops` の件数（`:1467`）と `console.warn` だけで、
+    サンプラは `cueDrops` を読んでいません（`display.samples[]` の鍵に無い）。id も本文も残りません。
+    `recognition.jaClauses` は `appendLedgerEntry(cue.primaryText)`（`:1152`）の台帳で、①の後・②の前に日本語だけを
+    cue 単位で積みます。件数が blocks と 1 ずれる走行が 11 本中 6 本あり、うち 5 本は `devLogQueueDrop` 0、残る
+    `061735` は①が 2 件（`lineId` 23 / 24）起きて 1 しかずれません。件数の差から落下は取り出せません。
+    `061735` の `wrongSenseRoma` は 3・`englishPassthrough` は 2 で、その 2 節の名前は数字のどこにもいません。
+    ②は既存走行に観測手段が無く、0 とは言えません。もう 1 つ、翻訳が空で `createCueSegments` が `[]` を返した行
+    （`:1197-1199`）も cue を持たず、ページに現れません。
 
 ---
 
@@ -293,7 +323,7 @@ export interface NameTerm {
   vitest 照合の案は取り下げます（同じ解析を 2 か所に持たないどころか、解析そのものを持たない）。
   この複写の sha256 を、ビルドが dist に書いた表の sha256 と照合してから走ります（§4-4）。
 - 拡張のバンドルに依存は増えません。変わるのはデータの形・復元の文字列・計画の順序・救済プロンプトの
-  ブロック分け・字幕ログの 1 フィールド（§4-4）だけです。
+  ブロック分け・字幕ログと DEV ログの記録（§4-1-5〜7・表示は変えない）だけです。
 
 ---
 
@@ -347,7 +377,7 @@ export interface NameTerm {
 `bench/results/live2-*.json` の出力・既存ゲート。すでに子プロセス 2 本（表示構成）を `spawnSync` で
 回す構造（`:243-268`）と `parseChildReport`（`live2-config.mjs`）があるので、バッチはこれを外から使います。
 
-**足すもの（4 点・拡張側は 1 点）**:
+**足すもの（4 点・拡張側は 3 点。拡張側はいずれも記録を足すだけで表示を変えません）**:
 
 1. **ケース定義をファイルに出す。** `CASES`（`:52-76`）と `run-bench.mjs` の `loadCase`（`:378-420`）が
    同じ内容を 2 か所に持っています。`bench/refs/<case>/` に `speech.wav` / `script.txt` / `terms.txt` を
@@ -373,7 +403,7 @@ export interface NameTerm {
    `live2.mjs` を子プロセスで起こし、終了コードとエラー署名を記録して次へ進みます。
 4. **集計 `bench/naming-corpus.mjs`。** `bench/results/live2-*.json` を**全部**読んで
    `naming-corpus.json` と `naming-candidates.md` を書きます（§4-5）。表は §2-5 の複写 import で読みます。
-5. **拡張側の 1 点**: 字幕ログの入力（`caption-display-log.ts:17-28`）に **`sources`** と `fallback`
+5. **拡張側の 1 点目**: 字幕ログの入力（`caption-display-log.ts:17-28`）に **`sources`** と `fallback`
    （`CueData` にはある・`overlay.ts:1228`）を足します。`sources` は、そのページを出した cue が束ねる
    **原文行の配列**で、要素は `{ id, text, rung }` です。
    - `id`: `CueData.sourceIds` の要素（`overlay.ts:84`）。merge した cue（`:1433-1436`）では 2 つ以上になります。
@@ -390,6 +420,20 @@ export interface NameTerm {
    `parseCaptionDisplayLogPages`（`caption-display-log.ts:217`）は field の型を見てから受けるので、`sources` の
    形もそこに足します。`translationPath` は現在の経路であって作った段ではない（§1-8）ので、`rung` が無いと
    「表が間違っている」と「占位子を失った」を分けられません。
+6. **拡張側の 2 点目: 受理した行と落とした cue を字幕ログに残す。** `acceptCommittedClause` が guard
+   （`overlay.ts:1049-1054`・重複と clear watermark）を通した直後、`createCueSegments` と `enforceQueueDiscipline` の
+   **前**に `recordLineAccepted({ id, text, rung })` を呼び、ログは `lines[]`（`{ id, text, rung, acceptedAt }`）に
+   積みます。これが**分母**です（§5-2）。cue を 1 つも作らなかった行（`:1197-1199`）も入ります。
+   `enforceQueueDiscipline` が `waitingCues.shift()` した cue（`:1458`）は `recordCueDropped({ cueId, sourceIds })` で
+   `drops[]` に残します。`drops[]` は分母ではなく `missing` の内訳（表示前に落ちた / 表示されたが表記が無い）に
+   使います。`lines[]` の上限は `pages` と同じ 400 にし、超えた分は `linesTruncated` に数えて JSON に書きます
+   （無音で落とさない）。サンプラは `host.dataset.cueDrops` も読み、`drops[]` の件数と突き合わせます。
+7. **拡張側の 3 点目: offscreen の `queue-drop` に本文を足す。** `translate.ts:349-351` の data に `text: dropped.text`
+   を 1 つ足します（`console.warn` は既に `textLength` を持っている）。中継の検査（`messages.ts:779-797`）は
+   `kind` / `requestId` / `lineId` を見るだけで未知の鍵を拒む節は読んだ範囲に無いので、`text` の受理は実装時に
+   1 度確かめます。bench はこの節を `rung: "dropped-before-translation"` の行として**分母に足し**、id が `lines[]`
+   と重ならないことを検査します（落とした節は content に届かないので、重なれば bug）。この経路の記録が
+   中継の欠落で消えた場合、落下そのものが見えなくなります。§1-10 と同じ穴で、中継の修正は前提作業です。
 
 ### 4.2 クリップの出どころ
 
@@ -418,7 +462,8 @@ export interface NameTerm {
   表の効きが出ます。曖昧語（Roman）はページの名指し以外の証拠が無ければマスクされず（§1-2）、`without` の
   Roman は**モデルの素の挙動**です。曖昧語の `without` は候補票と表外の基準線に使い、ゲートには使いません。
 - 反復回数は**先に固定**します（1 クリップ × 1 モードあたり 5 走行から。judge のノイズ ±2 が既知で、
-  件数系の指標も 1 走行の差は読まない）。バッチの途中で増やしません。
+  件数系の指標も 1 走行の差は読まない）。バッチの途中で増やしません。5 は §5-3 の判定に要る下限で、検出力から
+  決めた数ではありません。
 - 起動は手動でも Windows のタスクスケジューラでもよく、設計は決めません。ただし §4-7 の occlusion 問題が
   あるので、**画面を使っていない時間帯**に回すのが現実解です。
 
@@ -450,8 +495,10 @@ export interface NameTerm {
 - `replayStartedAt` / `captionLogCleared` / `pagesUnparsed`（§4-1-2）。
 - `display.pages[]`（§4-1-2。`cueId, pageId, line0, line1, sourceText, sources[{ id, text, rung }],
   translationPath, fallback, appearedAt, replacedAt`）。
-- `naming`（走行単体の自己記述）: 表の語と `terms.txt` の語ごとに、英語側の出現数・出力側の**生の表記と件数**・
-  分類（§5-2）。分類はその走行が使った表（`nameTableHash`）に対するものです。1 走行を開けば、その走行の
+- `lines[]` / `drops[]` / `linesTruncated`（§4-1-6）。
+- `naming`（走行単体の自己記述）: 表の語と `terms.txt` の語ごとに、英語側の出現数（`lines[]` と offscreen の
+  `queue-drop` から。§5-2 手順 4）・出力側の**生の表記と件数**・分類（§5-2）・`missing` の内訳（表示前に落ちた /
+  翻訳前に捨てた / 表示されたが無い）。分類はその走行が使った表（`nameTableHash`）に対するものです。1 走行を開けば、その走行の
   名前の状態が読める形にします。
 
 ### 4.5 蓄積（人が merge しない）
@@ -475,7 +522,7 @@ H_run）と、集計が現在の表（H_now）で付け直したもの。決め�
   生の件数は表に依存しないので、§1-11 の 35 / 5 / 3 は表を変えても消えません。
 - 本設計より前の走行（hash 無し）は `nameTableHash: null` の印を持ち、`atCurrent` だけを持ちます。
 
-取り込む走行の規則: `recognition.jaClauses` が 1 行以上あり、`error` が無いか `display gate ...` で始まる
+取り込む走行の規則: `recognition.jaClauses` が 1 行以上あり（rev3 以降は `lines[]` が 1 行以上）、`error` が無いか `display gate ...` で始まる
 もの。表示ゲートの失敗は名前の表記に無関係で、行は本物です。採取が壊れた走行（`capture produced no
 caption lines` / play 失敗 / drain 失敗）は入れません。`stopDrainTimedOut` は行を入れて印を付けます。
 `display.pages` を持たない走行（既存分）は `display.blocks` と original-on の `samples[].original` で
@@ -522,8 +569,9 @@ score-ja の judge（agy）は**このループの外**に置きます（名前�
 | `katakanaNameHits*` | 既知の音写リストとの一致 | 自身のコメントどおり下限。本走行で 2 と数えたが実物は 5 以上。**廃止**し、揺れ検出（§3）に置き換える。`ambiguous / plain` の内訳は新ゲートに引き継ぐ（マスク穴か証拠不足かの診断に有用） |
 | `maskedNameOccurrences` | 出力に残った非曖昧語のラテン文字数 | 名前が違う。マスクで復元したか、モデルが自力で残したかを区別できない。**廃止**（新ゲートの `keptLatin` + `rung` が置き換える） |
 | `romanKept` | fixture 固有の正の数 | 出現単位の `expected` に吸収 |
-| `keepLatinSourceHits` | 英語側に名前があった回数 | 分母として**残す**。ただし取り方を §5-2 の単位に合わせる |
-| `englishPassthrough` / `devLogPassthrough` | 英語のまま出た行 | **残し、名前の指標と必ず対で出す**（§1-13） |
+| `keepLatinSourceHits` | 英語側に名前があった回数 | 分母として**残す**。ただし取り方を受理した行（§4-1-6 `lines[]`）に変える。表示に届いた行から取ると、落ちた行の名前が分母から消える（§1-16） |
+| `englishPassthrough` / `devLogPassthrough` | 英語のまま出た行 | **残し、名前の指標と必ず対で出す**（§1-13）。後退の判定は §5-3 の順位検定で、最大値ではない |
+| `devLogQueueDrop` | offscreen で翻訳前に捨てた節の数（`translate.ts:349`・`lineId` のみ） | **残す**。分母の補正に使う（§4-1-7）。content 側の cue 落下（`overlay.ts:1454-1469`）は数えていないので `drops[]` を別に持つ |
 | `placeholderSurvivalRate` | 占位子の生存 | 導入以来 `null`（中継欠落・§1-10）。名前の指標の**上限を決める値**なので中継修正は前提作業。ただし本設計の分類は結果側から取るので、修正を待たずに動く |
 
 ### 5.2 新しいゲート: 出現単位の表記分類
@@ -550,16 +598,21 @@ rev1 は「`cueId` の `:` より前で `line.id` に束ねる」でした。パ
 
 手順:
 
-1. `Date.parse(appearedAt) >= replayStartedAtMs` のページだけ残す（§4-1-2）。
+1. `Date.parse(appearedAt) >= replayStartedAtMs` のページと、`Date.parse(acceptedAt) >= replayStartedAtMs` の
+   `lines[]` だけ残す（§4-1-2）。
 2. `cueId` を**不透明な鍵**としてページを cue に束ねる（`:` でも `+` でも切らない）。cue の `sources[]` は
    そのどのページでも同じです。
 3. 原文行 `id` を共有する cue を 1 つに繋ぐ（union-find）。できた連結成分が**単位**です。ほとんどは 1 行 1 cue、
    長い節を割った cue（`${id}:0` / `:1`）は 1 行 n cue、merge した cue は n 行 1 cue で、両方が混ざることも
-   あります。
-4. 英語側 = 単位に含まれる行の `sources[].text` を **id ごとに 1 回だけ**採る（割った cue が同じ行を n 回
-   持っていても 1 回）。出力側 = 単位の全ページの `line0` / `line1` を `appearedAt` 順に連結した 1 文字列。
+   あります。`lines[]` にあってどの cue にも現れない id（落ちた cue・空の翻訳）は 1 行だけの単位になります。
+4. 英語側 = **`lines[]`**（§4-1-6）の行の `text` を id ごとに 1 回採る。ページの `sources[].text` は表示に対応する
+   部分（改訂の尾）を知るためのもので、分母ではありません。ページを 1 つも持たない単位は出力側が空なので、
+   全出現が `missing` に落ちます。offscreen で捨てた節（§4-1-7）も同じ扱いです。
+   出力側 = 単位の全ページの `line0` / `line1` を `appearedAt` 順に連結した 1 文字列。
 5. 表の語ごとに、英語側の出現数 n を行別に数え（同じ行に 2 回なら 2）、出力側で見つけた各形の件数を n を
    上限に割り当てる。優先順位は `wrongKnown` → `expected` → `keptLatin` → `variant`、余りが `missing`。
+   `missing` は、その行の id が `drops[]` の `sourceIds` にあれば `droppedBeforeDisplay`、offscreen の節なら
+   `droppedBeforeTranslation`、それ以外は `onScreen` に分けて報告します（合計は 1 つ）。
 6. 段の帰属: 出現は**それを含む行の `rung`** に付きます。単位の行がすべて同じ段ならそのままです。段が 2 つ
    以上あり、かつ同じ名前が複数の行に出る単位だけは、出力側の形をどの行に返すか決められないので、その名前の
    件数を段別内訳では `mixed` に置きます（合計には入れる）。`mixed` の件数は報告に出します。多ければ merge の
@@ -571,8 +624,9 @@ rev1 の手順 3（同じ `line.id` の `:0` / `pageId 0` への戻りを改訂�
 数えられます。表示のリセット（`:532`）の後に id が振り直されるかは実装時に `pages` で確かめ、同じ id が
 離れた時刻に別の `text` で現れたら別の単位にします。
 
-検証: tts2 で、単位に含まれる行 id の総数（重複なし）が `recognition.jaClauses` の数と一致すること
-（いまの blocks で 28 = 28）。merge があった走行は単位数がそれより少なくなりますが、行 id の総数は変わりません。
+検証は集合で行い、件数の一致では行いません（件数は落下と無関係に 1 ずれる・§1-16）。①ページの `sources[].id` は
+すべて `lines[]` にある ②`drops[]` の `sourceIds` はすべて `lines[]` にある ③offscreen `queue-drop` の `lineId` は
+`lines[]` に**無い** ④`lines[]` の id 数 ≥ 単位に現れた id 数。1 つでも破れたら走行に印を付け、率を出しません。
 
 | 分類 | 条件 |
 |---|---|
@@ -587,13 +641,14 @@ rev1 の手順 3（同じ `line.id` の `:0` / `pageId 0` への戻りを改訂�
 全体ゼロを合否にすると Kennedy の変更は Roman の赤で永遠に落ち、Roman を直すまで何も受け入れられません。
 変更ごとの合否は次の 4 つです（対象の名前を X とする）:
 
-- **`nameWrongKnown(X) = 0`**（合否）。
-- **X 以外の各名前の `nameWrongKnown` がベースラインの最大値を超えない**（合否・後退なし）。ゼロではなく
-  後退なしなのは、Roman の赤が別件（§2-4）だからです。
-- **`nameExpectedRate(X)`**（分母付きで報告し、§5-3 の閾値で合否）。`expected / X の英語側出現数`。分母を
-  出さない率は読まない（README の `phraseBoundarySamples` と同じ規律）。
-- **`englishPassthrough` がベースラインの最大値を超えない**（合否・対で読む）。名前を守って英語に落ちたら、
-  それは名前の改善ではありません。
+- **`nameWrongKnown(X) = 0`**（合否。変更後の全走行で 0）。0 は必要条件であって証明ではありません。5 走行で
+  X の出現が 15〜20 なら、0/20 が言えるのは真の率が 2 割に満たないことまでです。
+- **X 以外の各名前の `nameWrongKnown` 率に後退の証拠が無い**（合否・後退なし）。比較は §5-3 の順位検定で、
+  ベースラインの最大値以下ではありません。ゼロではなく後退なしなのは、Roman の赤が別件（§2-4）だからです。
+- **`nameExpectedRate(X)`**（分母付きで報告）。`expected / X の英語側出現数`。分母は `lines[]` から（§5-2 手順 4）。
+  分母を出さない率は読まない（README の `phraseBoundarySamples` と同じ規律）。合否は §5-3 の比較で決めます。
+- **`englishPassthrough` 率に後退の証拠が無い**（合否・対で読む）。名前を守って英語に落ちたら、それは名前の
+  改善ではありません。比較は同じ順位検定です。
 
 観測は 1 つ: **`nameVariants`**。バッチ内の名前ごとの異なる表記数。バッチをまたいで増えないこと。
 これは合否でなく、候補票の入力です。
@@ -603,27 +658,50 @@ rev1 の手順 3（同じ `line.id` の `:0` / `pageId 0` への戻りを改訂�
 
 ### 5.3 「効いた」と言える計測
 
-Kennedy Space Center を定訳に移す変更を例にすると（§2-3 の順 3 で `source` が取れた後の話です）:
+**比較の形（全ゲート共通）。** rev2 は「ベースラインの最大値以下」を後退なしにしていました。11 走行の
+`wrongSenseRoma` は最大 9 / 平均 4.5 / 中央値 3 なので、新しい 5 走行がすべて 9 でも通り、率が倍になっても
+検出しません。`englishPassthrough` の上限 2 は 1 本の走行の値を全走行に許します。極値ではなく分布を比べます。
 
-- 対象: tts2 相当のクリップ・original-on・prompt-api/base・`with` 語モード・**5 走行以上**。
-- ベースライン: §1-11 の original-on 11 走行（stamp は §1-11 に列挙）。生の表記件数は
-  原綴り 35 / ケネディ宇宙センター 5 / 混在 3。英語側は `pages` が無いので出力側で観測できた 43 を分母に
-  します（脱落は数えられない・§4-5 の印付き）。変更前の原綴り保持率は **35/43 ≈ 81%**（rev0 の 41/51 は
-  13 走行の値）。混在 3 は変更前の表でも `wrongKnown` です（§3）。
-- 変更後: `nameExpectedRate(Kennedy Space Center)`（`expected` = ケネディ宇宙センター）が **81% を下回らない**
-  こと。占位子の生存が上限なので、100% は目標にしません。`keptLatin` は `expected` に入りません。
-- `nameWrongKnown(Kennedy Space Center) = 0`（ベースラインの混在 3/43 がゼロになること）。
-- Roman / Goddard の `nameWrongKnown` が、ベースライン 11 走行の各名前の最大値（Roman は wrongSenseRoma 9・
-  `002418` と `043224`）を超えないこと。
-- `englishPassthrough` が **2 を超えない**こと。2 は 05:30 以降の original-on 10 走行の最大値（`061735`）です。
-  rev0 は「変更前の 5 走行の最大値」と書きましたが、直近 5 走行はすべて 0 で、その前に 2 の走行が 1 本
-  あります。5 本の最大値を上限にすると、ベースラインの中で既に起きた揺れで落ちるので、母集団を 10 走行に
-  広げて上限を 2 にします。
+- **単位は走行、統計量は率。** 走行 i の率 r_i = 件数 / その走行の分母（`lines[]` から取った英語側出現数。
+  `englishPassthrough` は行数 / `lines[]` の行数）。件数のまま比べると、`video.loop` の周回数（3〜4・§1-14）の差が
+  そのまま差に見えます。
+- **報告するもの**: before / after それぞれの pooled 率（Σ件数 / Σ分母。**和を 2 つとも併記**）と、走行ごとの率の
+  最小 / 中央値 / 最大。pooled 率は大きさを読むためで、合否には使いません（走行間の分散を無視するため）。
+- **合否は、走行ごとの率の分布を before と after で比べる一側の exact Wilcoxon 順位和検定**（Mann–Whitney。
+  同順位は中位順位。`naming-corpus.mjs` が組合せを数え上げて計算。5 vs 10 で C(15,5) = 3003 通り・依存無し）。
+  悪化の向きで p < 0.05 なら「後退」。**0.05 は慣例であって、この計測で測って決めた値ではありません。**
+- **結果は三値**: 後退 / 後退の証拠なし / 判定不能。「後退の証拠なし」は「後退なし」ではありません（下の試算）。
+- **走行数**: after が 5 未満、before が 5 未満、または分母を持たない走行（`lines[]` が無い・§5-2 の検査に落ちた）が
+  混ざれば**判定不能**で、合格ではありません。5 vs 5 で到達できる最小の一側 p は 1/252 ≈ 0.004、5 vs 10 で
+  1/3003 なので、判定は原理的に可能です。§4-3 の「5 走行から」はこの下限で、検出力から決めた数ではありません。
+- **before の母集団**: 変更前の build（`build-info.json` の `revision` が一致・§4-4）で、rev3 の記録（`lines[]`）を
+  持つ走行 5 本以上。**変更後の走行と同じ日に、間を空けずに回します**（バッチは build を 1 回揃えて回すので、
+  before 5 本 → 変更・ビルド → after 5 本）。既存の 11 走行は build を記録しておらず（§1-9）、少なくとも `051858`
+  は別の build です（§1-13）。分母も持ちません。参照値としては引きますが、どの判定の before にもしません。
+- **見える大きさは未測です。** 既存 11 走行の**件数**（率でなく件数。分母が無い）で順位検定を試算すると:
+  Roman の 5 走行がすべて 9 → p ≈ 0.007（後退。11 走行相手なら ≈ 0.005）。5 走行が 5 / 6 / 6 / 8 / 8（平均 6.6・
+  before の 05:30 以降 10 走行は平均 5.0）→ p ≈ 0.18（証拠なし）。素通しの 5 走行がすべて 2 → p ≈ 0.002（後退）。
+  0 / 0 / 2 / 2 / 2 → p ≈ 0.077（証拠なし）。つまり 5 走行で見えるのは「全走行が before の上端に並ぶ」級の後退で、
+  before の範囲の内側に収まる悪化は見えません。最小検出効果を数字にするには、before 走行からの並べ替えで
+  検出力を計算する（率に δ を足して 5 本を引き直し、80% で検出できる δ を求める）作業が要り、rev3 は
+  その数字を書きません。
+
+**Kennedy Space Center を定訳に移す変更を例にすると**（§2-3 の順 3 で `source` が取れた後の話です）:
+
+- 対象: tts2 相当のクリップ・original-on・prompt-api/base・`with` 語モード・before 5 走行 + after 5 走行。
+- 効いたか: after の `nameExpectedRate(Kennedy)`（`expected` = ケネディ宇宙センター）の走行分布が、before の
+  `nameExpectedRate(Kennedy)`（変更前の表では原綴りが `expected`・§4-5 の H_run）の分布を**下回らない**こと
+  （順位検定・向きは after が低い側）。占位子の生存が両方の上限なので、定訳が原綴りと同じ率で復元されるのが
+  期待値です。`keptLatin` は `expected` に入りません。rev2 は既存走行の出力側 43 件から 81% を床にしていましたが、
+  分母が出力側（脱落を数えられない）で、build も混ざり、点推定を床にすると真の率が同じでもおおむね半分の
+  確率で落ちる形でした。取り下げます。0 → 生存率の級の変化は 5 走行で見えます（上の試算）。80 → 90 は
+  見えません。細かい差を主張するなら走行を増やす前に**出現密度の高い台本**（§4-2 公有英文）を足します。
+- `nameWrongKnown(Kennedy Space Center) = 0`（after 全走行）。既存走行の混在 3/43（§1-11）は変更前の表でも
+  `wrongKnown` です（§3）。
+- Roman / Goddard の `nameWrongKnown` 率と `englishPassthrough` 率に後退の証拠が無いこと（上の検定）。
 - 「ケネディの Space Center」型の混在は `wrongKnown` に落ちるので（§3）、上の 2 点目で読みます。
-  `nameVariants(Kennedy)` は観測として、変更後に増えていないこと。
-- 標本の限界を先に書きます。95 秒クリップに Kennedy は 1 走行 3〜4 出現（台本 1 周に 1・§1-14）、5 走行で
-  15〜20。0→80% の変化は見えますが 80→90% は見えません。細かい差を主張するなら走行を増やす前に
-  **出現密度の高い台本**（§4-2 公有英文）を足します。
+  `nameVariants(Kennedy)` は観測として、after で増えていないこと。
+- 標本の限界: 95 秒クリップに Kennedy は 1 走行 3〜4 出現（台本 1 周に 1・§1-14）、5 走行で 15〜20。
 
 ---
 
@@ -671,25 +749,31 @@ sora が動ける言い方にすると:
    複写との照合に失敗したら走らない。既存 11 走行では取れませんが、以後の走行は英語全文と対応が取れます。
    検証: 1 走行で `display.pages.length` が `display.blocks.length` と一致し（ウォームアップの 1 枚が落ちて
    いて、全ページが落ちてはいない）、`sourceText` が `original` 行より長い。表を 1 字変えてビルドせずに
-   走らせ、bench が止まること（存在の確認と作動の確認は別）。
+   走らせ、bench が止まること（存在の確認と作動の確認は別）。ログに `lines[]` / `drops[]` があれば（6 の後）
+   同じ切り方で `result.display.lines` / `drops` に書く。
 2. **集計 `naming-corpus.mjs` と候補票。** 表は §2-5 の複写 import で読み、`loadKeepLatinEntries` の
    正規表現はここで消します。既存の結果ファイル（`display.blocks` と original-on の `samples[].original`）
    だけでも §1-11 の集計は出るので、1 を待たずに書けます。検証: §1-11 の **original-on 11 走行**（stamp 列挙）
    の生の表記件数を再現する（Roman 117 / 52 / 9 / 4、Goddard 70 / 7 / 2 / 2、Kennedy 35 / 5 / 3）。
    `sources[]` を持たないページ（6 の前の走行）は `cueId` を鍵にした cue 単位で数え、`unit: "cue"` の印を
    残します（改訂と merge の二重計上を含む下限）。6 が入った走行から §5-2 の単位に切り替わります。
+   率と順位検定（§5-3）もここに入れます。分母を持たない既存走行は `rate: null` の印で件数だけ出します。
 3. **表の形（`NameTerm`）とテスト**（全行 `source` 必須・`ja` 必須・`rejected` の形）。既存 33 行の出典
    付け。データだけの変更。
 4. **定訳の復元と表優先の順序、救済プロンプトのブロック分け**（`term-masking.ts` / `translate.ts` /
    `glossary.ts`）。検証: 単体テスト＋ §5-3 の 5 走行。
 5. **ケース定義のファイル化とバッチ**（`live2-batch.mjs`）。検証: 失敗署名を 1 つ人為的に起こして再試行と
    停止を目視する（存在の確認と作動の確認は別）。
-6. **字幕ログに `sources[]`（`id` / `text` / `rung`）と `fallback` を足す**（拡張側の 1 点・§4-1-5）。
+6. **字幕ログに `sources[]`（`id` / `text` / `rung`）と `fallback`、`lines[]` と `drops[]` を足し、offscreen の
+   `queue-drop` に `text` を足す**（拡張側の 3 点・§4-1-5〜7）。
    検証: 単体テストで ①merge した cue のページが 2 行の `sources` を持つ（`overlay.test.ts:1444` の状況）
-   ②改訂の cue の `text` が尾だけ（`:783` の状況）③段の違う 2 行を merge したページが行ごとの `rung` を持つ。
+   ②改訂の cue の `text` が尾だけ（`:783` の状況）③段の違う 2 行を merge したページが行ごとの `rung` を持つ
+   ④待ち行列の圧力で落ちた cue の行が `lines[]` にあり、`drops[]` に id があり、ページに**無い**。rev2 の形では
+   この行が分母から消えることを先に見せる（fail-before）⑤offscreen で捨てた節の `text` が `__devLog` に届く。
    走行では、マスクなし再試行の行がその印を持つ。
 
 1〜2 は今夜から回せます。6 は小さく、2 の単位が本来の形で動くのに要るので、2 と同じ日に入れます。
+分母（§5-3）も 6 が無いと出ないので、受け入れの判定は 6 の後の走行からです。
 3〜4 が sora の問い①への実装、5 が問い②の仕上げです。
 
 ---
@@ -743,7 +827,7 @@ JAXA には「ゴダードスペースフライトセンター」と書いてい
    `wrongKnown` をスクリプト混在の 2 類だけにすることで、その場合「ローマ」（誤義）は `variant` に落ち、
    誤義撲滅の合否が機械から消えます。
 4. **受け入れの名前単位化**（§5-2・確信度: 中）。走行全体の `nameWrongKnown = 0` を到達目標に格下げし、
-   変更ごとの合否を「対象の名前ゼロ + 他の名前は後退なし + 素通し対」にしました。issue-49 rev5 の
+   変更ごとの合否を「対象の名前ゼロ + 他の名前は後退の証拠なし（順位検定・§5-3） + 素通し対」にしました。issue-49 rev5 の
    誤義撲滅をゆるめる読みができるので、裁定が要ります。代案は全体ゼロを合否に残すことで、その場合
    Roman の赤（§1-13）を先に直すまで表の変更は 1 つも受け入れられません。
 
@@ -760,3 +844,7 @@ JAXA には「ゴダードスペースフライトセンター」と書いてい
 - **共起による候補抽出の偽陽性率**（§3・確信度: 低）。台本 1 本だと「宇宙望遠鏡」が Roman の候補に
   混ざります。台本が増えれば消える種類の誤りですが、増えるまでは候補票を人が読む前提です。
 - **occlusion の恒久策**（§4-7）は未測です。`muted` を外すと機械で音が鳴る。別スパイクにします。
+- **順位検定が 5 走行で見える大きさ**（§5-3・未測）。件数での試算は「全走行が before の上端に並ぶ」級しか
+  見えないと言っています。率での検出力は before 走行が揃ってから並べ替えで測り、それまで数字を書きません。
+- **offscreen `queue-drop` の中継**（§4-1-7・確信度: 中）。`061735` では 2 件届いていますが、届かなかった走行と
+  起きなかった走行を区別する手段がありません。
