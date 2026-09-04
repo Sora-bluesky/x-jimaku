@@ -1609,8 +1609,15 @@ export class CaptionOverlay {
   private paginateCue(
     cue: CueData,
   ): readonly CaptionPage[] {
-    const lines =
-      cue.formattedPrimary.split("\n");
+    // Wrap against the box as it is now, not as it was when the cue was
+    // queued. Leaving fullscreen narrows the caption slots, and a cue that
+    // waited through that would arrive wrapped for a box that no longer
+    // exists; .caption-primary hides overflow, so it would be cut.
+    const lines = wrapCueText(
+      cue.primaryText,
+      this.lineUnitBudget,
+      this.captionWrapLayout(),
+    ).split("\n");
     const pages: CaptionPage[] = [];
 
     for (

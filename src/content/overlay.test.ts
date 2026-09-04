@@ -17,6 +17,7 @@ import {
 } from "../shared/initialization-progress";
 import {
   MAX_LINE_UNITS,
+  displayUnits,
   wrapCueText,
 } from "./cue-text";
 import {
@@ -2071,6 +2072,85 @@ describe(
 describe(
   "CaptionOverlay display log",
   () => {
+    it(
+      "rewraps a queued cue after the box narrows",
+      () => {
+        const longestQueuedLine = (
+          narrow: boolean,
+        ): number => {
+          const log =
+            createCaptionDisplayLog({
+              storage: null,
+            });
+          const video =
+            document.createElement("video");
+          let wide = true;
+          video.getBoundingClientRect = () =>
+            wide
+              ? new DOMRect(0, 0, 1600, 900)
+              : new DOMRect(0, 0, 360, 202);
+          document.body.append(video);
+
+          const overlay = createOverlay({
+            displayLog: log,
+            getTargetVideo: () => video,
+          });
+          overlay.setTranslationPath(
+            "language-model",
+          );
+
+          showFinal(
+            overlay,
+            1,
+            "最初の行です。",
+          );
+          // The second cue waits behind the first, wrapped for the wide box.
+          showFinal(
+            overlay,
+            2,
+            THREE_LINE_TEXT,
+          );
+
+          if (narrow) {
+            wide = false;
+            document.dispatchEvent(
+              new Event("fullscreenchange"),
+            );
+          }
+
+          vi.advanceTimersByTime(
+            CUE_MINIMUM_DISPLAY_MS,
+          );
+
+          const lines = log
+            .getPages()
+            .filter((page) =>
+              page.cueId.startsWith("2:"),
+            )
+            .flatMap((page) => [
+              page.line0,
+              page.line1,
+            ]);
+
+          overlay.destroy();
+          video.remove();
+
+          return Math.max(
+            0,
+            ...lines.map((line) =>
+              displayUnits(line),
+            ),
+          );
+        };
+
+        const wideRun = longestQueuedLine(false);
+        const narrowRun = longestQueuedLine(true);
+
+        expect(wideRun).toBeGreaterThan(0);
+        expect(narrowRun).toBeLessThan(wideRun);
+      },
+    );
+
     it(
       "closes the logged page while the caption is off screen",
       () => {
