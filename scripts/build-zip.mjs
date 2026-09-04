@@ -79,7 +79,16 @@ if (!existsSync(manifestPath)) {
 const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
 const version = manifest.version;
 
-if (typeof version !== "string" || !/^\d+\.\d+\.\d+$/u.test(version)) {
+// Chrome's own rule for a version lives in src/build/manifest.ts, and the
+// build refuses to stamp a manifest that breaks it, so a version reaching
+// here has already passed. Deliberately not a second copy of that rule: two
+// copies across the TypeScript and script boundary is exactly the drift this
+// pull request exists to remove. What is checked here is only what this file
+// needs, which is that the version is safe to put in a filename.
+if (
+  typeof version !== "string" ||
+  !/^[0-9][0-9.]*$/u.test(version)
+) {
   fail(`dist/manifest.json has an unusable version: ${version}`);
 }
 

@@ -8,6 +8,9 @@ import {
   expect,
   it,
 } from "vitest";
+import {
+  isChromeVersion,
+} from "./manifest";
 
 // The extension stores its version in four places and only one of them is
 // real: the store and the browser read public/manifest.json, and nothing reads
@@ -119,12 +122,15 @@ describe("release version", () => {
     },
   );
 
-  it("is a plain three-part number", () => {
-    // Chrome rejects an upload whose version is not one to four dot-separated
-    // integers, and it rejects it after the zip is built and uploaded. Cheaper
-    // to find out here.
+  it("is a version Chrome will accept", () => {
+    // Chrome rejects a bad version after the zip has been built and uploaded.
+    // A pattern of three integers is not the rule it applies: 0.07.0 and
+    // 999999.0.0 both match that and both are rejected. isChromeVersion is
+    // the same check the build runs before it stamps anything.
     expect(
-      readVersion("public/manifest.json"),
-    ).toMatch(/^\d+\.\d+\.\d+$/u);
+      isChromeVersion(
+        readVersion("public/manifest.json"),
+      ),
+    ).toBe(true);
   });
 });
