@@ -67,9 +67,19 @@ describe("stampManifest", () => {
 describe("isChromeVersion", () => {
   it("accepts what Chrome accepts", () => {
     expect(isChromeVersion("0.7.0")).toBe(true);
-    expect(isChromeVersion("0")).toBe(true);
     expect(isChromeVersion("1.2.3.4")).toBe(true);
     expect(isChromeVersion("0.0.65535")).toBe(true);
+    // Chrome's own example of a valid all-but-one-zero version.
+    expect(isChromeVersion("0.1.0.0")).toBe(true);
+  });
+
+  it("rejects a version that is all zeros", () => {
+    // Chrome names 0 and 0.0.0.0 as invalid. The first version of this check
+    // accepted both, and the test written with it said "0" was fine, so the
+    // mistake had a passing test defending it.
+    expect(isChromeVersion("0")).toBe(false);
+    expect(isChromeVersion("0.0")).toBe(false);
+    expect(isChromeVersion("0.0.0.0")).toBe(false);
   });
 
   it("rejects a leading zero on a non-zero part", () => {
