@@ -1,11 +1,22 @@
 # 設計: 固有名詞の表記コーパス（桶の規則・無人採取・受け入れ）
 
-Status: rev1（設計案。敵対レビュー 1 巡を反映・実装未着手）
+Status: rev2（設計案。敵対レビュー 2 巡を反映・実装未着手）
 Date: 2026-09-04
-Branch: `i71-display-buffer`。読解の基準は `cfbcf4f`。rev1 時点の HEAD は `4731eab` で、差分は build stamp /
-version 検査・README・release note の 11 ファイル（`git diff --name-only cfbcf4f..HEAD`）。本文が引く file:line に
-変更はありません。
+Branch: `i91-naming-design`（`dad9fca` 起点・rev2 の HEAD は `5e0f71e`）。読解の基準は `cfbcf4f`。
+`scripts/build-stamp.mjs`（`4731eab`）は `i86-release-prep` にあり、本ブランチには未到達です（§4-4）。
+本文が引く file:line に変更はありません。
 関連: `docs/issue-49-design.md`（masking 方式の原理・誤義撲滅の裁定）/ `docs/issue-63-design.md`（DEV ログ中継）
+
+rev2 で変えたこと:
+
+- 分類の単位を「ページ」から「cue が束ねる原文行の集合」に変えました（§5-2）。レビューの指摘 3 件
+  （merge の複合 `cueId`・改訂は尾だけ表示・merge をまたぐ `rung`）は、どれも「1 ページ = 1 節 = 1 段」という
+  同じ前提の破れです。局所の 3 修正ではなく単位の変更 1 つで解き、字幕ログに足すフィールドもそれに合わせて
+  行ごとの `sources[]` にしました（§4-1-5）。
+- ウォームアップ切りの比較を ms に揃えました（§4-1-2）。`appearedAt` は ISO 文字列で `replayStartedAtMs` は
+  数値なので、rev1 の `>=` は NaN になり、1 枚ではなく全ページを落とします。
+- `nameTableHash` を「ソースの sha256」から「ビルドが dist に書いた sha256」に変え、bench が読む複写と
+  照合してから走るようにしました（§4-4）。bench はビルドしないので、ソースの hash は動いている表を指しません。
 
 rev1 で変えたこと:
 
@@ -85,7 +96,15 @@ sora の問いは 2 つです。①原綴りで残す名前とカタカナで書
    `sourceText` は cue の**全文**（`:1227`）が**ページごとに繰り返し**書かれます（`:1707`）。
    表示用の原文行は `clampTail` で切り詰めた別物（`:1214-1218`）。`translationPath` は overlay が持つ
    **現在の経路**（`:1709`）で、その行を作った救済段ではありません。`fallback` は `CueData` にある
-   （`:1228`）がログ入力には入っていません。`live2.mjs:861-905` は終了時に worker からこのログを読み、
+   （`:1228`）がログ入力には入っていません。`CueData` は `sourceIds` も持ちます（`:84`・`:1224` で
+   `[line.id]`）が、これもログ入力（`caption-display-log.ts:17-28`）にはありません。
+   待ち行列が詰まると隣り合う cue を 1 つに merge し（`overlay.ts:1393-1452`）、`cueId` は `1:0+2:0` の形
+   （`:1431-1432`）、`sourceIds` は両方の連結（`:1433-1436`）、`sourceText` も両方の連結（`:1419-1425`）に
+   なります。merge の条件は `fallback` が等しいことだけです（`cue-queue.ts:56-59`）。
+   認識器が同じ語で始まる長い節を後から確定したとき（改訂）、表示は増えた尾だけですが
+   （`overlay.ts:1068-1113`・`overlay.test.ts:783`）、`sourceText` は改訂後の**全文**です（`:1187`・`:1227`）。
+   `appearedAt` / `replacedAt` は `Date.now()` を `toISOString()` した**文字列**です
+   （`caption-display-log.ts:32`・`:262`・`:296`・`:609-611`）。`live2.mjs:861-905` は終了時に worker からこのログを読み、
    **滞留時間の分位点だけ**残してページを捨てています。
    ログは走行の前に `chrome.storage.local.remove("captionDisplayLog")` で消されますが（`live2.mjs:440`）、
    消すのはウォームアップ再生（`:517-523`）の**前**なので、ウォームアップで出たページが走行に残ります。
@@ -272,7 +291,7 @@ export interface NameTerm {
   `KEEP_LATIN_TERMS[28]` が Kennedy Space Center）。型除去が扱えない構文（enum・namespace）を書けば
   import 時に SyntaxError で止まるので、fail-closed です。rev0 の `bench/glossary-source.mjs` +
   vitest 照合の案は取り下げます（同じ解析を 2 か所に持たないどころか、解析そのものを持たない）。
-  同じ file の sha256 を `nameTableHash` として走行 JSON に書きます（§4-4）。
+  この複写の sha256 を、ビルドが dist に書いた表の sha256 と照合してから走ります（§4-4）。
 - 拡張のバンドルに依存は増えません。変わるのはデータの形・復元の文字列・計画の順序・救済プロンプトの
   ブロック分け・字幕ログの 1 フィールド（§4-4）だけです。
 
@@ -336,9 +355,16 @@ export interface NameTerm {
    なります（verify skill も「terms を渡す CLI フラグは無い」と書いている現状の解消）。
 2. **字幕ログのページを結果 JSON に残す。** `live2.mjs:861-905` は worker から `captionDisplayLog` を
    読んで分位点だけ残しています。`pages`（上限 400・`caption-display-log.ts:11`）を
-   **`appearedAt >= replayStartedAt` で切って** `result.display.pages` に書きます。`replayStartedAtMs` は
-   巻き戻し再生の直前にページ側の `Date.now()` で取っています（`:610-618`）。`appearedAt` も content script
-   の `Date.now()` なので同じ時計です。これでウォームアップのページ（§1-8・毎走行 1 枚）と、消去に失敗した
+   **`Date.parse(appearedAt) >= replayStartedAtMs` で切って** `result.display.pages` に書きます。
+   `replayStartedAtMs` は巻き戻し再生の直前にページ側の `Date.now()` で取った**数値**（`:610-618`）、
+   `appearedAt` は content script が `Date.now()` を `toISOString()` した**文字列**です
+   （`caption-display-log.ts:262`・`:609-611`）。時計は同じですが型が違うので、rev1 の
+   `appearedAt >= replayStartedAt` は文字列と数値の比較になり、`appearedAt` が NaN に化けて全ページで false、
+   つまりウォームアップの 1 枚ではなく**`display.pages` が空**になります。ms 側に寄せる理由は 2 つ。
+   `toISOString()` は ms を落とさず `Date.parse` が正確に戻すこと、bench の滞留計算が既に
+   `Date.parse(page.appearedAt)` を使っていること（`live2.mjs:882`）。`Date.parse` が NaN を返したページは残さず
+   `pagesUnparsed` に数えて JSON に書きます（無音で落とさない）。`replayStartedAt` は JSON には ISO 文字列で
+   書き、比較は ms で行います。これでウォームアップのページ（§1-8・毎走行 1 枚）と、消去に失敗した
    ときに残る前走行のページが落ちます。消去の成否は `captionLogCleared: true | false` として JSON に書き、
    `catch {}`（`:443-446`）を印のある失敗に変えます。切ったので数字は汚れませんが、消せなかった事実は残します。
    英語全文と表示行の対応はこれで取れ、`clampTail` の切り詰め問題（HANDOFF「49 行中 4 件しか照合できない」）が
@@ -347,12 +373,23 @@ export interface NameTerm {
    `live2.mjs` を子プロセスで起こし、終了コードとエラー署名を記録して次へ進みます。
 4. **集計 `bench/naming-corpus.mjs`。** `bench/results/live2-*.json` を**全部**読んで
    `naming-corpus.json` と `naming-candidates.md` を書きます（§4-5）。表は §2-5 の複写 import で読みます。
-5. **拡張側の 1 点**: 字幕ログの入力に `fallback`（`CueData` にはある・`overlay.ts:1228`）と、その行が
-   **どの段で作られたか** `rung` を足します。値は梯子の順（§1-4）で `masked`（占位子復元）/
-   `translator-masked` / `translator-unmasked` / `lm-unmasked` / `passthrough`。`translationPath` は現在の
-   経路であって作った段ではない（§1-8）ので、これが無いと「表が間違っている」と「占位子を失った」を
-   分けられません。`27e8290` が `fallback: true` を中継した前例に沿い、`RecognitionPayload` に 1 値を足す
-   形です。
+5. **拡張側の 1 点**: 字幕ログの入力（`caption-display-log.ts:17-28`）に **`sources`** と `fallback`
+   （`CueData` にはある・`overlay.ts:1228`）を足します。`sources` は、そのページを出した cue が束ねる
+   **原文行の配列**で、要素は `{ id, text, rung }` です。
+   - `id`: `CueData.sourceIds` の要素（`overlay.ts:84`）。merge した cue（`:1433-1436`）では 2 つ以上になります。
+   - `text`: その行のうち**この cue の表示が対応する英語**。改訂で尾だけを表示したとき（`:1079-1113`）は
+     `source.slice(lastAcceptedSource.length)` の尾、それ以外は `line.text` の全文。`acceptCommittedClause` は
+     `primary` を尾に切る時点で同じ長さを持っているので、`createCueSegments`（`:1182`）に渡す値を 1 つ足すだけ
+     です。既存の `sourceText`（全文・merge では連結）は消しません（`run-bench.mjs:554` が読みます）。
+   - `rung`: その行を作った段。値は梯子の順（§1-4）で `masked`（占位子復元）/ `translator-masked` /
+     `translator-unmasked` / `lm-unmasked` / `passthrough`。`27e8290` が `fallback: true` を中継した前例に沿い、
+     `RecognitionPayload` に 1 値を足す形です。**行ごとに持ち、ページや cue には持たせません。** merge は
+     `fallback` の一致しか見ない（`cue-queue.ts:56-59`）ので、`masked` の行と `lm-unmasked` の行が 1 つの
+     cue・1 ページに乗ります。ページに 1 つの `rung` を書くと、どちらかの行の出現が別の段に付き、§5-2 の
+     段別内訳が壊れます。
+   `parseCaptionDisplayLogPages`（`caption-display-log.ts:217`）は field の型を見てから受けるので、`sources` の
+   形もそこに足します。`translationPath` は現在の経路であって作った段ではない（§1-8）ので、`rung` が無いと
+   「表が間違っている」と「占位子を失った」を分けられません。
 
 ### 4.2 クリップの出どころ
 
@@ -390,13 +427,29 @@ export interface NameTerm {
 既存の `bench/results/live2-<case>-<model>-<display>-<stamp>.json` に足すだけです。
 
 - `batchId` / `termsMode`（`with` | `without`）/ `caseId`。
-- `build`: commit と dirty。vite が `dist/manifest.json` の `version_name` に刻む値（`src/build/manifest.ts` の
-  `stampManifest`）を `scripts/build-stamp.mjs` の `describeBuild` で読みます（`4731eab` で入った）。bench が
-  `loadUnpacked` する dist と同じ file なので、走行に使った build がそのまま記録されます。
-  `nameTableHash`: `glossary.data.ts` の sha256（§2-5）。いまの JSON はどちらも持ちません（§1-9）。
-- `replayStartedAt` / `captionLogCleared`（§4-1-2）。
-- `display.pages[]`（§4-1-2。`cueId, pageId, line0, line1, sourceText, translationPath, fallback,
-  rung, appearedAt, replacedAt`）。
+- `build` と `nameTableHash`: **ビルドが dist に書いた値を読みます。** vite の `closeBundle`
+  （`vite.config.ts:93`・manifest の書き出しは `:143-160`）は `getGitBuildState()`（`:176-205`）で commit と dirty を取り、`stampManifest`
+  （`src/build/manifest.ts`）で `dist/manifest.json` の `version_name` に刻んでいます。同じ hook に 1 つ足し、
+  `src/offscreen/glossary.data.ts` の sha256 を同じ stamp と一緒に **`dist/build-info.json`**
+  （`{ revision, dirty, builtAt, nameTableHash }`）へ書きます。bench はこの file だけを読みます。
+  理由: bench は `dist/` を `Extensions.loadUnpacked` するだけでビルドしません（`live2.mjs:368`）。走行の前に
+  表を編集すると、拡張は古い表で動き、ソースの sha256 と §2-5 の複写 import は新しい表を指し、走行時の分類と
+  before/after の帰属が**印なしに**ずれます。stamp の `dirty` はツリー全体の `git status --porcelain`
+  （`vite.config.ts:193-196`）なので、表が bundle と一致するかは言えません。いまの dist は
+  `0.7.0 dad9fca-dirty`（`.claude/skills` の編集だけで dirty になる）で、stamp だけでは判定できない例です。
+  release 側が `scripts/build-stamp.mjs`（`i86-release-prep`・`4731eab`）で解いている形、「ビルド時に dist へ
+  書いた記録を、消費側がツリーと突き合わせる」を表に当てます。
+  照合: bench は §2-5 の複写（`bench/work/name-table.mts`）の sha256 を取り、`build-info.json` の
+  `nameTableHash` と**一致しなければ走りません**（fail-closed。「表を編集した後にビルドしていない。
+  `npm run build`」と出す）。`build-info.json` が無い dist も走りません。走行 JSON の `nameTableHash` には
+  build-info の値を書き、その走行の `naming`（§4-5 の H_run）はその表で付きます。バッチ（§4-3）は開始時に
+  `npm run build` を 1 回回して dist を揃え、各走行の照合はそのまま残します（途中の編集を捕まえる）。
+  `build-info.json` は release の zip（`scripts/build-zip.mjs` は `dist/` をそのまま詰める）にも入りますが、
+  manifest が参照しない file を Chrome は読まないので害はありません。
+  いまの JSON はどちらも持ちません（§1-9）。
+- `replayStartedAt` / `captionLogCleared` / `pagesUnparsed`（§4-1-2）。
+- `display.pages[]`（§4-1-2。`cueId, pageId, line0, line1, sourceText, sources[{ id, text, rung }],
+  translationPath, fallback, appearedAt, replacedAt`）。
 - `naming`（走行単体の自己記述）: 表の語と `terms.txt` の語ごとに、英語側の出現数・出力側の**生の表記と件数**・
   分類（§5-2）。分類はその走行が使った表（`nameTableHash`）に対するものです。1 走行を開けば、その走行の
   名前の状態が読める形にします。
@@ -475,24 +528,51 @@ score-ja の judge（agy）は**このループの外**に置きます（名前�
 
 ### 5.2 新しいゲート: 出現単位の表記分類
 
-**単位は `line.id`（認識された 1 節）で、ページではありません。** `display.pages` の各ページは cue の全文を
-`sourceText` に持ち（`overlay.ts:1707`）、`cueId` は `${line.id}:${index}`（`:1223`）なので、1 つの英語節が
-分割（index）・ページ（pageId）・改訂（同じ id の再表示）にまたがって何度も現れます。ページごとに分類すると
+**単位は「cue が束ねる原文行の集合」で、ページでも `cueId` の接頭辞でもありません。** `display.pages` の
+各ページは cue の全文を `sourceText` に持ち（`overlay.ts:1707`）、`cueId` は `${line.id}:${index}`（`:1223`）
+なので、1 つの英語節が分割（index）・ページ（pageId）にまたがって何度も現れます。ページごとに分類すると
 `missing` と分母が膨らみます。tts2 はたまたま 1 節 1 ブロック（`043759`: 28 line id / 28 blocks）ですが、
 theo には既に blocks ≠ line id の走行があり（`023448`: 43/42・`025920`: 52/51）、実クリップ（§4-2）では
 常態です。
 
+rev1 は「`cueId` の `:` より前で `line.id` に束ねる」でした。パイプラインは 1 ページ = 1 節 = 1 段を
+保証していないので（§1-8）、これは 3 か所で壊れます:
+
+- merge した cue の `cueId` は `1:0+2:0`（`overlay.ts:1431-1432`）。`:` で切ると連結した全文が行 1 に付き、
+  行 2 は丸ごと消えて、後半の名前の出現数と `missing` が両方ずれます。
+- 改訂の cue は尾だけ表示して `sourceText` は全文（`:1068-1113`・`:1227`）。ページの `sourceText` を分母に
+  すると、前の節で既に表示した名前をもう 1 度数えて `missing` にします。
+- merge は `fallback` しか見ない（`cue-queue.ts:56-59`）ので、ページに 1 つの `rung` を持たせると段別の
+  内訳が壊れます。
+
+3 つは同じ前提の破れです。局所の 3 修正ではなく単位を 1 つ変えます。ログ側は `sources[]`（§4-1-5）で
+「行ごとの英語（表示に対応する部分）と段」を持ち、集計側は次の手順で単位を作ります。
+
 手順:
 
-1. `appearedAt >= replayStartedAt` のページだけ残す（§4-1-2）。
-2. `cueId` の `:` より前で `line.id` に束ねる。
-3. 同じ `line.id` の中で、`cueId` が `:0` かつ `pageId` が `0` に戻った点を改訂の境目とし、**最後の改訂**の
-   ページ群を採る（英語のまま出て後から日本語に置き換わった節は、置き換わった後だけを読む）。
-4. 英語側 = その `sourceText`（1 つ）。出力側 = 採ったページ群の `line0` / `line1` を順に連結した 1 文字列。
-5. 表の語ごとに、英語側の出現数 n を数え（同じ節に 2 回なら 2）、出力側で見つけた各形の件数を n を上限に
-   割り当てる。優先順位は `wrongKnown` → `expected` → `keptLatin` → `variant`、余りが `missing`。
+1. `Date.parse(appearedAt) >= replayStartedAtMs` のページだけ残す（§4-1-2）。
+2. `cueId` を**不透明な鍵**としてページを cue に束ねる（`:` でも `+` でも切らない）。cue の `sources[]` は
+   そのどのページでも同じです。
+3. 原文行 `id` を共有する cue を 1 つに繋ぐ（union-find）。できた連結成分が**単位**です。ほとんどは 1 行 1 cue、
+   長い節を割った cue（`${id}:0` / `:1`）は 1 行 n cue、merge した cue は n 行 1 cue で、両方が混ざることも
+   あります。
+4. 英語側 = 単位に含まれる行の `sources[].text` を **id ごとに 1 回だけ**採る（割った cue が同じ行を n 回
+   持っていても 1 回）。出力側 = 単位の全ページの `line0` / `line1` を `appearedAt` 順に連結した 1 文字列。
+5. 表の語ごとに、英語側の出現数 n を行別に数え（同じ行に 2 回なら 2）、出力側で見つけた各形の件数を n を
+   上限に割り当てる。優先順位は `wrongKnown` → `expected` → `keptLatin` → `variant`、余りが `missing`。
+6. 段の帰属: 出現は**それを含む行の `rung`** に付きます。単位の行がすべて同じ段ならそのままです。段が 2 つ
+   以上あり、かつ同じ名前が複数の行に出る単位だけは、出力側の形をどの行に返すか決められないので、その名前の
+   件数を段別内訳では `mixed` に置きます（合計には入れる）。`mixed` の件数は報告に出します。多ければ merge の
+   頻度そのものが問題です（§9-1）。
 
-検証: tts2 で `line.id` の数が `recognition.jaClauses` の数と一致すること（いまの blocks で 28 = 28）。
+rev1 の手順 3（同じ `line.id` の `:0` / `pageId 0` への戻りを改訂の境目にする）は消します。`acceptedFinalIds`
+（`overlay.ts:1050`）が同じ id を 2 度受けないので、この境目はありません。改訂は**別の id** で来て
+（`overlay.test.ts:783` は id 1 → id 2）、`sources[].text` が尾だけを持つので、単位を分けるだけで正しく
+数えられます。表示のリセット（`:532`）の後に id が振り直されるかは実装時に `pages` で確かめ、同じ id が
+離れた時刻に別の `text` で現れたら別の単位にします。
+
+検証: tts2 で、単位に含まれる行 id の総数（重複なし）が `recognition.jaClauses` の数と一致すること
+（いまの blocks で 28 = 28）。merge があった走行は単位数がそれより少なくなりますが、行 id の総数は変わりません。
 
 | 分類 | 条件 |
 |---|---|
@@ -585,23 +665,32 @@ sora が動ける言い方にすると:
 
 ## 8. 実装の順番（最小・各段が独立に検証できる）
 
-1. **字幕ログのページを結果 JSON に残す**（`live2.mjs` のみ）。`replayStartedAt` で切り、`captionLogCleared` /
-   `build` / `nameTableHash` を書く（§4-1-2・§4-4）。既存 11 走行では取れませんが、以後の走行は
-   英語全文と対応が取れます。検証: 1 走行で `display.pages.length` が `display.blocks.length` と一致し
-   （ウォームアップの 1 枚が落ちている）、`sourceText` が `original` 行より長い。
+1. **字幕ログのページを結果 JSON に残す**（`live2.mjs` と `vite.config.ts` の hook）。
+   `Date.parse(appearedAt) >= replayStartedAtMs` で切り、`captionLogCleared` / `pagesUnparsed` / `build` /
+   `nameTableHash` を書く（§4-1-2・§4-4）。`nameTableHash` は hook が `dist/build-info.json` に書く値で、
+   複写との照合に失敗したら走らない。既存 11 走行では取れませんが、以後の走行は英語全文と対応が取れます。
+   検証: 1 走行で `display.pages.length` が `display.blocks.length` と一致し（ウォームアップの 1 枚が落ちて
+   いて、全ページが落ちてはいない）、`sourceText` が `original` 行より長い。表を 1 字変えてビルドせずに
+   走らせ、bench が止まること（存在の確認と作動の確認は別）。
 2. **集計 `naming-corpus.mjs` と候補票。** 表は §2-5 の複写 import で読み、`loadKeepLatinEntries` の
    正規表現はここで消します。既存の結果ファイル（`display.blocks` と original-on の `samples[].original`）
    だけでも §1-11 の集計は出るので、1 を待たずに書けます。検証: §1-11 の **original-on 11 走行**（stamp 列挙）
    の生の表記件数を再現する（Roman 117 / 52 / 9 / 4、Goddard 70 / 7 / 2 / 2、Kennedy 35 / 5 / 3）。
+   `sources[]` を持たないページ（6 の前の走行）は `cueId` を鍵にした cue 単位で数え、`unit: "cue"` の印を
+   残します（改訂と merge の二重計上を含む下限）。6 が入った走行から §5-2 の単位に切り替わります。
 3. **表の形（`NameTerm`）とテスト**（全行 `source` 必須・`ja` 必須・`rejected` の形）。既存 33 行の出典
    付け。データだけの変更。
 4. **定訳の復元と表優先の順序、救済プロンプトのブロック分け**（`term-masking.ts` / `translate.ts` /
    `glossary.ts`）。検証: 単体テスト＋ §5-3 の 5 走行。
 5. **ケース定義のファイル化とバッチ**（`live2-batch.mjs`）。検証: 失敗署名を 1 つ人為的に起こして再試行と
    停止を目視する（存在の確認と作動の確認は別）。
-6. **字幕ログに `fallback` と `rung` を足す**（拡張側の 1 点）。検証: マスクなし再試行の行がその印を持つ。
+6. **字幕ログに `sources[]`（`id` / `text` / `rung`）と `fallback` を足す**（拡張側の 1 点・§4-1-5）。
+   検証: 単体テストで ①merge した cue のページが 2 行の `sources` を持つ（`overlay.test.ts:1444` の状況）
+   ②改訂の cue の `text` が尾だけ（`:783` の状況）③段の違う 2 行を merge したページが行ごとの `rung` を持つ。
+   走行では、マスクなし再試行の行がその印を持つ。
 
-1〜2 は今夜から回せます。3〜4 が sora の問い①への実装、5〜6 が問い②の仕上げです。
+1〜2 は今夜から回せます。6 は小さく、2 の単位が本来の形で動くのに要るので、2 と同じ日に入れます。
+3〜4 が sora の問い①への実装、5 が問い②の仕上げです。
 
 ---
 
@@ -662,8 +751,12 @@ JAXA には「ゴダードスペースフライトセンター」と書いてい
 
 - **表優先の順序変更**（§2-5・確信度: 中）。ページ由来を先に置いた現行順に依存する単体テストがある
   可能性があり、`ambiguous` の証拠判定（ページが名指し）との相互作用は実装時に一度測ります。
-- **§5-2 の改訂の境目**（`:0` / pageId `0` への戻り・確信度: 中）。同じ `line.id` が再表示される経路が
-  これだけかは実装時に `pages` を見て確かめます。
+- **§5-2 の `mixed`（段が混ざった単位）の頻度**（確信度: 低）。merge は待ち行列が詰まったときだけ起きる
+  （`overlay.ts:1393`）ので tts2 では稀のはずですが、実クリップでは分かりません。多ければ「段をまたぐ merge を
+  禁じる」（`cue-queue.ts:56-59` に `rung` の一致を足す）を別件で測ります。表示の都合を計測の都合で変えることに
+  なるので、本設計では選びません。
+- **表示リセット後の id の振り直し**（`overlay.ts:532`・確信度: 中）。同じ id が離れた時刻に現れる経路が
+  あるかは実装時に `pages` で確かめます（§5-2）。
 - **共起による候補抽出の偽陽性率**（§3・確信度: 低）。台本 1 本だと「宇宙望遠鏡」が Roman の候補に
   混ざります。台本が増えれば消える種類の誤りですが、増えるまでは候補票を人が読む前提です。
 - **occlusion の恒久策**（§4-7）は未測です。`muted` を外すと機械で音が鳴る。別スパイクにします。
