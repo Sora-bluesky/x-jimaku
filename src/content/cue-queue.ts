@@ -1,6 +1,7 @@
 export interface CueQueueEntry {
   readonly cueId: string;
   readonly units: number;
+  readonly fallback?: boolean;
 }
 
 export interface CueQueueConstants {
@@ -26,6 +27,7 @@ export function decideCueQueueDiscipline(
     (cue): CueQueueEntry => ({
       cueId: cue.cueId,
       units: cue.units,
+      fallback: cue.fallback,
     }),
   );
   const mergeIndices: number[] = [];
@@ -51,6 +53,12 @@ export function decideCueQueueDiscipline(
         continue;
       }
 
+      if (
+        left.fallback !== right.fallback
+      ) {
+        continue;
+      }
+
       const combinedUnits =
         left.units +
         constants.mergeSeparatorUnits +
@@ -70,6 +78,7 @@ export function decideCueQueueDiscipline(
           cueId:
             `${left.cueId}+${right.cueId}`,
           units: combinedUnits,
+          fallback: left.fallback,
         },
       );
       mergeIndex = index;

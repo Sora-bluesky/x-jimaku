@@ -78,6 +78,7 @@ function applyDecision(
           left.units +
           MERGE_SEPARATOR_UNITS +
           right.units,
+        fallback: left.fallback,
       },
     );
   }
@@ -289,6 +290,39 @@ describe("cue queue discipline", () => {
 
     expect(applied.droppedCueIds).toEqual([
       "line:0",
+    ]);
+    expect(queue).toHaveLength(6);
+  });
+
+  it("does not merge different fallback kinds", () => {
+    const queue: CueQueueEntry[] =
+      Array.from(
+        { length: 7 },
+        (_, index): CueQueueEntry => ({
+          cueId: `cue:${index}`,
+          units: 1,
+          fallback: index % 2 === 0,
+        }),
+      );
+    const decision =
+      decideCueQueueDiscipline(
+        queue,
+        false,
+        QUEUE_CONSTANTS,
+      );
+
+    expect(decision.mergeIndices).toEqual(
+      [],
+    );
+    expect(decision.dropCount).toBe(1);
+
+    const applied = applyDecision(
+      queue,
+      decision,
+    );
+
+    expect(applied.droppedCueIds).toEqual([
+      "cue:0",
     ]);
     expect(queue).toHaveLength(6);
   });

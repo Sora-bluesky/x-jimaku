@@ -1,4 +1,7 @@
 import {
+  execFileSync,
+} from "node:child_process";
+import {
   copyFile,
   mkdir,
   readFile,
@@ -14,6 +17,9 @@ import {
   defineConfig,
   type Plugin,
 } from "vite";
+import {
+  stampManifest,
+} from "./src/build/manifest";
 
 const projectRoot = fileURLToPath(
   new URL(".", import.meta.url),
@@ -136,17 +142,66 @@ function finalizeDist(): Plugin {
       await mkdir(outDir, {
         recursive: true,
       });
-      await copyFile(
+      const manifestSource = await readFile(
         resolve(
           projectRoot,
           "public/manifest.json",
         ),
+        "utf8",
+      );
+      await writeFile(
         resolve(outDir, "manifest.json"),
+        stampManifest(manifestSource, {
+          ...getGitBuildState(),
+          builtAt: new Date(),
+        }),
+        "utf8",
       );
 
       await copyOnnxRuntimeAssets(outDir);
     },
   };
+}
+
+function runGit(...args: string[]): string {
+  return execFileSync("git", args, {
+    cwd: projectRoot,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "ignore"],
+  });
+}
+
+function getGitBuildState(): {
+  revision: string;
+  dirty: boolean;
+} {
+  try {
+    const revision = runGit(
+      "rev-parse",
+      "--short",
+      "HEAD",
+    ).trim();
+
+    if (revision === "") {
+      throw new Error(
+        "git returned an empty revision",
+      );
+    }
+
+    return {
+      revision,
+      dirty:
+        runGit(
+          "status",
+          "--porcelain",
+        ).length > 0,
+    };
+  } catch {
+    return {
+      revision: "git-unavailable",
+      dirty: false,
+    };
+  }
 }
 
 async function findEmittedHtml(

@@ -166,4 +166,65 @@ describe("drain message compatibility", () => {
       }),
     ).toBe(true);
   });
+
+  it("A-6-4(b'''') validates fallback at the recognition boundary", () => {
+    const base = {
+      t: "OFF_RECOG",
+      id: 1,
+      text: "fallback",
+      final: true,
+      at: "2026-09-02T00:00:00.000Z",
+    };
+
+    expect(
+      isM1Message({
+        ...base,
+        fallback: true,
+      }),
+    ).toBe(true);
+    expect(isM1Message(base)).toBe(true);
+    expect(
+      isM1Message({
+        ...base,
+        fallback: "yes",
+      }),
+    ).toBe(false);
+  });
+});
+
+describe("OFF_DEV_LOG placeholder-survival", () => {
+  const survival = {
+    t: "OFF_DEV_LOG",
+    level: "info",
+    tag: "translate",
+    message: "placeholder survival",
+    data: {
+      kind: "placeholder-survival",
+      requestId: "request-1",
+      lineId: 1,
+      path: "language-model",
+      sent: 2,
+      returned: 1,
+    },
+  };
+
+  it("accepts a survival record", () => {
+    expect(isM1Message(survival)).toBe(
+      true,
+    );
+  });
+
+  it("rejects a survival record without counts", () => {
+    expect(
+      isM1Message({
+        ...survival,
+        data: {
+          kind: "placeholder-survival",
+          requestId: "request-1",
+          lineId: 1,
+          path: "language-model",
+        },
+      }),
+    ).toBe(false);
+  });
 });

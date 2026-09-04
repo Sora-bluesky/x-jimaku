@@ -7,6 +7,7 @@ export default defineConfig({
     environment: "node",
     include: [
       "src/**/*.test.ts",
+      "bench/**/*.test.mjs",
     ],
   },
 });

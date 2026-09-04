@@ -1,4 +1,9 @@
+import {
+  LANGUAGE_MODEL_PROMPT_TIMEOUT_MS,
+  TRANSLATION_DEADLINE_MS,
+} from "../shared/translation-timing";
 import type {
+  ClauseTimingOutcome,
   OffDevLogData,
   OffDevLogMessage,
   RecognitionPayload,
@@ -12,6 +17,14 @@ import type {
   MaskedTranslationLine,
 } from "./term-masking";
 import {
+  KEEP_LATIN_ALL_TERMS,
+  allowKeepLatinMaskOccurrence,
+  glossaryPromptBlocks,
+  keepLatinEntriesForTerms,
+  selectGlossaryMatches,
+} from "./glossary";
+import {
+  countIntactPlaceholders,
   createMaskPlan,
   remaskPlannedTerms,
   restoreMaskedTranslation,
@@ -54,6 +67,53 @@ interface TranslationAttemptResult {
   recordHistory: boolean;
 }
 
+interface QueuedTranslation
+  extends TranslationQueueEntry {
+  deadlineAt: number;
+}
+
+interface ClauseTimingState {
+  enqueuedAt: number;
+  path: TranslationPath;
+  modelCallMs: number;
+  modelCallStartedAt: number | null;
+}
+
+interface TranslationAttempt {
+  kind: "clause";
+  generation: number;
+  line: QueuedTranslation;
+  timeoutId:
+    | ReturnType<typeof globalThis.setTimeout>
+    | null;
+  stale: boolean;
+}
+
+interface TranslationPreparationAttempt {
+  kind: "preparation";
+}
+
+type PathSelectionAttempt =
+  | TranslationAttempt
+  | TranslationPreparationAttempt;
+
+type TranslationInitialization =
+  | {
+      status: "idle";
+    }
+  | {
+      status: "preparing";
+      attempt: TranslationPreparationAttempt;
+      promise: Promise<void>;
+    }
+  | {
+      status: "settled";
+      promise: Promise<void>;
+    }
+  | {
+      status: "cancelled";
+    };
+
 type TranslationDevLogEvent =
   Omit<
     OffDevLogMessage,
@@ -87,6 +147,7 @@ export interface TranslationEngineOptions {
     line: RecognitionPayload,
     ja: string,
   ): void;
+  onSettled?(ids: number[]): void;
   onPathChanged(path: TranslationPath): void;
   onDevLog?(
     message: OffDevLogMessage,
@@ -114,8 +175,10 @@ const TRANSLATION_SYSTEM_PROMPT =
 const MAX_PENDING_TRANSLATIONS = 2;
 export const TRANSLATOR_CREATE_TIMEOUT_MS =
   8_000;
-const LANGUAGE_MODEL_PROMPT_TIMEOUT_MS =
-  10_000;
+export {
+  LANGUAGE_MODEL_PROMPT_TIMEOUT_MS,
+  TRANSLATION_DEADLINE_MS,
+};
 const LANGUAGE_MODEL_SLOW_THRESHOLD_MS =
   3_000;
 const LANGUAGE_MODEL_LATENCY_WINDOW = 5;
@@ -125,9 +188,13 @@ export class TranslationEngine {
   private readonly options:
     TranslationEngineOptions;
   private readonly queue:
-    TranslationQueueEntry[] = [];
+    QueuedTranslation[] = [];
   private readonly failedPaths =
     new Set<TranslationPath>();
+  private readonly terminalIds =
+    new Set<number>();
+  private readonly clauseTimings =
+    new Map<number, ClauseTimingState>();
   private readonly recentHistory:
     TranslationPair[] = [];
   private readonly languageModelSlowSamples:
@@ -151,9 +218,14 @@ export class TranslationEngine {
   private languageModelCreateAttempted = false;
   private processing = false;
   private destroyed = false;
-  private initializationPromise:
-    | Promise<void>
+  private generation = 0;
+  private activeAttempt:
+    | TranslationAttempt
     | null = null;
+  private initialization:
+    TranslationInitialization = {
+      status: "idle",
+    };
 
   constructor(
     options: TranslationEngineOptions,
@@ -162,26 +234,65 @@ export class TranslationEngine {
   }
 
   initialize(): Promise<void> {
-    if (this.destroyed) {
+    const initialization =
+      this.initialization;
+
+    if (
+      initialization.status ===
+        "preparing" ||
+      initialization.status === "settled"
+    ) {
+      return initialization.promise;
+    }
+
+    if (
+      this.destroyed ||
+      initialization.status === "cancelled"
+    ) {
       return Promise.resolve();
     }
 
-    if (this.initializationPromise !== null) {
-      return this.initializationPromise;
+    if (this.path !== null) {
+      const promise = Promise.resolve();
+
+      this.initialization = {
+        status: "settled",
+        promise,
+      };
+      return promise;
     }
 
-    const operation =
-      this.selectBestPath().finally(() => {
-        if (
-          this.initializationPromise ===
-          operation
-        ) {
-          this.initializationPromise = null;
-        }
-      });
+    const attempt:
+      TranslationPreparationAttempt = {
+        kind: "preparation",
+      };
+    const promise: Promise<void> =
+      Promise.resolve()
+        .then(() =>
+          this.selectBestPath(attempt)
+        )
+        .finally(() => {
+          const current =
+            this.initialization;
 
-    this.initializationPromise = operation;
-    return operation;
+          if (
+            current.status ===
+              "preparing" &&
+            current.attempt === attempt
+          ) {
+            this.initialization = {
+              status: "settled",
+              promise: current.promise,
+            };
+          }
+        });
+
+    this.initialization = {
+      status: "preparing",
+      attempt,
+      promise,
+    };
+    return promise;
   }
 
   enqueue(
@@ -195,11 +306,21 @@ export class TranslationEngine {
       this.destroyed ||
       !line.final ||
       line.text.trim() === "" ||
-      (
-        this.path === "none" &&
-        !skipTranslation
-      )
+      this.terminalIds.has(line.id)
     ) {
+      return;
+    }
+
+    this.beginClauseTiming(
+      line.id,
+      performance.now(),
+    );
+
+    if (
+      this.path === "none" &&
+      !skipTranslation
+    ) {
+      this.settleIds([line.id]);
       return;
     }
 
@@ -215,6 +336,7 @@ export class TranslationEngine {
       const dropped = this.queue.shift();
 
       if (dropped !== undefined) {
+        this.settleIds([dropped.id]);
         console.warn(
           `[translate] dropped oldest pending committed clause (id=${dropped.id}, textLength=${dropped.text.length})`,
         );
@@ -235,6 +357,9 @@ export class TranslationEngine {
       ...line,
       final: true,
       skipTranslation,
+      deadlineAt:
+        performance.now() +
+        TRANSLATION_DEADLINE_MS,
     });
     this.runQueue();
   }
@@ -270,8 +395,28 @@ export class TranslationEngine {
       return;
     }
 
+    const pendingIds = [
+      ...(this.activeAttempt === null
+        ? []
+        : [this.activeAttempt.line.id]),
+      ...this.queue.map((line) => line.id),
+    ];
+
+    if (this.activeAttempt !== null) {
+      this.activeAttempt.stale = true;
+      this.clearAttemptDeadline(
+        this.activeAttempt,
+      );
+    }
+
     this.destroyed = true;
+    this.initialization = {
+      status: "cancelled",
+    };
+    this.activeAttempt = null;
+    this.processing = false;
     this.queue.splice(0, this.queue.length);
+    this.settleIds(pendingIds);
     this.recentHistory.splice(
       0,
       this.recentHistory.length,
@@ -300,30 +445,69 @@ export class TranslationEngine {
       return;
     }
 
-    if (
-      next.skipTranslation !== true &&
-      (
-        this.path === null ||
-        this.path === "none"
-      )
-    ) {
-      return;
-    }
-
     const line = this.queue.shift();
 
     if (line === undefined) {
       return;
     }
 
+    const attempt: TranslationAttempt = {
+      kind: "clause",
+      generation: ++this.generation,
+      line,
+      timeoutId: null,
+      stale: false,
+    };
+
     this.processing = true;
-    void this.processClause(line);
+    this.activeAttempt = attempt;
+    attempt.timeoutId =
+      globalThis.setTimeout(
+        () => this.expireAttempt(attempt),
+        Math.ceil(
+          Math.max(
+            0,
+            line.deadlineAt -
+              performance.now(),
+          ),
+        ),
+      );
+    void this.processClause(attempt);
   }
 
   private async processClause(
-    line: TranslationQueueEntry,
+    attempt: TranslationAttempt,
   ): Promise<void> {
+    const { line } = attempt;
+
     try {
+      if (line.skipTranslation !== true) {
+        const initialization =
+          this.initialization;
+
+        if (
+          this.path === null &&
+          initialization.status ===
+            "preparing"
+        ) {
+          await initialization.promise.catch(
+            () => undefined,
+          );
+        }
+
+        if (!this.isAttemptCurrent(attempt)) {
+          return;
+        }
+
+        if (this.path === null) {
+          await this.selectBestPath(attempt);
+        }
+      }
+
+      if (!this.isAttemptCurrent(attempt)) {
+        return;
+      }
+
       const result =
         line.skipTranslation === true
           ? {
@@ -332,11 +516,25 @@ export class TranslationEngine {
             }
           : await this.translateWithFallback(
               line,
+              attempt,
             );
 
+      if (!this.isAttemptCurrent(attempt)) {
+        return;
+      }
+
+      if (result === null) {
+        this.settleIds([line.id]);
+        return;
+      }
+
       if (
-        this.destroyed ||
-        result === null
+        !this.markTerminal(
+          line.id,
+          result.recordHistory
+            ? "translated"
+            : "fallback",
+        )
       ) {
         return;
       }
@@ -348,33 +546,290 @@ export class TranslationEngine {
         );
       }
 
+      // An exhausted rescue hands back the English original. The display
+      // decides how a later revision relates to what is on screen from this
+      // flag, and without it an English line looks like a finished
+      // translation: the revision cannot remove it as a prefix and the
+      // content shows twice.
       this.options.onTranslated(
-        line,
+        result.recordHistory
+          ? line
+          : { ...line, fallback: true },
         result.ja,
       );
     } finally {
+      if (!this.isAttemptCurrent(attempt)) {
+        return;
+      }
+
+      attempt.stale = true;
+      this.clearAttemptDeadline(attempt);
+      this.activeAttempt = null;
       this.processing = false;
       this.runQueue();
       this.resolveDrainWaitersIfIdle();
     }
   }
 
+  private expireAttempt(
+    attempt: TranslationAttempt,
+  ): void {
+    if (!this.isAttemptCurrent(attempt)) {
+      return;
+    }
+
+    const clone = this.languageModelClone;
+    this.languageModelClone = null;
+
+    if (clone !== null) {
+      destroyLanguageModelSession(
+        clone,
+        "LanguageModel clone",
+      );
+    }
+
+    attempt.stale = true;
+    this.clearAttemptDeadline(attempt);
+    this.activeAttempt = null;
+    this.processing = false;
+    this.settleIds(
+      [attempt.line.id],
+      true,
+    );
+    this.runQueue();
+    this.resolveDrainWaitersIfIdle();
+  }
+
+  private isAttemptCurrent(
+    attempt: PathSelectionAttempt,
+  ): boolean {
+    if (attempt.kind === "preparation") {
+      const initialization =
+        this.initialization;
+
+      return (
+        !this.destroyed &&
+        initialization.status ===
+          "preparing" &&
+        initialization.attempt === attempt
+      );
+    }
+
+    return (
+      !this.destroyed &&
+      !attempt.stale &&
+      this.processing &&
+      this.activeAttempt === attempt &&
+      this.generation ===
+        attempt.generation
+    );
+  }
+
+  private assertAttemptCurrent(
+    attempt: TranslationAttempt,
+  ): void {
+    if (this.isAttemptCurrent(attempt)) {
+      return;
+    }
+
+    throw new DOMException(
+      "Translation attempt expired",
+      "AbortError",
+    );
+  }
+
+  private clearAttemptDeadline(
+    attempt: TranslationAttempt,
+  ): void {
+    if (attempt.timeoutId === null) {
+      return;
+    }
+
+    globalThis.clearTimeout(
+      attempt.timeoutId,
+    );
+    attempt.timeoutId = null;
+  }
+
+  private beginClauseTiming(
+    lineId: number,
+    enqueuedAt: number,
+  ): void {
+    if (
+      this.options.requestId === undefined ||
+      this.options.onDevLog === undefined
+    ) {
+      return;
+    }
+
+    this.clauseTimings.set(lineId, {
+      enqueuedAt,
+      path: "none",
+      modelCallMs: 0,
+      modelCallStartedAt: null,
+    });
+  }
+
+  private setClauseTimingPath(
+    lineId: number,
+    path: TranslationPath,
+  ): void {
+    const timing =
+      this.clauseTimings.get(lineId);
+
+    if (timing !== undefined) {
+      timing.path = path;
+    }
+  }
+
+  private async measureModelCall<TResult>(
+    lineId: number,
+    path: TranslationPath,
+    operation: () => TResult,
+  ): Promise<Awaited<TResult>> {
+    const timing =
+      this.clauseTimings.get(lineId);
+
+    if (timing === undefined) {
+      return await operation();
+    }
+
+    const startedAt = performance.now();
+
+    timing.path = path;
+    timing.modelCallStartedAt = startedAt;
+
+    try {
+      return await operation();
+    } finally {
+      timing.modelCallMs += Math.max(
+        0,
+        performance.now() - startedAt,
+      );
+
+      if (
+        timing.modelCallStartedAt ===
+        startedAt
+      ) {
+        timing.modelCallStartedAt = null;
+      }
+    }
+  }
+
+  private emitClauseTiming(
+    lineId: number,
+    outcome: ClauseTimingOutcome,
+    deadlineExpired: boolean,
+  ): void {
+    const timing =
+      this.clauseTimings.get(lineId);
+
+    if (timing === undefined) {
+      return;
+    }
+
+    const terminalAt = performance.now();
+    const activeModelCallMs =
+      timing.modelCallStartedAt === null
+        ? 0
+        : Math.max(
+            0,
+            terminalAt -
+              timing.modelCallStartedAt,
+          );
+
+    this.emitDevLog({
+      level: "info",
+      tag: "translate",
+      message:
+        "translation clause reached terminal state",
+      data: {
+        kind: "clause-timing",
+        lineId,
+        path: timing.path,
+        outcome,
+        enqueueToTerminalMs: Math.round(
+          Math.max(
+            0,
+            terminalAt - timing.enqueuedAt,
+          ),
+        ),
+        modelCallMs: Math.round(
+          timing.modelCallMs +
+            activeModelCallMs,
+        ),
+        deadlineExpired,
+      },
+    });
+    this.clauseTimings.delete(lineId);
+  }
+
+  private markTerminal(
+    id: number,
+    outcome: ClauseTimingOutcome,
+    deadlineExpired = false,
+  ): boolean {
+    if (this.terminalIds.has(id)) {
+      return false;
+    }
+
+    this.terminalIds.add(id);
+    this.emitClauseTiming(
+      id,
+      outcome,
+      deadlineExpired,
+    );
+    return true;
+  }
+
+  private settleIds(
+    ids: readonly number[],
+    deadlineExpired = false,
+  ): void {
+    const settled = [...new Set(ids)]
+      .sort((left, right) => left - right)
+      .filter((id) =>
+        this.markTerminal(
+          id,
+          "fallback",
+          deadlineExpired,
+        )
+      );
+
+    if (settled.length > 0) {
+      this.options.onSettled?.(settled);
+    }
+  }
+
   private async translateWithFallback(
     line: TranslationQueueEntry,
+    attempt: TranslationAttempt,
   ): Promise<TranslationAttemptResult | null> {
     const context = this.readContext();
     const request = createMaskPlan(
       line.text,
       context.properNouns,
+      KEEP_LATIN_ALL_TERMS,
+      (hit) =>
+        allowKeepLatinMaskOccurrence(
+          line.text,
+          hit,
+          context.properNouns,
+        ),
     );
 
     while (
-      !this.destroyed &&
+      this.isAttemptCurrent(attempt) &&
       this.path !== null &&
       this.path !== "none"
     ) {
       const attemptedPath = this.path;
       const startedAt = performance.now();
+
+      this.setClauseTimingPath(
+        line.id,
+        attemptedPath,
+      );
 
       try {
         const result =
@@ -383,7 +838,13 @@ export class TranslationEngine {
             request,
             context,
             line.id,
+            attempt,
           );
+
+        if (!this.isAttemptCurrent(attempt)) {
+          return null;
+        }
+
         const normalized = result.ja.trim();
 
         if (normalized === "") {
@@ -397,7 +858,7 @@ export class TranslationEngine {
           ja: normalized,
         };
       } catch (error) {
-        if (this.destroyed) {
+        if (!this.isAttemptCurrent(attempt)) {
           return null;
         }
 
@@ -410,9 +871,16 @@ export class TranslationEngine {
           },
         );
 
-        this.failPath(attemptedPath);
-        await this.selectBestPath();
+        this.failPath(
+          attemptedPath,
+          attempt,
+        );
+        await this.selectBestPath(attempt);
       } finally {
+        if (!this.isAttemptCurrent(attempt)) {
+          continue;
+        }
+
         console.info(
           "[translate] latency",
           {
@@ -434,6 +902,7 @@ export class TranslationEngine {
     request: MaskedTranslationLine,
     context: TranslationContext,
     lineId: number,
+    attempt: TranslationAttempt,
   ): Promise<TranslationAttemptResult> {
     switch (path) {
       case "offscreen-translator":
@@ -441,18 +910,26 @@ export class TranslationEngine {
           return this.rescueLanguageModelLine(
             request,
             lineId,
+            attempt,
           );
         }
 
-        if (this.translator === null) {
+        const translator = this.translator;
+
+        if (translator === null) {
           throw new Error(
             "Offscreen Translator is not initialized",
           );
         }
 
         return {
-          ja: await this.translator.translate(
-            request.original,
+          ja: await this.measureModelCall(
+            lineId,
+            path,
+            () =>
+              translator.translate(
+                request.original,
+              ),
           ),
           recordHistory: true,
         };
@@ -462,14 +939,20 @@ export class TranslationEngine {
           return this.rescueLanguageModelLine(
             request,
             lineId,
+            attempt,
           );
         }
 
         const response =
-          await this.options
-            .requestContentTranslation(
-              request.original,
-            );
+          await this.measureModelCall(
+            lineId,
+            path,
+            () =>
+              this.options
+                .requestContentTranslation(
+                  request.original,
+                ),
+          );
 
         if (!response.available) {
           throw new Error(
@@ -488,6 +971,7 @@ export class TranslationEngine {
           request,
           context,
           lineId,
+          attempt,
         );
 
       case "none":
@@ -501,6 +985,7 @@ export class TranslationEngine {
     request: MaskedTranslationLine,
     context: TranslationContext,
     lineId: number,
+    attempt: TranslationAttempt,
   ): Promise<TranslationAttemptResult> {
     const prompt = createTranslationPrompt(
       request.masked,
@@ -514,17 +999,20 @@ export class TranslationEngine {
       rawResponse =
         await this.promptLanguageModel(
           prompt,
+          attempt,
         );
+      this.assertAttemptCurrent(attempt);
     } catch (error) {
       const elapsedMs =
         performance.now() - startedAt;
 
       await this.observeLanguageModelLatency(
         elapsedMs,
+        attempt,
       );
+      this.assertAttemptCurrent(attempt);
 
       if (
-        !this.destroyed &&
         isTimeoutError(error)
       ) {
         console.warn(
@@ -535,6 +1023,7 @@ export class TranslationEngine {
         return this.rescueLanguageModelLine(
           request,
           lineId,
+          attempt,
         );
       }
 
@@ -543,12 +1032,21 @@ export class TranslationEngine {
 
     await this.observeLanguageModelLatency(
       performance.now() - startedAt,
+      attempt,
     );
+    this.assertAttemptCurrent(attempt);
 
     const normalized =
       normalizeLanguageModelResponse(
         rawResponse,
       );
+    this.recordPlaceholderSurvival(
+      normalized,
+      request,
+      lineId,
+      "language-model",
+      attempt,
+    );
     const restored =
       restoreMaskedTranslation(
         normalized,
@@ -569,6 +1067,7 @@ export class TranslationEngine {
       return this.rescueLanguageModelLine(
         request,
         lineId,
+        attempt,
       );
     }
 
@@ -576,7 +1075,14 @@ export class TranslationEngine {
       isBadLanguageModelResponse(
         restored,
         request.original,
-        context.properNouns,
+        [
+          ...context.properNouns,
+          ...(
+            request.maskPlan?.entries.map(
+              (entry) => entry.term,
+            ) ?? []
+          ),
+        ],
       )
     ) {
       console.info(
@@ -592,6 +1098,7 @@ export class TranslationEngine {
       return this.rescueLanguageModelLine(
         request,
         lineId,
+        attempt,
       );
     }
 
@@ -603,14 +1110,16 @@ export class TranslationEngine {
 
   private async promptLanguageModel(
     prompt: string,
+    attempt: TranslationAttempt,
   ): Promise<string> {
     try {
       return await this.promptLanguageModelOnce(
         prompt,
+        attempt,
       );
     } catch (error) {
       if (
-        this.destroyed ||
+        !this.isAttemptCurrent(attempt) ||
         isTimeoutError(error)
       ) {
         throw error;
@@ -623,7 +1132,9 @@ export class TranslationEngine {
       );
 
       const recreated =
-        await this.recreateLanguageModel();
+        await this.recreateLanguageModel(
+          attempt,
+        );
 
       if (!recreated) {
         throw error;
@@ -631,12 +1142,14 @@ export class TranslationEngine {
 
       return this.promptLanguageModelOnce(
         prompt,
+        attempt,
       );
     }
   }
 
   private async promptLanguageModelOnce(
     prompt: string,
+    attempt: TranslationAttempt,
   ): Promise<string> {
     const base = this.languageModel;
 
@@ -648,30 +1161,33 @@ export class TranslationEngine {
 
     const clone = await base.clone();
 
-    if (this.destroyed) {
+    if (!this.isAttemptCurrent(attempt)) {
       destroyLanguageModelSession(
         clone,
         "LanguageModel clone",
       );
-      throw new DOMException(
-        "Translation session was stopped",
-        "AbortError",
-      );
+      this.assertAttemptCurrent(attempt);
     }
 
     this.languageModelClone = clone;
 
     try {
-      return await clone.prompt(
-        prompt,
-        {
-          signal: AbortSignal.timeout(
-            LANGUAGE_MODEL_PROMPT_TIMEOUT_MS,
+      return await this.measureModelCall(
+        attempt.line.id,
+        "language-model",
+        () =>
+          clone.prompt(
+            prompt,
+            {
+              signal: AbortSignal.timeout(
+                LANGUAGE_MODEL_PROMPT_TIMEOUT_MS,
+              ),
+            },
           ),
-        },
       );
     } finally {
       if (
+        this.isAttemptCurrent(attempt) &&
         this.languageModelClone === clone
       ) {
         this.languageModelClone = null;
@@ -683,20 +1199,30 @@ export class TranslationEngine {
     }
   }
 
-  private async recreateLanguageModel(): Promise<boolean> {
-    this.destroyLanguageModel();
+  private async recreateLanguageModel(
+    attempt: TranslationAttempt,
+  ): Promise<boolean> {
+    this.assertAttemptCurrent(attempt);
+    this.destroyLanguageModel(attempt);
     this.languageModelCreateAttempted =
       false;
     this.failedPaths.delete(
       "language-model",
     );
 
-    return this.prepareLanguageModel();
+    return this.prepareLanguageModel(
+      attempt,
+    );
   }
 
   private async observeLanguageModelLatency(
     elapsedMs: number,
+    attempt: TranslationAttempt,
   ): Promise<void> {
+    if (!this.isAttemptCurrent(attempt)) {
+      return;
+    }
+
     this.languageModelSlowSamples.push(
       elapsedMs >
         LANGUAGE_MODEL_SLOW_THRESHOLD_MS,
@@ -715,7 +1241,7 @@ export class TranslationEngine {
       ).length;
 
     if (
-      this.destroyed ||
+      !this.isAttemptCurrent(attempt) ||
       this.languageModelSlowSamples.length <
         LANGUAGE_MODEL_LATENCY_WINDOW ||
       this.failedPaths.has(
@@ -738,20 +1264,92 @@ export class TranslationEngine {
       },
     );
 
-    this.failPath("language-model");
-    await this.selectBestPath();
+    this.failPath(
+      "language-model",
+      attempt,
+    );
+    await this.selectBestPath(attempt);
   }
 
   private async rescueLanguageModelLine(
     request: MaskedTranslationLine,
     lineId: number,
+    attempt: TranslationAttempt,
   ): Promise<TranslationAttemptResult> {
+    const rescued =
+      await this.tryTranslatorRescue(
+        request,
+        lineId,
+        attempt,
+      );
+
+    if (rescued !== null) {
+      return rescued;
+    }
+
+    this.assertAttemptCurrent(attempt);
+
+    if (request.maskPlan !== null) {
+      const unmaskedRescued =
+        await this.tryTranslatorRescue(
+          {
+            original: request.original,
+            masked: request.original,
+            maskPlan: null,
+          },
+          lineId,
+          attempt,
+        );
+
+      if (unmaskedRescued !== null) {
+        return unmaskedRescued;
+      }
+
+      const unmaskedLanguageModel =
+        await this.tryUnmaskedLanguageModel(
+          request,
+          attempt,
+        );
+
+      if (unmaskedLanguageModel !== null) {
+        return unmaskedLanguageModel;
+      }
+    }
+
+    this.assertAttemptCurrent(attempt);
+    this.emitDevLog(
+      {
+        level: "info",
+        tag: "translate",
+        message:
+          "Translator line rescue exhausted; passing through original",
+        data: {
+          kind: "passthrough",
+          lineId,
+        },
+      },
+      attempt,
+    );
+
+    return {
+      ja: request.original,
+      recordHistory: false,
+    };
+  }
+
+  private async tryTranslatorRescue(
+    request: MaskedTranslationLine,
+    lineId: number,
+    attempt: TranslationAttempt,
+  ): Promise<TranslationAttemptResult | null> {
     for (
       const rescuePath of [
         "offscreen-translator",
         "content-translator",
       ] as const
     ) {
+      this.assertAttemptCurrent(attempt);
+
       if (this.failedPaths.has(rescuePath)) {
         continue;
       }
@@ -760,24 +1358,39 @@ export class TranslationEngine {
         rescuePath ===
         "offscreen-translator"
           ? await this
-              .prepareOffscreenTranslator()
+              .prepareOffscreenTranslator(
+                attempt,
+              )
           : await this
-              .prepareContentTranslator();
+              .prepareContentTranslator(
+                attempt,
+              );
 
-      if (!prepared || this.destroyed) {
+      this.assertAttemptCurrent(attempt);
+
+      if (!prepared) {
         continue;
       }
 
       try {
         const result =
-          rescuePath ===
-          "offscreen-translator"
-            ? await this.translator
-                ?.translate(request.masked)
-            : await this.options
-                .requestContentTranslation(
-                  request.masked,
-                );
+          await this.measureModelCall(
+            lineId,
+            rescuePath,
+            () =>
+              rescuePath ===
+              "offscreen-translator"
+                ? this.translator
+                    ?.translate(
+                      request.masked,
+                    )
+                : this.options
+                    .requestContentTranslation(
+                      request.masked,
+                    ),
+          );
+
+        this.assertAttemptCurrent(attempt);
 
         if (result === undefined) {
           throw new Error(
@@ -801,6 +1414,14 @@ export class TranslationEngine {
               : result.ja
           ).trim();
 
+        this.recordPlaceholderSurvival(
+          ja,
+          request,
+          lineId,
+          rescuePath,
+          attempt,
+        );
+
         if (ja === "") {
           throw new Error(
             "Translator rescue returned an empty result",
@@ -822,6 +1443,8 @@ export class TranslationEngine {
           recordHistory: true,
         };
       } catch (error) {
+        this.assertAttemptCurrent(attempt);
+
         console.warn(
           "[translate]",
           "Translator line rescue failed",
@@ -830,17 +1453,20 @@ export class TranslationEngine {
             error,
           },
         );
-        this.emitDevLog({
-          level: "warn",
-          tag: "translate",
-          message:
-            "Translator line rescue failed",
-          data: {
-            kind: "rescue-failure",
-            lineId,
-            path: rescuePath,
+        this.emitDevLog(
+          {
+            level: "warn",
+            tag: "translate",
+            message:
+              "Translator line rescue failed",
+            data: {
+              kind: "rescue-failure",
+              lineId,
+              path: rescuePath,
+            },
           },
-        });
+          attempt,
+        );
 
         if (
           error instanceof
@@ -851,34 +1477,127 @@ export class TranslationEngine {
 
         const wasActive =
           this.path === rescuePath;
-        this.failPath(rescuePath);
+        this.failPath(
+          rescuePath,
+          attempt,
+        );
 
         if (wasActive) {
-          await this.selectBestPath();
+          await this.selectBestPath(attempt);
         }
       }
     }
 
-    this.emitDevLog({
-      level: "info",
-      tag: "translate",
-      message:
-        "Translator line rescue exhausted; passing through original",
-      data: {
-        kind: "passthrough",
-        lineId,
-      },
-    });
+    return null;
+  }
 
-    return {
-      ja: request.original,
-      recordHistory: false,
-    };
+  private async tryUnmaskedLanguageModel(
+    request: MaskedTranslationLine,
+    attempt: TranslationAttempt,
+  ): Promise<TranslationAttemptResult | null> {
+    if (this.languageModel === null) {
+      return null;
+    }
+
+    this.assertAttemptCurrent(attempt);
+
+    const context = this.readContext();
+
+    try {
+      const rawResponse =
+        await this.promptLanguageModel(
+          createTranslationPrompt(
+            request.original,
+            context,
+            null,
+            request.maskPlan?.entries.map(
+              (entry) => entry.term,
+            ) ?? [],
+          ),
+          attempt,
+        );
+      this.assertAttemptCurrent(attempt);
+
+      const normalized =
+        normalizeLanguageModelResponse(
+          rawResponse,
+        );
+
+      if (
+        normalized === "" ||
+        normalized.includes("%%") ||
+        isBadLanguageModelResponse(
+          normalized,
+          request.original,
+          [
+            ...context.properNouns,
+            ...(
+              request.maskPlan?.entries.map(
+                (entry) => entry.term,
+              ) ?? []
+            ),
+          ],
+        )
+      ) {
+        return null;
+      }
+
+      return {
+        ja: normalized,
+        recordHistory: true,
+      };
+    } catch {
+      this.assertAttemptCurrent(attempt);
+      return null;
+    }
+  }
+
+  private recordPlaceholderSurvival(
+    output: string,
+    request: MaskedTranslationLine,
+    lineId: number,
+    path: TranslationPath,
+    attempt: TranslationAttempt,
+  ): void {
+    if (request.maskPlan === null) {
+      return;
+    }
+
+    const { sent, returned } =
+      countIntactPlaceholders(
+        output,
+        request.maskPlan,
+      );
+
+    this.emitDevLog(
+      {
+        level: "info",
+        tag: "translate",
+        message:
+          "placeholder survival",
+        data: {
+          kind: "placeholder-survival",
+          lineId,
+          path,
+          sent,
+          returned,
+        },
+      },
+      attempt,
+    );
   }
 
   private emitDevLog(
     event: TranslationDevLogEvent,
+    attempt?: TranslationAttempt,
   ): void {
+    if (
+      attempt !== undefined &&
+      !this.isAttemptCurrent(attempt)
+    ) {
+      return;
+    }
+
     try {
       const requestId =
         this.options.requestId;
@@ -898,12 +1617,8 @@ export class TranslationEngine {
         tag: event.tag,
         message: event.message,
         data: {
-          kind: event.data.kind,
+          ...event.data,
           requestId,
-          lineId: event.data.lineId,
-          ...(event.data.path === undefined
-            ? {}
-            : { path: event.data.path }),
         },
       };
       const pending = onDevLog(message);
@@ -952,8 +1667,10 @@ export class TranslationEngine {
     }
   }
 
-  private async selectBestPath(): Promise<void> {
-    if (this.destroyed) {
+  private async selectBestPath(
+    attempt: PathSelectionAttempt,
+  ): Promise<void> {
+    if (!this.isAttemptCurrent(attempt)) {
       return;
     }
 
@@ -962,50 +1679,106 @@ export class TranslationEngine {
         "prompt-api" &&
       !this.failedPaths.has(
         "language-model",
-      ) &&
-      await this.prepareLanguageModel()
+      )
     ) {
-      this.setPath("language-model");
-      return;
+      const prepared =
+        await this.prepareLanguageModel(
+          attempt,
+        );
+
+      if (!this.isAttemptCurrent(attempt)) {
+        return;
+      }
+
+      if (prepared) {
+        this.setPath(
+          "language-model",
+          attempt,
+        );
+        return;
+      }
     }
 
     if (
       !this.failedPaths.has(
         "offscreen-translator",
-      ) &&
-      await this.prepareOffscreenTranslator()
+      )
     ) {
-      this.setPath(
-        "offscreen-translator",
-      );
-      return;
+      const prepared =
+        await this.prepareOffscreenTranslator(
+          attempt,
+        );
+
+      if (!this.isAttemptCurrent(attempt)) {
+        return;
+      }
+
+      if (prepared) {
+        this.setPath(
+          "offscreen-translator",
+          attempt,
+        );
+        return;
+      }
     }
 
     if (
       !this.failedPaths.has(
         "content-translator",
-      ) &&
-      await this.prepareContentTranslator()
+      )
     ) {
-      this.setPath("content-translator");
-      return;
+      const prepared =
+        await this.prepareContentTranslator(
+          attempt,
+        );
+
+      if (!this.isAttemptCurrent(attempt)) {
+        return;
+      }
+
+      if (prepared) {
+        this.setPath(
+          "content-translator",
+          attempt,
+        );
+        return;
+      }
     }
 
     if (
       this.options.backend === "auto" &&
       !this.failedPaths.has(
         "language-model",
-      ) &&
-      await this.prepareLanguageModel()
+      )
     ) {
-      this.setPath("language-model");
-      return;
+      const prepared =
+        await this.prepareLanguageModel(
+          attempt,
+        );
+
+      if (!this.isAttemptCurrent(attempt)) {
+        return;
+      }
+
+      if (prepared) {
+        this.setPath(
+          "language-model",
+          attempt,
+        );
+        return;
+      }
     }
 
-    this.setPath("none");
+    this.setPath("none", attempt);
   }
 
-  private async prepareOffscreenTranslator(): Promise<boolean> {
+  private async prepareOffscreenTranslator(
+    attempt: PathSelectionAttempt,
+  ): Promise<boolean> {
+    if (!this.isAttemptCurrent(attempt)) {
+      return false;
+    }
+
     if (this.translator !== null) {
       return true;
     }
@@ -1035,7 +1808,7 @@ export class TranslationEngine {
         );
 
       if (
-        this.destroyed ||
+        !this.isAttemptCurrent(attempt) ||
         availability !== "available"
       ) {
         return false;
@@ -1049,12 +1822,21 @@ export class TranslationEngine {
         );
 
       try {
-        this.translator =
+        const translator =
           await waitWithTimeout(
             createPromise,
             TRANSLATOR_CREATE_TIMEOUT_MS,
             "Offscreen Translator creation timed out",
           );
+
+        if (!this.isAttemptCurrent(attempt)) {
+          destroyTranslatorInstance(
+            translator,
+          );
+          return false;
+        }
+
+        this.translator = translator;
       } catch (error) {
         if (
           error instanceof Error &&
@@ -1073,13 +1855,12 @@ export class TranslationEngine {
         throw error;
       }
 
-      if (this.destroyed) {
-        this.destroyTranslator();
+      return true;
+    } catch (error) {
+      if (!this.isAttemptCurrent(attempt)) {
         return false;
       }
 
-      return true;
-    } catch (error) {
       this.translatorCreateAttempted = true;
       this.failedPaths.add(
         "offscreen-translator",
@@ -1094,17 +1875,27 @@ export class TranslationEngine {
     }
   }
 
-  private async prepareContentTranslator(): Promise<boolean> {
+  private async prepareContentTranslator(
+    attempt: PathSelectionAttempt,
+  ): Promise<boolean> {
+    if (!this.isAttemptCurrent(attempt)) {
+      return false;
+    }
+
     try {
       const response =
         await this.options
           .requestContentTranslation("");
 
       return (
-        !this.destroyed &&
+        this.isAttemptCurrent(attempt) &&
         response.available
       );
     } catch (error) {
+      if (!this.isAttemptCurrent(attempt)) {
+        return false;
+      }
+
       this.failedPaths.add(
         "content-translator",
       );
@@ -1118,7 +1909,13 @@ export class TranslationEngine {
     }
   }
 
-  private async prepareLanguageModel(): Promise<boolean> {
+  private async prepareLanguageModel(
+    attempt: PathSelectionAttempt,
+  ): Promise<boolean> {
+    if (!this.isAttemptCurrent(attempt)) {
+      return false;
+    }
+
     if (this.languageModel !== null) {
       return true;
     }
@@ -1149,7 +1946,7 @@ export class TranslationEngine {
         });
 
       if (
-        this.destroyed ||
+        !this.isAttemptCurrent(attempt) ||
         availability !== "available"
       ) {
         return false;
@@ -1157,7 +1954,7 @@ export class TranslationEngine {
 
       this.languageModelCreateAttempted =
         true;
-      this.languageModel =
+      const languageModel =
         await factory.create({
           initialPrompts: [
             {
@@ -1170,13 +1967,21 @@ export class TranslationEngine {
             LANGUAGE_MODEL_EXPECTED_OUTPUTS,
         });
 
-      if (this.destroyed) {
-        this.destroyLanguageModel();
+      if (!this.isAttemptCurrent(attempt)) {
+        destroyLanguageModelSession(
+          languageModel,
+          "LanguageModel",
+        );
         return false;
       }
 
+      this.languageModel = languageModel;
       return true;
     } catch (error) {
+      if (!this.isAttemptCurrent(attempt)) {
+        return false;
+      }
+
       this.languageModelCreateAttempted =
         true;
       this.failedPaths.add(
@@ -1194,15 +1999,20 @@ export class TranslationEngine {
 
   private failPath(
     path: TranslationPath,
+    attempt: TranslationAttempt,
   ): void {
+    if (!this.isAttemptCurrent(attempt)) {
+      return;
+    }
+
     this.failedPaths.add(path);
 
     if (path === "offscreen-translator") {
-      this.destroyTranslator();
+      this.destroyTranslator(attempt);
     }
 
     if (path === "language-model") {
-      this.destroyLanguageModel();
+      this.destroyLanguageModel(attempt);
     }
 
     if (this.path === path) {
@@ -1212,9 +2022,10 @@ export class TranslationEngine {
 
   private setPath(
     path: TranslationPath,
+    attempt: PathSelectionAttempt,
   ): void {
     if (
-      this.destroyed ||
+      !this.isAttemptCurrent(attempt) ||
       this.path === path
     ) {
       return;
@@ -1228,6 +2039,19 @@ export class TranslationEngine {
           (line) =>
             line.skipTranslation === true,
         );
+      const fallbackIds =
+        this.queue
+          .filter(
+            (line) =>
+              line.skipTranslation !== true,
+          )
+          .map((line) => line.id);
+
+      this.settleIds(fallbackIds);
+
+      if (!this.isAttemptCurrent(attempt)) {
+        return;
+      }
 
       this.queue.splice(
         0,
@@ -1285,7 +2109,16 @@ export class TranslationEngine {
     }
   }
 
-  private destroyTranslator(): void {
+  private destroyTranslator(
+    attempt?: TranslationAttempt,
+  ): void {
+    if (
+      attempt !== undefined &&
+      !this.isAttemptCurrent(attempt)
+    ) {
+      return;
+    }
+
     const instance = this.translator;
     this.translator = null;
 
@@ -1296,7 +2129,16 @@ export class TranslationEngine {
     }
   }
 
-  private destroyLanguageModel(): void {
+  private destroyLanguageModel(
+    attempt?: TranslationAttempt,
+  ): void {
+    if (
+      attempt !== undefined &&
+      !this.isAttemptCurrent(attempt)
+    ) {
+      return;
+    }
+
     const clone = this.languageModelClone;
     const session = this.languageModel;
 
@@ -1323,6 +2165,7 @@ function createTranslationPrompt(
   text: string,
   context: TranslationContext,
   maskPlan: MaskPlan | null,
+  unmaskedTerms: readonly string[] = [],
 ): string {
   const blocks: string[] = [];
   const maskedTerms = new Set(
@@ -1352,6 +2195,43 @@ function createTranslationPrompt(
       ].join("\n"),
     );
   }
+
+  const glossaryMatch =
+    selectGlossaryMatches(text);
+  const visibleKeepLatin =
+    glossaryMatch.keepLatin.filter(
+      (entry) =>
+        !maskedTerms.has(entry.term),
+    );
+  const visibleKeepLatinTerms = new Set(
+    visibleKeepLatin.map(
+      (entry) => entry.term,
+    ),
+  );
+  const revealedKeepLatin =
+    maskPlan === null
+      ? keepLatinEntriesForTerms(
+          unmaskedTerms,
+        ).filter(
+          (entry) =>
+            !visibleKeepLatinTerms.has(
+              entry.term,
+            ),
+        )
+      : [];
+  blocks.push(
+    ...glossaryPromptBlocks({
+      keepLatin: [
+        ...visibleKeepLatin,
+        ...revealedKeepLatin,
+      ],
+      glossary:
+        glossaryMatch.glossary.filter(
+          (entry) =>
+            !maskedTerms.has(entry.term),
+        ),
+    }),
+  );
 
   if (context.recentPairs.length > 0) {
     blocks.push(

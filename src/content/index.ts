@@ -1,3 +1,5 @@
+import { createTranslationQueue } from "./translation-queue";
+import { TRANSLATION_DEADLINE_MS } from "../shared/translation-timing";
 import {
   createProbeRequestId,
   getProbeEnvironment,
@@ -10,6 +12,7 @@ import {
   type CsDevToggleMessage,
   type CsDrainCompleteMessage,
   type CsEosMessage,
+  type CsMediaChangedMessage,
   type CsPcmMessage,
   type CsPongMessage,
   type CsTapStateMessage,
@@ -26,6 +29,9 @@ import {
 import {
   DEFAULT_SETTINGS,
 } from "../shared/settings";
+import {
+  createCaptionDisplayLog,
+} from "../shared/caption-display-log";
 import {
   presentCaptionIfAllowed,
 } from "../shared/explicit-stop-drain";
@@ -80,6 +86,7 @@ type BufferedContentMessage =
 type OutboundContentMessage =
   | BufferedContentMessage
   | CsDrainCompleteMessage
+  | CsMediaChangedMessage
   | CsTapStateMessage
   | CsTranslateResultMessage;
 
@@ -92,8 +99,11 @@ const PCM_SEND_DROP_WARN_INTERVAL_MS =
   5_000;
 const ERROR_CHIP_VISIBLE_MS = 2_500;
 const TRANSLATOR_CREATE_WAIT_MS = 8_000;
+const contentManifest =
+  chrome.runtime.getManifest();
 const CONTENT_INSTANCE_VERSION =
-  chrome.runtime.getManifest().version;
+  contentManifest.version_name ??
+  `${contentManifest.version} version_name-missing`;
 
 const CONTEXT_TERM_STOPLIST =
   new Set([
@@ -222,8 +232,16 @@ let lastEosRequestId:
   | null = null;
 let tapOperationTail: Promise<void> =
   Promise.resolve();
-let contentTranslationTail: Promise<void> =
-  Promise.resolve();
+const contentTranslationQueue =
+  createTranslationQueue({
+    deadlineMs: TRANSLATION_DEADLINE_MS,
+    onAbandoned() {
+      console.warn(
+        "[cs]",
+        "content translation abandoned at the deadline; releasing the queue",
+      );
+    },
+  });
 let contentTranslator:
   | TranslatorInstance
   | null = null;
@@ -261,6 +279,10 @@ let activeTranslationPath:
 let activeSilentInputShowHint = false;
 let activeShowOriginal =
   DEFAULT_SETTINGS.showOriginal;
+let activeShowTentative =
+  DEFAULT_SETTINGS.showTentative;
+const captionDisplayLog =
+  createCaptionDisplayLog();
 let playbackEventTarget:
   | HTMLVideoElement
   | null = null;
@@ -411,6 +433,14 @@ export function handleOffscreenDevLog(
     return;
   }
 
+  window.postMessage(
+    {
+      ...message,
+      timestampMs: performance.now(),
+    },
+    DEV_ORIGIN,
+  );
+
   const details =
     message.data === undefined
       ? []
@@ -467,6 +497,16 @@ function installTargetPlaybackListeners():
     true,
   );
   document.addEventListener(
+    "seeked",
+    handleTargetPlaybackEvent,
+    true,
+  );
+  document.addEventListener(
+    "loadstart",
+    handleTargetPlaybackEvent,
+    true,
+  );
+  document.addEventListener(
     "ended",
     handleTargetPlaybackEvent,
     true,
@@ -497,6 +537,14 @@ function handleTargetPlaybackEvent(
 
   if (event.type === "seeking") {
     captionOverlay?.clearPlaybackFreezeOnSeek();
+    return;
+  }
+
+  if (
+    event.type === "seeked" ||
+    event.type === "loadstart"
+  ) {
+    postMediaChanged();
     return;
   }
 
@@ -706,6 +754,21 @@ function connectBackgroundPort(): void {
           ensureOverlay().setTranslationPath(
             message.path,
           );
+
+          // The bench needs to know when a path becomes usable; the only
+          // other signal carrying a path is the rescue-failure log, which
+          // fires when translation has already gone wrong.
+          if (location.origin === DEV_ORIGIN) {
+            window.postMessage(
+              {
+                ...message,
+                timestampMs:
+                  performance.now(),
+              },
+              DEV_ORIGIN,
+            );
+          }
+
           return;
         }
 
@@ -838,6 +901,8 @@ function connectBackgroundPort(): void {
       lastEosRequestId = null;
       activeShowOriginal =
         DEFAULT_SETTINGS.showOriginal;
+      activeShowTentative =
+        DEFAULT_SETTINGS.showTentative;
       contentSessionRequestId = null;
       clearExplicitStopDrainState();
       clearPendingContextTerms();
@@ -1114,6 +1179,8 @@ function beginFullGraceTeardown(
   lastEosRequestId = null;
   activeShowOriginal =
     DEFAULT_SETTINGS.showOriginal;
+  activeShowTentative =
+    DEFAULT_SETTINGS.showTentative;
   contentSessionRequestId = null;
   clearExplicitStopDrainState();
   clearPendingContextTerms();
@@ -1215,6 +1282,9 @@ function handleStartTapMessage(
       activeShowOriginal =
         message.settings?.showOriginal ??
         DEFAULT_SETTINGS.showOriginal;
+      activeShowTentative =
+        message.settings?.showTentative ??
+        DEFAULT_SETTINGS.showTentative;
       beginPcmSendDropSession(
         message.requestId,
       );
@@ -1274,6 +1344,9 @@ function handleStartTapMessage(
       activeShowOriginal =
         message.settings?.showOriginal ??
         DEFAULT_SETTINGS.showOriginal;
+      activeShowTentative =
+        message.settings?.showTentative ??
+        DEFAULT_SETTINGS.showTentative;
       activeCaptureRequestId =
         message.requestId;
       cancelOverlayDestroy();
@@ -1310,6 +1383,9 @@ function handleStartTapMessage(
   activeShowOriginal =
     message.settings?.showOriginal ??
     DEFAULT_SETTINGS.showOriginal;
+  activeShowTentative =
+    message.settings?.showTentative ??
+    DEFAULT_SETTINGS.showTentative;
 
   beginPcmSendDropSession(
     message.requestId,
@@ -1383,6 +1459,9 @@ function prepareFreshTapSession(
   activeShowOriginal =
     message.settings?.showOriginal ??
     DEFAULT_SETTINGS.showOriginal;
+  activeShowTentative =
+    message.settings?.showTentative ??
+    DEFAULT_SETTINGS.showTentative;
   beginPcmSendDropSession(
     message.requestId,
   );
@@ -1457,20 +1536,8 @@ function enqueueTapOperation(
 function enqueueContentTranslation(
   message: CsTranslateMessage,
 ): void {
-  const operation = contentTranslationTail
-    .catch(() => undefined)
-    .then(() =>
-      handleContentTranslation(message),
-    );
-
-  contentTranslationTail = operation.catch(
-    (error: unknown) => {
-      console.error(
-        "[cs]",
-        "content translation operation failed",
-        error,
-      );
-    },
+  contentTranslationQueue.enqueue(() =>
+    handleContentTranslation(message),
   );
 }
 
@@ -1770,8 +1837,7 @@ function resetContentTranslator(): void {
   contentTranslatorGeneration += 1;
   destroyContentTranslator();
   contentTranslatorCreateAttempted = false;
-  contentTranslationTail =
-    Promise.resolve();
+  contentTranslationQueue.reset();
 }
 
 function destroyContentTranslator(): void {
@@ -1927,6 +1993,7 @@ async function startTap(
         return;
       }
 
+      postMediaChanged(requestId);
       refreshSilentInputHint();
     },
 
@@ -2172,7 +2239,7 @@ function clearActiveTap(
   refreshSilentInputHint();
 }
 
-function handleCaptureState(
+export function handleCaptureState(
   state: CaptureState,
   drain = false,
 ): void {
@@ -2270,6 +2337,7 @@ function handleCaptureState(
         clearPendingContextTerms(
           state.requestId,
         );
+        captionOverlay?.beginDrain();
         cancelOverlayDestroy();
         refreshSilentInputHint();
         return;
@@ -2391,6 +2459,7 @@ function postExplicitStopDrainComplete(
   if (postContentMessage(message)) {
     drainCompleteSentRequestId =
       requestId;
+    captionOverlay?.endDrain();
   }
 }
 
@@ -2406,12 +2475,13 @@ function isDrainingRequest(
 
 function clearExplicitStopDrainState():
   void {
+  captionOverlay?.endDrain();
   drainingRequestId = null;
   drainReadyRequestId = null;
   drainCompleteSentRequestId = null;
 }
 
-function ensureOverlay(): CaptionOverlay {
+export function ensureOverlay(): CaptionOverlay {
   if (captionOverlay !== null) {
     syncOverlayPlaybackGate(
       captionOverlay,
@@ -2423,12 +2493,16 @@ function ensureOverlay(): CaptionOverlay {
     getTargetVideo: () =>
       getCurrentAudioTapTarget() ??
       endedAudioTapTarget,
+    buildStamp: CONTENT_INSTANCE_VERSION,
     showOriginal: activeShowOriginal,
+    showTentative: activeShowTentative,
+    displayLog: captionDisplayLog,
     onCaptionFadeOut() {
       if (
         drainReadyRequestId !== null &&
         drainReadyRequestId ===
-          drainingRequestId
+          drainingRequestId &&
+        !overlay.hasPendingCaption()
       ) {
         postExplicitStopDrainComplete(
           drainReadyRequestId,
@@ -2452,6 +2526,11 @@ function ensureOverlay(): CaptionOverlay {
   overlay.setTranslationPath(
     activeTranslationPath,
   );
+
+  if (drainingRequestId !== null) {
+    overlay.beginDrain();
+  }
+
   captionOverlay = overlay;
   refreshSilentInputHint(overlay);
   syncOverlayPlaybackGate(overlay);
@@ -2597,6 +2676,23 @@ function postEndOfStream(
 
   const message: CsEosMessage = {
     t: "CS_EOS",
+    requestId,
+  };
+
+  postContentMessage(message);
+}
+
+function postMediaChanged(
+  requestId: string | null =
+    activeTap?.getRequestId() ??
+    contentSessionRequestId,
+): void {
+  if (requestId === null) {
+    return;
+  }
+
+  const message: CsMediaChangedMessage = {
+    t: "CS_MEDIA_CHANGED",
     requestId,
   };
 

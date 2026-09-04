@@ -11,6 +11,7 @@ import {
   stripBalancedWrappingPair,
   stripCodeFence,
   stripTranslationLabel,
+  TRANSLATION_DEADLINE_MS,
   TRANSLATOR_CREATE_TIMEOUT_MS,
   TranslationEngine,
 } from "./translate";
@@ -18,16 +19,24 @@ import {
 interface Deferred<T> {
   promise: Promise<T>;
   resolve(value: T): void;
+  reject(error: unknown): void;
 }
 
 function createDeferred<T>(): Deferred<T> {
   let resolve:
     | ((value: T) => void)
     | undefined;
+  let reject:
+    | ((error: unknown) => void)
+    | undefined;
 
   const promise = new Promise<T>(
-    (promiseResolve) => {
+    (
+      promiseResolve,
+      promiseReject,
+    ) => {
       resolve = promiseResolve;
+      reject = promiseReject;
     },
   );
 
@@ -36,6 +45,47 @@ function createDeferred<T>(): Deferred<T> {
     resolve(value) {
       resolve?.(value);
     },
+    reject(error) {
+      reject?.(error);
+    },
+  };
+}
+
+function createGateEngine(
+  backend:
+    | "translator"
+    | "prompt-api"
+    | "auto" = "translator",
+) {
+  const onSettled = vi.fn();
+  const onTranslated = vi.fn();
+  const onPathChanged = vi.fn();
+  const onDevLog = vi.fn();
+  const engine =
+    new TranslationEngine({
+      backend,
+      requestId: "request-gate",
+      getContext: () => ({
+        recentPairs: [],
+        properNouns: [],
+      }),
+      requestContentTranslation:
+        vi.fn(async () => ({
+          available: false,
+          ja: "",
+        })),
+      onSettled,
+      onTranslated,
+      onPathChanged,
+      onDevLog,
+    });
+
+  return {
+    engine,
+    onSettled,
+    onTranslated,
+    onPathChanged,
+    onDevLog,
   };
 }
 
@@ -67,10 +117,10 @@ function createRescueHarness(
     available: boolean;
     ja: string;
   }>,
+  promptRespond: () => Promise<string> = async () =>
+    "ここです",
 ) {
-  const prompt = vi.fn(
-    async () => "ここです",
-  );
+  const prompt = vi.fn(promptRespond);
   const translator = {
     translate: vi.fn(translatorRespond),
     destroy: vi.fn(),
@@ -408,6 +458,197 @@ describe("normalizeLanguageModelResponse", () => {
   });
 });
 
+describe("TranslationEngine initialization", () => {
+  it(
+    "prepares an available path without creating a downloadable Translator",
+    async () => {
+      const translatorAvailability =
+        vi.fn(
+          async () => "downloadable",
+        );
+      const translatorCreate =
+        vi.fn(async () => ({
+          translate: vi.fn(
+            async () => "unused",
+          ),
+          destroy: vi.fn(),
+        }));
+      const languageModelCreate =
+        vi.fn(async () => ({
+          clone: vi.fn(),
+          destroy: vi.fn(),
+        }));
+
+      vi.stubGlobal("Translator", {
+        availability:
+          translatorAvailability,
+        create: translatorCreate,
+      });
+      vi.stubGlobal("LanguageModel", {
+        availability: vi.fn(
+          async () => "available",
+        ),
+        create: languageModelCreate,
+      });
+
+      const gate =
+        createGateEngine("auto");
+
+      await gate.engine.initialize();
+
+      expect(translatorAvailability)
+        .toHaveBeenCalledOnce();
+      expect(translatorCreate)
+        .not.toHaveBeenCalled();
+      expect(languageModelCreate)
+        .toHaveBeenCalledOnce();
+      expect(gate.engine.getPath())
+        .toBe("language-model");
+      expect(gate.onPathChanged)
+        .toHaveBeenCalledWith(
+          "language-model",
+        );
+
+      gate.engine.destroy();
+    },
+  );
+
+  it(
+    "shares in-flight preparation with initialize callers and a clause",
+    async () => {
+      vi.useFakeTimers();
+      const availability =
+        createDeferred<"downloadable">();
+      const availabilityCheck =
+        vi.fn(
+          () => availability.promise,
+        );
+      const create = vi.fn();
+
+      vi.stubGlobal("Translator", {
+        availability: availabilityCheck,
+        create,
+      });
+
+      const gate = createGateEngine();
+      const initialization =
+        gate.engine.initialize();
+
+      expect(gate.engine.initialize())
+        .toBe(initialization);
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(availabilityCheck)
+        .toHaveBeenCalledOnce();
+
+      gate.engine.enqueue({
+        id: 1,
+        text: "wait for preparation",
+        final: true,
+        at: "2026-09-02T00:00:01.000Z",
+      });
+
+      await vi.advanceTimersByTimeAsync(
+        TRANSLATION_DEADLINE_MS,
+      );
+
+      expect(availabilityCheck)
+        .toHaveBeenCalledOnce();
+      expect(create).not.toHaveBeenCalled();
+      expect(gate.onSettled)
+        .toHaveBeenCalledWith([1]);
+
+      gate.engine.destroy();
+      availability.resolve("downloadable");
+      await initialization;
+    },
+  );
+
+  it(
+    "destroys a Translator created after initialization is cancelled",
+    async () => {
+      const translator = {
+        translate: vi.fn(
+          async () => "unused",
+        ),
+        destroy: vi.fn(),
+      };
+      const created =
+        createDeferred<typeof translator>();
+      const create =
+        vi.fn(() => created.promise);
+
+      vi.stubGlobal("Translator", {
+        availability: vi.fn(
+          async () => "available",
+        ),
+        create,
+      });
+
+      const gate = createGateEngine();
+      const initialization =
+        gate.engine.initialize();
+
+      await vi.waitFor(() => {
+        expect(create)
+          .toHaveBeenCalledOnce();
+      });
+
+      gate.engine.destroy();
+      created.resolve(translator);
+      await initialization;
+
+      expect(translator.destroy)
+        .toHaveBeenCalledOnce();
+      expect(gate.engine.getPath())
+        .toBeNull();
+      expect(gate.onPathChanged)
+        .not.toHaveBeenCalled();
+    },
+  );
+
+  it(
+    "does not block recognizer startup on preparation",
+    async () => {
+      const availability =
+        createDeferred<"downloadable">();
+      const availabilityCheck =
+        vi.fn(
+          () => availability.promise,
+        );
+      const order: string[] = [];
+
+      vi.stubGlobal("Translator", {
+        availability: availabilityCheck,
+        create: vi.fn(),
+      });
+
+      const gate = createGateEngine();
+      const initialization =
+        gate.engine
+          .initialize()
+          .then(() => {
+            order.push("translation");
+          });
+      const recognizerStarted =
+        Promise.resolve().then(() => {
+          order.push("recognizer");
+        });
+
+      await recognizerStarted;
+
+      expect(availabilityCheck)
+        .toHaveBeenCalledOnce();
+      expect(order)
+        .toEqual(["recognizer"]);
+
+      gate.engine.destroy();
+      availability.resolve("downloadable");
+      await initialization;
+    },
+  );
+});
+
 describe(
   "TranslationEngine rescue classification",
   () => {
@@ -480,7 +721,7 @@ describe(
 
         expect(
           harness.translator.translate,
-        ).toHaveBeenCalledTimes(2);
+        ).toHaveBeenCalledTimes(4);
         expect(
           harness.requestContentTranslation
             .mock.calls.filter(
@@ -495,29 +736,71 @@ describe(
         ).toHaveBeenNthCalledWith(
           1,
           expect.objectContaining({ id: 11 }),
-          "Roman is here.",
+          "ここです",
         );
         expect(
           harness.onTranslated,
         ).toHaveBeenNthCalledWith(
           2,
           expect.objectContaining({ id: 12 }),
-          "Roman is there.",
+          "ここです",
         );
         expect(
           harness.onDevLog,
-        ).toHaveBeenCalledWith({
-          t: "OFF_DEV_LOG",
-          level: "info",
-          tag: "translate",
-          message:
-            "Translator line rescue exhausted; passing through original",
-          data: {
-            kind: "passthrough",
-            requestId: "request-63",
-            lineId: 11,
-          },
+        ).not.toHaveBeenCalledWith(
+          expect.objectContaining({
+            message:
+              "Translator line rescue exhausted; passing through original",
+          }),
+        );
+
+        harness.engine.destroy();
+      },
+    );
+
+    it(
+      "marks an exhausted rescue as a fallback",
+      async () => {
+        const harness = createRescueHarness(
+          async () => "",
+          async () => ({
+            available: false,
+            ja: "",
+          }),
+          async () => "",
+        );
+
+        await harness.engine.initialize();
+        harness.engine.enqueue({
+          id: 21,
+          text: "Roman is ready.",
+          final: true,
+          at: "2026-09-04T00:00:01.000Z",
         });
+        await expect(
+          harness.engine.drain(),
+        ).resolves.toBe(true);
+
+        expect(
+          harness.onDevLog,
+        ).toHaveBeenCalledWith(
+          expect.objectContaining({
+            message:
+              "Translator line rescue exhausted; passing through original",
+          }),
+        );
+        // The display decides how a later revision relates to what is on
+        // screen from this flag; without it the English line reads as a
+        // finished translation.
+        expect(
+          harness.onTranslated,
+        ).toHaveBeenCalledWith(
+          expect.objectContaining({
+            id: 21,
+            fallback: true,
+          }),
+          "Roman is ready.",
+        );
 
         harness.engine.destroy();
       },
@@ -622,7 +905,7 @@ describe(
 
         expect(
           harness.translator.translate,
-        ).toHaveBeenCalledTimes(2);
+        ).toHaveBeenCalledTimes(4);
         expect(
           harness.requestContentTranslation,
         ).toHaveBeenCalledTimes(2);
@@ -631,14 +914,14 @@ describe(
         ).toHaveBeenNthCalledWith(
           1,
           expect.objectContaining({ id: 31 }),
-          "Roman is here.",
+          "ここです",
         );
         expect(
           harness.onTranslated,
         ).toHaveBeenNthCalledWith(
           2,
           expect.objectContaining({ id: 32 }),
-          "Roman is there.",
+          "ここです",
         );
 
         harness.engine.destroy();
@@ -887,6 +1170,788 @@ describe(
   },
 );
 
+describe("TranslationEngine terminal protocol", () => {
+  it.each([
+    {
+      name: "translated",
+      translate: async () => "訳",
+      advanceMs: 0,
+      outcome: "translated",
+      deadlineExpired: false,
+    },
+    {
+      name: "deadline fallback",
+      translate: () =>
+        new Promise<string>(() => {
+        }),
+      advanceMs: TRANSLATION_DEADLINE_MS,
+      outcome: "fallback",
+      deadlineExpired: true,
+    },
+  ])(
+    "emits one clause timing entry for $name",
+    async ({
+      translate,
+      advanceMs,
+      outcome,
+      deadlineExpired,
+    }) => {
+      vi.useFakeTimers();
+      installTranslator(translate);
+      const gate = createGateEngine();
+
+      await gate.engine.initialize();
+
+      gate.engine.enqueue({
+        id: 61,
+        text: "measure this clause",
+        final: true,
+        at: "2026-09-02T00:00:01.000Z",
+      });
+      await vi.advanceTimersByTimeAsync(
+        advanceMs,
+      );
+      await expect(
+        gate.engine.drain(),
+      ).resolves.toBe(true);
+
+      const timingEntries =
+        gate.onDevLog.mock.calls
+          .map(([message]) => message)
+          .filter(
+            (message) =>
+              message.data?.kind ===
+              "clause-timing",
+          );
+
+      expect(timingEntries).toHaveLength(1);
+
+      const timing = timingEntries[0];
+
+      expect(timing).toEqual({
+        t: "OFF_DEV_LOG",
+        level: "info",
+        tag: "translate",
+        message:
+          "translation clause reached terminal state",
+        data: {
+          kind: "clause-timing",
+          requestId: "request-gate",
+          lineId: 61,
+          path: "offscreen-translator",
+          outcome,
+          enqueueToTerminalMs:
+            expect.any(Number),
+          modelCallMs: expect.any(Number),
+          deadlineExpired,
+        },
+      });
+      expect(
+        timing.data.enqueueToTerminalMs,
+      ).toBeGreaterThanOrEqual(0);
+      expect(
+        timing.data.enqueueToTerminalMs,
+      ).toBeLessThanOrEqual(
+        TRANSLATION_DEADLINE_MS,
+      );
+      expect(
+        timing.data.modelCallMs,
+      ).toBeGreaterThanOrEqual(0);
+      expect(
+        timing.data.modelCallMs,
+      ).toBeLessThanOrEqual(
+        timing.data.enqueueToTerminalMs,
+      );
+
+      if (outcome === "translated") {
+        expect(gate.onTranslated)
+          .toHaveBeenCalledWith(
+            expect.objectContaining({
+              id: 61,
+            }),
+            "訳",
+          );
+      } else {
+        expect(gate.onSettled)
+          .toHaveBeenCalledWith([61]);
+      }
+
+      gate.engine.destroy();
+    },
+  );
+
+  it("A-6-4(b') settles drop, destroy, and drain timeout in id order", async () => {
+    vi.useFakeTimers();
+    const never =
+      new Promise<string>(() => {
+      });
+
+    installTranslator(() => never);
+    const first = createGateEngine();
+
+    first.engine.enqueue({
+      id: 1,
+      text: "one",
+      final: true,
+      at: "2026-09-02T00:00:01.000Z",
+    });
+    first.engine.enqueue({
+      id: 2,
+      text: "two",
+      final: true,
+      at: "2026-09-02T00:00:02.000Z",
+    });
+    first.engine.enqueue({
+      id: 3,
+      text: "three",
+      final: true,
+      at: "2026-09-02T00:00:03.000Z",
+    });
+
+    expect(first.onSettled.mock.calls)
+      .toEqual([[[2]]]);
+
+    first.engine.destroy();
+
+    expect(first.onSettled.mock.calls)
+      .toEqual([
+        [[2]],
+        [[1, 3]],
+      ]);
+
+    installTranslator(() => never);
+    const timed = createGateEngine();
+    timed.engine.enqueue({
+      id: 4,
+      text: "four",
+      final: true,
+      at: "2026-09-02T00:00:04.000Z",
+    });
+    const drain = timed.engine.drain();
+
+    await vi.advanceTimersByTimeAsync(
+      TRANSLATOR_CREATE_TIMEOUT_MS,
+    );
+
+    await expect(drain).resolves.toBe(
+      false,
+    );
+    expect(timed.onSettled)
+      .toHaveBeenCalledWith([4]);
+  });
+
+  it("A-6-4(b''') settles null result and none-path queue splice", async () => {
+    const gate = createGateEngine();
+
+    gate.engine.enqueue({
+      id: 1,
+      text: "one",
+      final: true,
+      at: "2026-09-02T00:00:01.000Z",
+    });
+    gate.engine.enqueue(
+      {
+        id: 2,
+        text: "two",
+        final: true,
+        at: "2026-09-02T00:00:02.000Z",
+      },
+      { stopFlush: true },
+    );
+    gate.engine.enqueue(
+      {
+        id: 3,
+        text: "three",
+        final: true,
+        at: "2026-09-02T00:00:03.000Z",
+      },
+      { stopFlush: true },
+    );
+
+    await vi.waitFor(() => {
+      expect(gate.onPathChanged)
+        .toHaveBeenCalledWith("none");
+    });
+
+    expect(gate.onSettled.mock.calls)
+      .toEqual([
+        [[2, 3]],
+        [[1]],
+      ]);
+  });
+
+  it.each([
+    "translate",
+    "selectBestPath",
+    "create",
+  ] as const)(
+    "A-6-4(b'''-2) releases a hung %s attempt and processes id 2",
+    async (hangAt) => {
+      vi.useFakeTimers();
+      const never =
+        new Promise<string>(() => {
+        });
+      let backend:
+        | "translator"
+        | "prompt-api" = "translator";
+
+      if (hangAt === "translate") {
+        let callCount = 0;
+        installTranslator(async () => {
+          callCount += 1;
+          return callCount === 1
+            ? never
+            : "二";
+        });
+      } else {
+        backend = "prompt-api";
+        installTranslator(async () => "二");
+
+        if (
+          hangAt === "selectBestPath"
+        ) {
+          const availability = vi
+            .fn()
+            .mockImplementationOnce(
+              () => never,
+            )
+            .mockResolvedValue(
+              "unavailable",
+            );
+
+          vi.stubGlobal("LanguageModel", {
+            availability,
+            create: vi.fn(),
+          });
+        } else {
+          vi.stubGlobal("LanguageModel", {
+            availability: vi.fn(
+              async () => "available",
+            ),
+            create: vi.fn(
+              () => never,
+            ),
+          });
+        }
+      }
+
+      const gate =
+        createGateEngine(backend);
+
+      gate.engine.enqueue({
+        id: 1,
+        text: "hung",
+        final: true,
+        at: "2026-09-02T00:00:01.000Z",
+      });
+
+      await vi.advanceTimersByTimeAsync(
+        TRANSLATION_DEADLINE_MS - 1_000,
+      );
+
+      gate.engine.enqueue({
+        id: 2,
+        text: "next",
+        final: true,
+        at: "2026-09-02T00:00:02.000Z",
+      });
+
+      await vi.advanceTimersByTimeAsync(
+        1_000,
+      );
+
+      await vi.waitFor(() => {
+        expect(gate.onTranslated)
+          .toHaveBeenCalledWith(
+            expect.objectContaining({
+              id: 2,
+            }),
+            "二",
+          );
+      });
+
+      expect(gate.onSettled)
+        .toHaveBeenCalledWith([1]);
+      expect(
+        (
+          gate.engine as unknown as {
+            processing: boolean;
+          }
+        ).processing,
+      ).toBe(false);
+
+      gate.engine.destroy();
+    },
+  );
+
+  it(
+    "does not create a LanguageModel after stale availability resolves",
+    async () => {
+      vi.useFakeTimers();
+      const availability =
+        createDeferred<"available">();
+      const create = vi.fn(
+        async () => ({
+          clone: vi.fn(),
+          destroy: vi.fn(),
+        }),
+      );
+
+      vi.stubGlobal("LanguageModel", {
+        availability: vi.fn(
+          () => availability.promise,
+        ),
+        create,
+      });
+
+      const gate =
+        createGateEngine("prompt-api");
+
+      gate.engine.enqueue({
+        id: 1,
+        text: "late availability",
+        final: true,
+        at: "2026-09-02T00:00:01.000Z",
+      });
+
+      await vi.advanceTimersByTimeAsync(
+        TRANSLATION_DEADLINE_MS,
+      );
+
+      expect(gate.onSettled)
+        .toHaveBeenCalledWith([1]);
+
+      availability.resolve("available");
+      await vi.advanceTimersByTimeAsync(0);
+
+      const internal =
+        gate.engine as unknown as {
+          languageModel: unknown;
+          languageModelCreateAttempted:
+            boolean;
+          path: unknown;
+        };
+
+      expect(create).not.toHaveBeenCalled();
+      expect(internal.languageModel)
+        .toBeNull();
+      expect(
+        internal.languageModelCreateAttempted,
+      ).toBe(false);
+      expect(internal.path).toBeNull();
+      expect(gate.onPathChanged)
+        .not.toHaveBeenCalled();
+
+      gate.engine.destroy();
+    },
+  );
+
+  it(
+    "destroys a LanguageModel created after its attempt expires",
+    async () => {
+      vi.useFakeTimers();
+      const languageModel = {
+        clone: vi.fn(),
+        destroy: vi.fn(),
+      };
+      const created =
+        createDeferred<typeof languageModel>();
+      const create = vi.fn(
+        () => created.promise,
+      );
+
+      vi.stubGlobal("LanguageModel", {
+        availability: vi.fn(
+          async () => "available",
+        ),
+        create,
+      });
+
+      const gate =
+        createGateEngine("prompt-api");
+
+      gate.engine.enqueue({
+        id: 1,
+        text: "late model",
+        final: true,
+        at: "2026-09-02T00:00:01.000Z",
+      });
+
+      await vi.waitFor(() => {
+        expect(create)
+          .toHaveBeenCalledOnce();
+      });
+
+      await vi.advanceTimersByTimeAsync(
+        TRANSLATION_DEADLINE_MS,
+      );
+
+      expect(gate.onSettled)
+        .toHaveBeenCalledWith([1]);
+
+      created.resolve(languageModel);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(languageModel.destroy)
+        .toHaveBeenCalledOnce();
+      expect(
+        (
+          gate.engine as unknown as {
+            languageModel: unknown;
+          }
+        ).languageModel,
+      ).toBeNull();
+      expect(gate.onPathChanged)
+        .not.toHaveBeenCalled();
+
+      gate.engine.destroy();
+    },
+  );
+
+  it(
+    "destroys a Translator created after its attempt expires",
+    async () => {
+      vi.useFakeTimers();
+      const availability =
+        createDeferred<"available">();
+      const translator = {
+        translate: vi.fn(
+          async () => "unused",
+        ),
+        destroy: vi.fn(),
+      };
+      const created =
+        createDeferred<typeof translator>();
+      const create = vi.fn(
+        () => created.promise,
+      );
+
+      vi.stubGlobal("Translator", {
+        availability: vi.fn(
+          () => availability.promise,
+        ),
+        create,
+      });
+
+      const gate = createGateEngine();
+
+      gate.engine.enqueue({
+        id: 1,
+        text: "late translator",
+        final: true,
+        at: "2026-09-02T00:00:01.000Z",
+      });
+
+      await vi.advanceTimersByTimeAsync(
+        5_000,
+      );
+      availability.resolve("available");
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(create)
+        .toHaveBeenCalledOnce();
+
+      await vi.advanceTimersByTimeAsync(
+        TRANSLATION_DEADLINE_MS - 5_000,
+      );
+
+      expect(gate.onSettled)
+        .toHaveBeenCalledWith([1]);
+
+      created.resolve(translator);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(translator.destroy)
+        .toHaveBeenCalledOnce();
+      expect(
+        (
+          gate.engine as unknown as {
+            translator: unknown;
+          }
+        ).translator,
+      ).toBeNull();
+
+      gate.engine.destroy();
+    },
+  );
+
+  it(
+    "destroys a Translator that resolves after its create timeout",
+    async () => {
+      vi.useFakeTimers();
+      vi.spyOn(
+        console,
+        "warn",
+      ).mockImplementation(() => {
+      });
+
+      const translator = {
+        translate: vi.fn(
+          async () => "unused",
+        ),
+        destroy: vi.fn(),
+      };
+      const created =
+        createDeferred<typeof translator>();
+      const create = vi.fn(
+        () => created.promise,
+      );
+
+      vi.stubGlobal("Translator", {
+        availability: vi.fn(
+          async () => "available",
+        ),
+        create,
+      });
+
+      const gate = createGateEngine();
+
+      gate.engine.enqueue({
+        id: 1,
+        text: "timed out translator",
+        final: true,
+        at: "2026-09-02T00:00:01.000Z",
+      });
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(create)
+        .toHaveBeenCalledOnce();
+
+      await vi.advanceTimersByTimeAsync(
+        TRANSLATOR_CREATE_TIMEOUT_MS,
+      );
+
+      expect(gate.onSettled)
+        .toHaveBeenCalledWith([1]);
+
+      created.resolve(translator);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(translator.destroy)
+        .toHaveBeenCalledOnce();
+      expect(
+        (
+          gate.engine as unknown as {
+            translator: unknown;
+          }
+        ).translator,
+      ).toBeNull();
+
+      gate.engine.destroy();
+    },
+  );
+
+  it(
+    "destroys a LanguageModel clone that resolves after its attempt expires",
+    async () => {
+      vi.useFakeTimers();
+      const clone = {
+        prompt: vi.fn(
+          async () => "unused",
+        ),
+        destroy: vi.fn(),
+      };
+      const cloneReady =
+        createDeferred<typeof clone>();
+      const base = {
+        clone: vi.fn(
+          () => cloneReady.promise,
+        ),
+        destroy: vi.fn(),
+      };
+
+      vi.stubGlobal("LanguageModel", {
+        availability: vi.fn(
+          async () => "available",
+        ),
+        create: vi.fn(
+          async () => base,
+        ),
+      });
+
+      const gate =
+        createGateEngine("prompt-api");
+
+      gate.engine.enqueue({
+        id: 1,
+        text: "late clone",
+        final: true,
+        at: "2026-09-02T00:00:01.000Z",
+      });
+
+      await vi.waitFor(() => {
+        expect(base.clone)
+          .toHaveBeenCalledOnce();
+      });
+
+      await vi.advanceTimersByTimeAsync(
+        TRANSLATION_DEADLINE_MS,
+      );
+
+      expect(gate.onSettled)
+        .toHaveBeenCalledWith([1]);
+
+      cloneReady.resolve(clone);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(clone.destroy)
+        .toHaveBeenCalledOnce();
+      expect(
+        (
+          gate.engine as unknown as {
+            languageModelClone: unknown;
+          }
+        ).languageModelClone,
+      ).toBeNull();
+
+      gate.engine.destroy();
+    },
+  );
+
+  it.each([
+    "success",
+    "failure",
+  ] as const)(
+    "A-6-4(b'''-3) ignores stale late %s without mutating engine state",
+    async (lateKind) => {
+      vi.useFakeTimers();
+      const late = createDeferred<string>();
+      const secondPrompt =
+        new Promise<string>(() => {
+        });
+      const firstClone = {
+        prompt: vi.fn(
+          () => late.promise,
+        ),
+        destroy: vi.fn(),
+      };
+      const secondClone = {
+        prompt: vi.fn(
+          () => secondPrompt,
+        ),
+        destroy: vi.fn(),
+      };
+      const base = {
+        clone: vi.fn()
+          .mockResolvedValueOnce(
+            firstClone,
+          )
+          .mockResolvedValueOnce(
+            secondClone,
+          ),
+        destroy: vi.fn(),
+      };
+
+      vi.stubGlobal("LanguageModel", {
+        availability: vi.fn(
+          async () => "available",
+        ),
+        create: vi.fn(
+          async () => base,
+        ),
+      });
+
+      const gate =
+        createGateEngine("prompt-api");
+
+      gate.engine.enqueue({
+        id: 1,
+        text: "late",
+        final: true,
+        at: "2026-09-02T00:00:01.000Z",
+      });
+
+      await vi.advanceTimersByTimeAsync(
+        TRANSLATION_DEADLINE_MS - 1_000,
+      );
+
+      gate.engine.enqueue({
+        id: 2,
+        text: "current",
+        final: true,
+        at: "2026-09-02T00:00:02.000Z",
+      });
+
+      await vi.advanceTimersByTimeAsync(
+        1_000,
+      );
+      await vi.waitFor(() => {
+        expect(base.clone)
+          .toHaveBeenCalledTimes(2);
+      });
+
+      const internal =
+        gate.engine as unknown as {
+          recentHistory: unknown[];
+          languageModel: unknown;
+          languageModelClone: unknown;
+          path: unknown;
+          queue: unknown[];
+          processing: boolean;
+          drainResolvers: Set<unknown>;
+        };
+      const drain = gate.engine.drain();
+      const snapshot = {
+        history: [...internal.recentHistory],
+        model: internal.languageModel,
+        clone: internal.languageModelClone,
+        path: internal.path,
+        queueLength: internal.queue.length,
+        processing: internal.processing,
+        drainWaiters:
+          internal.drainResolvers.size,
+        pathCalls:
+          gate.onPathChanged.mock.calls
+            .length,
+      };
+
+      if (lateKind === "success") {
+        late.resolve("遅延");
+      } else {
+        late.reject(
+          new Error("late failure"),
+        );
+      }
+
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(internal.recentHistory)
+        .toEqual(snapshot.history);
+      expect(internal.languageModel)
+        .toBe(snapshot.model);
+      expect(internal.languageModelClone)
+        .toBe(snapshot.clone);
+      expect(internal.path)
+        .toBe(snapshot.path);
+      expect(internal.queue)
+        .toHaveLength(
+          snapshot.queueLength,
+        );
+      expect(internal.processing)
+        .toBe(snapshot.processing);
+      expect(internal.drainResolvers.size)
+        .toBe(snapshot.drainWaiters);
+      expect(gate.onPathChanged)
+        .toHaveBeenCalledTimes(
+          snapshot.pathCalls,
+        );
+      expect(gate.onTranslated)
+        .not.toHaveBeenCalled();
+      expect(gate.onSettled.mock.calls)
+        .toEqual([[[1]]]);
+      expect(firstClone.destroy)
+        .toHaveBeenCalledOnce();
+      expect(secondClone.destroy)
+        .not.toHaveBeenCalled();
+      expect(base.destroy)
+        .not.toHaveBeenCalled();
+
+      gate.engine.destroy();
+      await drain;
+    },
+  );
+});
+
 describe("TranslationEngine drain", () => {
   it("delivers the final clause before a successful drain completes", async () => {
     const translated =
@@ -990,5 +2055,96 @@ describe("TranslationEngine drain", () => {
       destroyTranslator,
     ).toHaveBeenCalledOnce();
     expect(onTranslated).not.toHaveBeenCalled();
+  });
+});
+
+describe("TranslationEngine glossary prompt", () => {
+  function installPromptApi(
+    respond: (
+      prompt: string,
+    ) => Promise<string>,
+  ): ReturnType<typeof vi.fn> {
+    const prompt = vi.fn(respond);
+
+    vi.stubGlobal("LanguageModel", {
+      availability: vi.fn(
+        async () => "available",
+      ),
+      create: vi.fn(async () => ({
+        clone: vi.fn(async () => ({
+          prompt,
+          destroy: vi.fn(),
+        })),
+        destroy: vi.fn(),
+      })),
+    });
+
+    return prompt;
+  }
+
+  async function sentPrompt(
+    text: string,
+  ): Promise<string> {
+    const prompt = installPromptApi(
+      async () => "出た",
+    );
+    const engine =
+      new TranslationEngine({
+        backend: "prompt-api",
+        getContext: () => ({
+          recentPairs: [],
+          properNouns: [],
+        }),
+        requestContentTranslation:
+          vi.fn(async () => ({
+            available: false,
+            ja: "",
+          })),
+        onTranslated: vi.fn(),
+        onPathChanged: vi.fn(),
+      });
+
+    await engine.initialize();
+    engine.enqueue({
+      id: 1,
+      text,
+      final: true,
+      at: "2026-08-30T00:00:00.000Z",
+    });
+    await expect(
+      engine.drain(),
+    ).resolves.toBe(true);
+    engine.destroy();
+
+    return String(
+      prompt.mock.calls[0]?.[0] ?? "",
+    );
+  }
+
+  it("sends glossary instructions in the LanguageModel prompt", async () => {
+    const sent = await sentPrompt(
+      "Hugging Face released Cursor.",
+    );
+
+    expect(sent).toContain("[原綴り]");
+    expect(sent).not.toContain("Hugging Face");
+    expect(sent).toContain(
+      "モデル・製品・組織名のときだけ原綴り（一般語は訳す）: Cursor",
+    );
+    expect(sent).toContain(
+      "[今訳す節]\n%%1%% released Cursor.",
+    );
+  });
+
+  it("omits glossary sections when the clause has no glossary term", async () => {
+    const sent = await sentPrompt(
+      "Hello everyone.",
+    );
+
+    expect(sent).toBe(
+      "[今訳す節]\nHello everyone.",
+    );
+    expect(sent).not.toContain("[原綴り]");
+    expect(sent).not.toContain("[用語]");
   });
 });

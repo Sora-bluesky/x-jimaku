@@ -260,13 +260,25 @@ export interface OffDiagnosticMessage {
 export type OffDevLogKind =
   | "rescue-failure"
   | "passthrough"
-  | "queue-drop";
+  | "queue-drop"
+  | "clause-timing"
+  | "placeholder-survival";
+
+export type ClauseTimingOutcome =
+  | "translated"
+  | "fallback";
 
 export interface OffDevLogData {
   kind: OffDevLogKind;
   requestId: string;
   lineId: number;
   path?: TranslationPath;
+  outcome?: ClauseTimingOutcome;
+  enqueueToTerminalMs?: number;
+  modelCallMs?: number;
+  deadlineExpired?: boolean;
+  sent?: number;
+  returned?: number;
 }
 
 export interface OffDevLogMessage {
@@ -295,6 +307,11 @@ export interface CsDrainCompleteMessage {
 
 export interface CsEosMessage {
   t: "CS_EOS";
+  requestId: string;
+}
+
+export interface CsMediaChangedMessage {
+  t: "CS_MEDIA_CHANGED";
   requestId: string;
 }
 
@@ -356,6 +373,7 @@ export interface RecognitionPayload {
   final: boolean;
   at: string;
   ja?: string;
+  fallback?: boolean;
 }
 
 export interface OffRecognitionMessage
@@ -450,6 +468,7 @@ export type ContentPortMessage =
   | CsStopTapMessage
   | CsDrainCompleteMessage
   | CsEosMessage
+  | CsMediaChangedMessage
   | CsTapStateMessage
   | CsPcmMessage
   | CsTranslateMessage
@@ -762,7 +781,11 @@ export function isM1Message(
               value.data.kind ===
                 "passthrough" ||
               value.data.kind ===
-                "queue-drop"
+                "queue-drop" ||
+              value.data.kind ===
+                "clause-timing" ||
+              value.data.kind ===
+                "placeholder-survival"
             ) &&
             typeof value.data.requestId ===
               "string" &&
@@ -777,6 +800,73 @@ export function isM1Message(
               isTranslationPath(
                 value.data.path,
               )
+            ) &&
+            (
+              value.data.kind !==
+                "clause-timing" ||
+              (
+                isTranslationPath(
+                  value.data.path,
+                ) &&
+                (
+                  value.data.outcome ===
+                    "translated" ||
+                  value.data.outcome ===
+                    "fallback"
+                ) &&
+                typeof value.data
+                  .enqueueToTerminalMs ===
+                  "number" &&
+                Number.isFinite(
+                  value.data
+                    .enqueueToTerminalMs,
+                ) &&
+                value.data
+                  .enqueueToTerminalMs >= 0 &&
+                typeof value.data.modelCallMs ===
+                  "number" &&
+                Number.isFinite(
+                  value.data.modelCallMs,
+                ) &&
+                value.data.modelCallMs >= 0 &&
+                value.data.modelCallMs <=
+                  value.data
+                    .enqueueToTerminalMs &&
+                typeof value.data
+                  .deadlineExpired ===
+                  "boolean" &&
+                (
+                  !value.data
+                    .deadlineExpired ||
+                  value.data.outcome ===
+                    "fallback"
+                )
+              )
+            ) &&
+            (
+              value.data.kind !==
+                "placeholder-survival" ||
+              (
+                isTranslationPath(
+                  value.data.path,
+                ) &&
+                typeof value.data.sent ===
+                  "number" &&
+                Number.isSafeInteger(
+                  value.data.sent,
+                ) &&
+                value.data.sent >= 0 &&
+                typeof value.data
+                  .returned ===
+                  "number" &&
+                Number.isSafeInteger(
+                  value.data.returned,
+                ) &&
+                value.data.returned >=
+                  0 &&
+                value.data.returned <=
+                  value.data.sent
+              )
             )
           )
         )
@@ -790,6 +880,9 @@ export function isM1Message(
           isSettings(value.settings)
         )
       );
+
+    case "CS_MEDIA_CHANGED":
+      return typeof value.requestId === "string";
 
     case "CS_TAP_STATE":
       return (
@@ -936,6 +1029,10 @@ export function isContentPortMessage(
       "CS_DRAIN_COMPLETE",
     ) ||
     isMessageOfType(value, "CS_EOS") ||
+    isMessageOfType(
+      value,
+      "CS_MEDIA_CHANGED",
+    ) ||
     isMessageOfType(value, "CS_TAP_STATE") ||
     isMessageOfType(value, "CS_PCM") ||
     isMessageOfType(value, "CS_TRANSLATE") ||
@@ -1075,6 +1172,10 @@ function isRecognitionPayload(
     (
       value.ja === undefined ||
       typeof value.ja === "string"
+    ) &&
+    (
+      value.fallback === undefined ||
+      typeof value.fallback === "boolean"
     )
   );
 }

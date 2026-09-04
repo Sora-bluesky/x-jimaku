@@ -3,10 +3,15 @@ import {
   expect,
   it,
 } from "vitest";
+import { findJapanesePhraseBoundaries } from "./phrase-boundaries";
 import {
+  createCaptionTextMeasurer,
+  deriveLineUnitBudget,
   displayUnits,
   endsWithJapaneseParticle,
+  isCaptionLayoutMeasured,
   MAX_LINE_UNITS,
+  MIN_FITTING_LINE_UNITS,
   splitCueText,
   wrapCueText,
 } from "./cue-text";
@@ -257,6 +262,66 @@ describe("splitCueText", () => {
           ).toBeLessThanOrEqual(
             unitBudget,
           );
+        }
+      }
+    },
+  );
+
+  // A cue is NOT guaranteed to wrap into at most two lines. When the boundary
+  // rules refuse the positions near the budget, wrapCueText breaks early and
+  // spills into a third line, e.g. the 28-unit part
+  // "おネち5ナbた1）6c オネz0と3そ4たく0 2ア pてせ、ぬ c ）、" wraps to
+  // ["おネち5ナbた1）6c オネz0と3", "そ4たく0 2ア ", "pてせ、ぬ c ）、"].
+  // The display has two fixed slots, so a three-line cue needs two pages.
+  // What has to hold here is the per-line budget. The page path makes every
+  // line reach the screen, and overlay.test.ts covers that behavior.
+  it(
+    "keeps every wrapped line within the unit budget across the boundary corpus",
+    () => {
+      const random =
+        createSeededRandom(0x71c0ffee);
+      const corpus = [
+        `https://${"a".repeat(72)}`,
+        "カ".repeat(40),
+      ];
+
+      for (
+        let index = 0;
+        index < 200;
+        index += 1
+      ) {
+        corpus.push(
+          createRandomText(
+            random,
+            1 +
+              Math.floor(
+                random() * 120,
+              ),
+          ),
+        );
+      }
+
+      for (const text of corpus) {
+        for (
+          const part
+          of splitCueText(text)
+        ) {
+          const lines = wrapCueText(
+            part,
+            MAX_LINE_UNITS,
+          ).split("\n");
+
+          expect(
+            lines.length,
+          ).toBeGreaterThan(0);
+
+          for (const line of lines) {
+            expect(
+              displayUnits(line.trimEnd()),
+            ).toBeLessThanOrEqual(
+              MAX_LINE_UNITS,
+            );
+          }
         }
       }
     },
@@ -525,3 +590,499 @@ describe(
     );
   },
 );
+
+function glyphWidth(
+  character: string,
+): number {
+  if (character === "W") {
+    return 20;
+  }
+
+  return /[\u0000-\u00ff]/u.test(
+    character,
+  )
+    ? 5
+    : 10;
+}
+
+function measureByGlyph(
+  text: string,
+): number {
+  let width = 0;
+
+  for (const character of text) {
+    width += glyphWidth(character);
+  }
+
+  return width;
+}
+
+describe("measured wrapping", () => {
+  const wideLayout = {
+    availableWidth: 50,
+    measure: measureByGlyph,
+  };
+  const mixedLayout = {
+    availableWidth: 40,
+    measure: measureByGlyph,
+  };
+  const unitLayout = {
+    availableWidth: MAX_LINE_UNITS * 10,
+    measure: (text: string) =>
+      displayUnits(text) * 10,
+  };
+  const mixedPropertyLayout = {
+    availableWidth: 140,
+    measure: (text: string) => {
+      let width = 0;
+
+      for (const character of text) {
+        width +=
+          character === "W"
+            ? 12
+            : /[\u0000-\u00ff]/u.test(
+                character,
+              )
+              ? 5
+              : 10;
+      }
+
+      return width;
+    },
+  };
+
+  it(
+    "breaks a wide ASCII run the unit model would keep",
+    () => {
+      const text = "WWWWWWWW";
+
+      expect(wrapCueText(text, 1000))
+        .toBe(text);
+      expect(
+        wrapCueText(
+          text,
+          1000,
+          wideLayout,
+        ).split("\n"),
+      ).toEqual(["WW", "WW", "WW", "WW"]);
+      expect(splitCueText(text, 1000))
+        .toEqual([text]);
+      expect(
+        splitCueText(
+          text,
+          1000,
+          wideLayout,
+        ),
+      ).toEqual(["WWW", "WWWWW"]);
+    },
+  );
+
+  it(
+    "breaks a CJK and Latin mix the unit model would keep",
+    () => {
+      const text = "W幅W幅W幅W幅";
+
+      expect(wrapCueText(text)).toBe(text);
+      expect(
+        wrapCueText(
+          text,
+          MAX_LINE_UNITS,
+          mixedLayout,
+        ).split("\n"),
+      ).toEqual([
+        "W幅",
+        "W幅",
+        "W幅",
+        "W幅",
+      ]);
+    },
+  );
+
+  it(
+    "matches today's wrapping when measurement is unavailable",
+    () => {
+      const text =
+        "alpha beta gamma delta epsilon zeta";
+      const unavailable = {
+        availableWidth: 1,
+        measure: () => null,
+      };
+
+      expect(
+        isCaptionLayoutMeasured(
+          unavailable,
+        ),
+      ).toBe(false);
+      expect(
+        wrapCueText(
+          text,
+          MAX_LINE_UNITS,
+          unavailable,
+        ),
+      ).toBe(wrapCueText(text));
+      expect(
+        splitCueText(text, 28, unavailable),
+      ).toEqual(splitCueText(text));
+    },
+  );
+
+  it(
+    "createCaptionTextMeasurer stays on the unit path without a canvas",
+    () => {
+      const measurer =
+        createCaptionTextMeasurer();
+      measurer.setFont("650 16px sans-serif");
+
+      expect(measurer.isMeasured()).toBe(
+        false,
+      );
+      expect(measurer.measure("W")).toBe(
+        null,
+      );
+      expect(measurer.measureLineBox()).toBe(
+        null,
+      );
+    },
+  );
+
+  it(
+    "keeps #47 properties under measurement, including katakana and URL runs",
+    () => {
+      const random =
+        createSeededRandom(0x47c0ffee);
+      const corpus = [
+        `https://${"a".repeat(72)}`,
+        "カ".repeat(40),
+      ];
+
+      for (
+        let index = 0;
+        index < 200;
+        index += 1
+      ) {
+        corpus.push(
+          createRandomText(
+            random,
+            1 +
+              Math.floor(random() * 120),
+          ),
+        );
+      }
+
+      for (const text of corpus) {
+        const normalized =
+          normalizeCueText(text);
+
+        expect(
+          wrapCueText(
+            text,
+            MAX_LINE_UNITS,
+            unitLayout,
+          ),
+        ).toBe(wrapCueText(text));
+
+        for (
+          const layout of [
+            unitLayout,
+            mixedPropertyLayout,
+          ]
+        ) {
+          const parts = splitCueText(
+            text,
+            MAX_LINE_UNITS * 2,
+            layout,
+          );
+          expect(
+            parts.length,
+          ).toBeGreaterThan(0);
+
+          for (const part of parts) {
+            const partWidth =
+              layout.measure(part);
+            expect(partWidth).not.toBeNull();
+            expect(partWidth ?? Infinity)
+              .toBeLessThanOrEqual(
+                layout.availableWidth * 2,
+              );
+
+            const wrapped = wrapCueText(
+              part,
+              MAX_LINE_UNITS,
+              layout,
+            );
+            const lines =
+              wrapped.split("\n");
+
+            expect(
+              lines.length,
+            ).toBeGreaterThan(0);
+            expect(lines.join("")).toBe(
+              part,
+            );
+
+            for (const line of lines) {
+              const width = layout.measure(
+                line.trimEnd(),
+              );
+              expect(width).not.toBeNull();
+              expect(width ?? Infinity)
+                .toBeLessThanOrEqual(
+                  layout.availableWidth,
+                );
+            }
+          }
+        }
+
+        expect(
+          wrapCueText(
+            text,
+            MAX_LINE_UNITS,
+            mixedPropertyLayout,
+          ).split("\n").join(""),
+        ).toBe(normalized);
+      }
+    },
+  );
+});
+
+describe("deriveLineUnitBudget", () => {
+  it(
+    "follows inner width and has no upper clamp",
+    () => {
+      expect(
+        deriveLineUnitBudget(200, 10),
+      ).toBe(20);
+      expect(
+        deriveLineUnitBudget(400, 10),
+      ).toBe(40);
+      expect(
+        deriveLineUnitBudget(4000, 10),
+      ).toBe(400);
+      expect(
+        deriveLineUnitBudget(400, 10),
+      ).toBeGreaterThan(
+        deriveLineUnitBudget(200, 10),
+      );
+    },
+  );
+
+  it(
+    "clamps to MIN_FITTING_LINE_UNITS below 18px at 18.75px",
+    () => {
+      expect(
+        deriveLineUnitBudget(18, 18.75),
+      ).toBe(MIN_FITTING_LINE_UNITS);
+      expect(
+        deriveLineUnitBudget(0, 18.75),
+      ).toBe(MIN_FITTING_LINE_UNITS);
+      expect(
+        deriveLineUnitBudget(1, 18.75),
+      ).toBe(MIN_FITTING_LINE_UNITS);
+      expect(
+        deriveLineUnitBudget(37.5, 18.75),
+      ).toBe(2);
+    },
+  );
+
+  it(
+    "falls back to MAX_LINE_UNITS for a non-positive font size",
+    () => {
+      expect(
+        deriveLineUnitBudget(500, 0),
+      ).toBe(MAX_LINE_UNITS);
+      expect(
+        deriveLineUnitBudget(500, -8),
+      ).toBe(MAX_LINE_UNITS);
+    },
+  );
+});
+
+describe(
+  "non-default line unit budget properties",
+  () => {
+    it(
+      "loses nothing, stays in budget, and terminates",
+      () => {
+        const random =
+          createSeededRandom(0x47c0ffee);
+        const corpus = [
+          `https://${"a".repeat(72)}`,
+          "カ".repeat(40),
+        ];
+
+        for (
+          let index = 0;
+          index < 200;
+          index += 1
+        ) {
+          corpus.push(
+            createRandomText(
+              random,
+              1 +
+                Math.floor(
+                  random() * 120,
+                ),
+            ),
+          );
+        }
+
+        for (
+          const lineBudget of [10, 30]
+        ) {
+          const cueBudget =
+            lineBudget * 2;
+
+          for (const text of corpus) {
+            const parts = splitCueText(
+              text,
+              cueBudget,
+            );
+
+            expect(
+              parts.length,
+            ).toBeGreaterThan(0);
+
+            for (const part of parts) {
+              expect(
+                displayUnits(part),
+              ).toBeLessThanOrEqual(
+                cueBudget,
+              );
+
+              const wrapped = wrapCueText(
+                part,
+                lineBudget,
+              );
+              const lines =
+                wrapped.split("\n");
+
+              expect(
+                lines.length,
+              ).toBeGreaterThan(0);
+              expect(
+                lines.join(""),
+              ).toBe(part);
+
+              for (const line of lines) {
+                expect(
+                  displayUnits(
+                    line.trimEnd(),
+                  ),
+                ).toBeLessThanOrEqual(
+                  lineBudget,
+                );
+              }
+            }
+          }
+        }
+      },
+    );
+  },
+);
+
+describe("phrase boundary wrapping", () => {
+  const phraseText =
+    "どんどん空いっぱい光る夜景色";
+
+  it(
+    "breaks a particle-free sentence at a phrase boundary instead of the width limit",
+    () => {
+      const first =
+        wrapCueText(
+          phraseText,
+          6,
+        ).split("\n")[0] ?? "";
+      const firstLength =
+        Array.from(first).length;
+      const boundaries =
+        findJapanesePhraseBoundaries(
+          phraseText,
+        );
+
+      expect(firstLength).toBeLessThan(6);
+      expect(
+        boundaries.has(firstLength),
+      ).toBe(true);
+      expect(
+        wrapCueText(phraseText, 6)
+          .split("\n")
+          .join(""),
+      ).toBe(phraseText);
+    },
+  );
+
+  it(
+    "does not take a phrase boundary past the width limit",
+    () => {
+      const first =
+        wrapCueText(
+          phraseText,
+          4,
+        ).split("\n")[0] ?? "";
+      const boundaries =
+        findJapanesePhraseBoundaries(
+          phraseText,
+        );
+
+      expect(boundaries.has(5)).toBe(true);
+      expect(first).not.toBe(
+        "どんどん空",
+      );
+      expect(
+        displayUnits(first),
+      ).toBeLessThanOrEqual(4);
+    },
+  );
+
+  it(
+    "does not break a protected URL at a phrase boundary inside it",
+    () => {
+      const text =
+        "https://今日は天気ですよ続きの文章を足していく確認作業";
+      const first =
+        wrapCueText(
+          text,
+          12,
+        ).split("\n")[0] ?? "";
+      const boundaries =
+        findJapanesePhraseBoundaries(
+          text,
+        );
+
+      expect(boundaries.has(11)).toBe(
+        true,
+      );
+      expect(first).not.toBe(
+        "https://今日は",
+      );
+      expect(
+        Array.from(first).length,
+      ).toBeGreaterThan(11);
+      expect(
+        displayUnits(first),
+      ).toBeLessThanOrEqual(12);
+    },
+  );
+
+  it(
+    "prefers a clause break after 、 over a phrase boundary at the same distance",
+    () => {
+      const text =
+        "一二三、どんどん空いまる";
+      const boundaries =
+        findJapanesePhraseBoundaries(
+          text,
+        );
+
+      expect(boundaries.has(8)).toBe(
+        true,
+      );
+      expect(
+        wrapCueText(
+          text,
+          10,
+        ).split("\n")[0],
+      ).toBe("一二三、");
+    },
+  );
+});

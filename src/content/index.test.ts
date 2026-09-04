@@ -12,11 +12,32 @@ import {
 import {
   MAX_CONTEXT_TERMS,
 } from "../shared/messages";
+import {
+  createCaptureState,
+} from "../shared/state";
+import {
+  CUE_MINIMUM_DISPLAY_MS,
+} from "./overlay";
+
+const CONTENT_VERSION_NAME =
+  "0.6.0 abc1234-dirty 2026-09-02T03:04:05Z";
 
 let extractPostContextTerms:
   typeof import("./index").extractPostContextTerms;
 let handleOffscreenDevLog:
   typeof import("./index").handleOffscreenDevLog;
+let handleCaptureState:
+  typeof import("./index").handleCaptureState;
+let ensureOverlay:
+  typeof import("./index").ensureOverlay;
+
+class ResizeObserverStub {
+  observe(): void {
+  }
+
+  disconnect(): void {
+  }
+}
 
 function setPostText(text: string): void {
   document.body.innerHTML =
@@ -36,7 +57,8 @@ beforeAll(async () => {
   vi.stubGlobal("chrome", {
     runtime: {
       getManifest: () => ({
-        version: "test",
+        version: "0.6.0",
+        version_name: CONTENT_VERSION_NAME,
       }),
     },
   });
@@ -47,11 +69,13 @@ beforeAll(async () => {
         string;
     }
   ).__xJimakuContentScriptVersion__ =
-    "test";
+    CONTENT_VERSION_NAME;
 
   ({
     extractPostContextTerms,
     handleOffscreenDevLog,
+    handleCaptureState,
+    ensureOverlay,
   } = await import("./index"));
 });
 
@@ -63,14 +87,95 @@ beforeEach(() => {
   );
 });
 
+describe("content script build marker", () => {
+  it(
+    "matches the manifest version_name",
+    () => {
+      const instanceWindow =
+        window as Window & {
+          __xJimakuContentScriptVersion__?:
+            string;
+        };
+
+      expect(
+        instanceWindow
+          .__xJimakuContentScriptVersion__,
+      ).toBe(CONTENT_VERSION_NAME);
+      expect(
+        chrome.runtime.getManifest()
+          .version_name,
+      ).toBe(CONTENT_VERSION_NAME);
+    },
+  );
+});
+
 describe("handleOffscreenDevLog", () => {
   it(
-    "does not print on a non-development origin",
+    "posts a structured entry on the development origin",
+    () => {
+      const originalLocation = location;
+      const data = {
+        kind: "passthrough" as const,
+        requestId: "request-63",
+        lineId: 1,
+      };
+      const postMessage = vi
+        .spyOn(window, "postMessage")
+        .mockImplementation(() => {
+        });
+      const info = vi
+        .spyOn(console, "info")
+        .mockImplementation(() => {
+        });
+
+      try {
+        vi.stubGlobal("location", {
+          origin: "http://127.0.0.1:8123",
+        });
+
+        handleOffscreenDevLog({
+          t: "OFF_DEV_LOG",
+          level: "info",
+          tag: "translate",
+          message:
+            "Translator line rescue exhausted; passing through original",
+          data,
+        });
+
+        expect(postMessage).toHaveBeenCalledWith(
+          {
+            t: "OFF_DEV_LOG",
+            level: "info",
+            tag: "translate",
+            message:
+              "Translator line rescue exhausted; passing through original",
+            data,
+            timestampMs: expect.any(Number),
+          },
+          "http://127.0.0.1:8123",
+        );
+      } finally {
+        vi.stubGlobal(
+          "location",
+          originalLocation,
+        );
+        postMessage.mockRestore();
+        info.mockRestore();
+      }
+    },
+  );
+
+  it(
+    "does not post or print on a non-development origin",
     () => {
       expect(location.origin).not.toBe(
         "http://127.0.0.1:8123",
       );
 
+      const postMessage = vi
+        .spyOn(window, "postMessage")
+        .mockImplementation(() => {
+        });
       const methods = [
         vi
           .spyOn(console, "info")
@@ -99,12 +204,97 @@ describe("handleOffscreenDevLog", () => {
         },
       });
 
+      expect(postMessage).not.toHaveBeenCalled();
+      postMessage.mockRestore();
+
       for (const method of methods) {
         expect(method).not.toHaveBeenCalled();
         method.mockRestore();
       }
     },
   );
+});
+
+describe("explicit-stop overlay lifecycle", () => {
+  it("A-6-4(c') destroys timed-out drain state before the next capture", () => {
+    vi.useFakeTimers();
+    vi.stubGlobal(
+      "ResizeObserver",
+      ResizeObserverStub,
+    );
+    vi.stubGlobal(
+      "requestAnimationFrame",
+      vi.fn((): number => 1),
+    );
+    vi.stubGlobal(
+      "cancelAnimationFrame",
+      vi.fn(),
+    );
+
+    try {
+      handleCaptureState(
+        createCaptureState("starting", {
+          requestId: "request-old",
+        }),
+      );
+      const first = ensureOverlay();
+      first.beginDrain();
+
+      handleCaptureState(
+        createCaptureState("idle", {
+          requestId: "request-old",
+        }),
+      );
+
+      expect(
+        document.querySelector(
+          "#xjsub-host",
+        ),
+      ).toBeNull();
+
+      handleCaptureState(
+        createCaptureState("starting", {
+          requestId: "request-new",
+        }),
+      );
+      const second = ensureOverlay();
+
+      expect(second).not.toBe(first);
+
+      second.showCaption({
+        id: 1,
+        text: "source",
+        ja:
+          "おネち5ナbた1）6c オネz0と3そ4たく0 2ア pてせ、ぬ c ）、",
+        final: true,
+        at: "2026-09-02T00:00:00.000Z",
+      });
+      second.setPlaybackPaused(true);
+      vi.advanceTimersByTime(
+        CUE_MINIMUM_DISPLAY_MS,
+      );
+
+      const host =
+        document.querySelector(
+          "#xjsub-host",
+        );
+      const cue =
+        host?.shadowRoot?.querySelector<
+          HTMLElement
+        >(".caption-cue");
+
+      expect(cue?.dataset.pageId).toBe(
+        "0",
+      );
+    } finally {
+      handleCaptureState(
+        createCaptureState("idle", {
+          requestId: "request-new",
+        }),
+      );
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe("extractPostContextTerms", () => {
