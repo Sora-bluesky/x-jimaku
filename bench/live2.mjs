@@ -48,6 +48,11 @@ const STOP_DRAIN_TIMEOUT_MS = 45000;
 // JSON claims the one that was asked for.
 const ALLOWED_MODELS = ["tiny", "base", "small", "turbo"];
 const ALLOWED_BACKENDS = ["auto", "translator", "prompt-api"];
+// Must match src/content/index.ts's DEV_ORIGIN. handleOffscreenDevLog only
+// relays a dev-log entry (postMessage + console) when the page's own origin
+// equals this value (src/content/index.ts:432), so the console-relay
+// invariant below only applies when the fixture is actually serving it.
+const DEV_ORIGIN = "http://127.0.0.1:8123";
 
 const CASES = {
   tts: { mediaFile: path.join(here, "refs", "tts-speech.wav"), contextTerms: [] },
@@ -349,6 +354,7 @@ const result = {
   collection: "live2 unattended (CDP Extensions.loadUnpacked + autoplay)",
   diagnostics: {
     devLog: [],
+    consoleDevLog: [],
     clauseTimings: [],
     translationState: [],
     translationPaths: [],
@@ -373,6 +379,25 @@ try {
 
   const pages = await browser.pages();
   const page = pages[0] ?? (await browser.newPage());
+
+  // handleOffscreenDevLog (src/content/index.ts:429) writes each relayed
+  // dev-log entry to the console with an "[x-jimaku-dev]" prefix, from
+  // inside the content script's own execution context. That context is an
+  // isolated world, but it is still attached to this frame's CDP target, so
+  // Puppeteer's page-level "console" event sees it the same as a console
+  // call the page itself made. It would NOT see console output from the
+  // extension's other contexts: the background service worker or the
+  // offscreen document (where these entries originate before this relay),
+  // which are separate CDP targets entirely.
+  page.on("console", (message) => {
+    const text = message.text();
+    if (!text.startsWith("[x-jimaku-dev]")) return;
+    result.diagnostics.consoleDevLog.push({
+      text,
+      loggedAtMs: Date.now(),
+    });
+  });
+
   await page.goto(server.caseUrl, { waitUntil: "domcontentloaded" });
   await new Promise((r) => setTimeout(r, 1500));
   console.error("[live2] fixture loaded");
@@ -929,6 +954,23 @@ if (!result.error && lines.length === 0) {
   // A missed toggle, a failed capture or a renamed overlay selector all end here
   // with no exception, and the file would be unusable to score-ja.
   result.error = "capture produced no caption lines";
+  console.error(`[live2] ${result.error}`);
+}
+// clause-timing fires once per terminal (ledger) line, so terminal lines with
+// zero clause-timing entries means the devLog relay broke somewhere between
+// handleOffscreenDevLog's postMessage and this bench's listener, even though
+// the overlay still rendered captions through the independent DOM path this
+// bench also drains. Gated to the fixture origin because the relay is
+// deliberately limited to it (src/content/index.ts:432); elsewhere, a
+// clause-timing-less run is expected, not a bug.
+if (
+  !result.error
+  && lines.length > 0
+  && result.diagnostics.clauseTimings.length === 0
+  && new URL(server.caseUrl).origin === DEV_ORIGIN
+) {
+  result.error =
+    "terminal lines present but devLog has no clause-timing entries";
   console.error(`[live2] ${result.error}`);
 }
 const joined = lines.join("\n");
@@ -1592,6 +1634,8 @@ result.gates = annotateDisplayMeta({
     devLogKindCounts.passthrough,
   devLogOther:
     devLogKindCounts.other,
+  consoleDevLogCount:
+    result.diagnostics.consoleDevLog.length,
   clauseTranslateMsP50,
   clauseTranslateMsP90,
   clauseDeadlineHits,
