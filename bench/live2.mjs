@@ -32,6 +32,7 @@ import {
   parseChildReport,
   combineDisplayReports,
   annotateDisplayMeta,
+  finalizeGates,
   coverageNote,
   assertCaseMedia,
   countPageLineReuse,
@@ -1896,6 +1897,8 @@ if (
   console.error(`[live2] ${result.error}`);
 }
 
+Object.assign(result, finalizeGates(result));
+
 const stamp = new Date()
   .toISOString()
   .replace(/[-:]/g, "")
@@ -1921,6 +1924,7 @@ console.log(JSON.stringify({
   displayCoverageNote: result.displayCoverageNote,
   showOriginal: options.showOriginal,
   gates: result.gates,
+  gatesSuppressed: result.gatesSuppressed,
   observations: result.observations,
   error: result.error,
 }, null, 2));

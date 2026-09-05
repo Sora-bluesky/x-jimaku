@@ -118,6 +118,11 @@ function buildJudgePrompt(reference, jaClauses) {
 function prepare(resultArgument) {
   const resultFile = path.resolve(resultArgument);
   const result = readJson(resultFile);
+  if (typeof result?.error === "string" && result.error.length > 0) {
+    throw new Error(
+      `Result JSON carries an error and is not scorable: ${result.error}`,
+    );
+  }
   const caseName = resultCase(result);
   const timestamp = resultTimestamp(resultFile);
   const jaClauses = resultJaClauses(result);

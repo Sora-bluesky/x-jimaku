@@ -12,6 +12,7 @@ import {
   combineDisplayReports,
   parseChildReport,
   annotateDisplayMeta,
+  finalizeGates,
   assertCaseMedia,
   countPageLineReuse,
 } from "./live2-config.mjs";
@@ -81,7 +82,138 @@ describe("parseArgs display mode", () => {
   });
 });
 
+describe("finalizeGates", () => {
+  const displayMeta = {
+    displayConfig: "original-off",
+    showOriginal: false,
+    displayCoverage: "single",
+  };
+
+  it("suppresses gates after playback aborts without captured lines", () => {
+    const result = {
+      error: "playback aborted",
+      gates: {
+        ...displayMeta,
+        lines: 0,
+        wrongSenseRoma: 0,
+        englishPassthrough: 0,
+        stopDrainTimedOut: false,
+      },
+      observations: { captionTopChanges: 0 },
+      diagnostics: { primaryClippedExample: null },
+      recognition: { jaClauses: [] },
+    };
+    const finalized = finalizeGates(result);
+
+    expect(finalized).not.toBe(result);
+    expect(finalized.gates).toEqual({
+      ...displayMeta,
+      lines: null,
+      wrongSenseRoma: null,
+      englishPassthrough: null,
+      stopDrainTimedOut: null,
+    });
+    expect(finalized.gatesSuppressed).toBe("no captured lines");
+    expect(finalized.error).toBe("playback aborted");
+    expect(result.gates.lines).toBe(0);
+    expect(result).not.toHaveProperty("gatesSuppressed");
+    expect(finalized.observations).toBe(result.observations);
+    expect(finalized.diagnostics).toBe(result.diagnostics);
+    expect(finalized.recognition).toBe(result.recognition);
+  });
+
+  it("suppresses gates without captured lines even without an error", () => {
+    const finalized = finalizeGates({
+      error: undefined,
+      gates: {
+        ...displayMeta,
+        lines: 0,
+        wrongSenseRoma: 0,
+        englishPassthrough: 0,
+      },
+    });
+
+    expect(finalized.gates).toEqual({
+      ...displayMeta,
+      lines: null,
+      wrongSenseRoma: null,
+      englishPassthrough: null,
+    });
+    expect(finalized.gatesSuppressed).toBe("no captured lines");
+  });
+
+  it("preserves captured counts when a display gate fails", () => {
+    const result = {
+      error: "display gate failed: primaryClipped",
+      gates: { ...displayMeta, lines: 28, primaryClipped: 3 },
+    };
+    const finalized = finalizeGates(result);
+
+    expect(finalized).toBe(result);
+    expect(finalized.gates.lines).toBe(28);
+    expect(finalized.gates.primaryClipped).toBe(3);
+    expect(finalized).not.toHaveProperty("gatesSuppressed");
+  });
+
+  it("returns a captured result without an error unchanged", () => {
+    const result = {
+      error: undefined,
+      gates: { ...displayMeta, lines: 28, wrongSenseRoma: 2 },
+    };
+
+    expect(finalizeGates(result)).toBe(result);
+    expect(result).not.toHaveProperty("gatesSuppressed");
+  });
+
+  it("a result with an error never carries a zeroed gate block", () => {
+    for (const error of [
+      "playback aborted",
+      "backlog did not drain",
+      "capture produced no caption lines",
+    ]) {
+      const finalized = finalizeGates({
+        error,
+        gates: {
+          ...displayMeta,
+          lines: 0,
+          wrongSenseRoma: 0,
+          englishPassthrough: 0,
+        },
+      });
+
+      expect(finalized.gatesSuppressed).toBe("no captured lines");
+      expect(finalized.gates.lines).toBeNull();
+      expect(
+        Object.values(finalized.gates).filter(
+          (value) => typeof value === "number" && value === 0,
+        ),
+      ).toEqual([]);
+    }
+  });
+});
+
 describe("both-mode reports", () => {
+  it("passes gatesSuppressed through to each configuration entry", () => {
+    const report = {
+      displayConfig: "original-off",
+      ...finalizeGates({
+        error: "playback aborted",
+        gates: annotateDisplayMeta(
+          { lines: 0, wrongSenseRoma: 0 },
+          {
+            displayConfig: "original-off",
+            displayCoverage: "single",
+          },
+        ),
+      }),
+    };
+    const combined = combineDisplayReports([report]);
+
+    expect(combined.configs[0].gatesSuppressed).toBe("no captured lines");
+    expect(combined.configs[0].gates).toBe(report.gates);
+    expect(combined.configs[0].error).toBe("playback aborted");
+  });
+
   it("returns a labelled result per configuration", () => {
     const combined = combineDisplayReports([
       {
