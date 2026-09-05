@@ -1,11 +1,30 @@
 # 設計: 固有名詞の表記コーパス（桶の規則・無人採取・受け入れ）
 
-Status: rev4（設計案。敵対レビュー 4 巡を反映・実装未着手）
-Date: 2026-09-04
-Branch: `i91-naming-design`（`dad9fca` 起点・rev2 の HEAD は `bae81f8`・rev3 の HEAD は `87e6617`）。読解の基準は `cfbcf4f`。
+Status: rev5（設計案。敵対レビュー 5 巡を反映・実装未着手）
+Date: 2026-09-05
+Branch: `i91-design-rev5`（`8e226e9` = rev4 が main に入った merge を起点。rev2 の HEAD は `bae81f8`・rev3 の HEAD は `87e6617`）。読解の基準は `cfbcf4f`。
 `scripts/build-stamp.mjs`（`4731eab`）は `i86-release-prep` にあり、本ブランチには未到達です（§4-4）。
 本文が引く file:line に変更はありません。
 関連: `docs/issue-49-design.md`（masking 方式の原理・誤義撲滅の裁定）/ `docs/issue-63-design.md`（DEV ログ中継）
+
+rev5 で変えたこと:
+
+- 実効テキスト（§5-0 D）の判定を `isRevision` から「表示する `primary` が実際に切り詰められたか」に変えました。
+  改訂でも、翻訳どうしで日本語が前の行の日本語で始まらなければ overlay は**全文を追記します**（`overlay.ts:1087-1104`
+  で `primary` は `fullPrimary` のまま）。rev4 はこの行を尾だけにしていたので、画面に再び出た接頭辞の名前が
+  分母から消え、尾の出現に接頭辞の形を帰属させるか、新しく表示された誤形を数え漏らして `nameExpectedRate` を
+  上げていました。§1-8 の事実も「表示は尾だけ」から直しました。
+- A の Y を「表と `terms.txt` の和」から、`expected` を持つ名前に限りました（§5-0 A）。`expected` は表の状態で
+  しか定義されておらず、`terms.txt` は英語綴りだけを持つので、rev4 の A-4 は表外の名前（tts2 の `coronagraph`）で
+  計算できませんでした。表外の名前に `expected` を与えるのは §2-4 が「変えない」と言うページ由来の機構だけなので、
+  `with` モードでページ由来になる `terms.txt` の語に限って原綴りを `expected` にし、それ以外の表外語は A の外
+  （観測のみ）にしました。A-2 の `wrongKnown` も同じ Y を走るので、表外の語は `rejected`（表の行）を持たず
+  スクリプト混在の 2 類だけで判定する、と書きました。`coronagraph` は小文字始まりで `extractPostContextTerms`
+  が拾わず（`index.ts:2975`・`:2998`）、`with` でも守られていない語だったので、§5-3 の例からも外しました。
+- `drops[]` に `droppedAt` を足し、`pages` / `lines[]` と同じ `replayStartedAtMs` の切りを検証の前に当てます
+  （§4-1-6・§5-2 手順 1）。`cueId` と `sourceIds` しか持たない rev4 の形では、消去に失敗したログの前走行の drop や
+  ウォームアップ中の drop が切れず、行 id は走行ごとに振り直されるので切った `lines[]` との突き合わせ（検証②）が
+  別の走行の行に当たり得ました。
 
 rev4 で変えたこと:
 
@@ -120,7 +139,11 @@ sora の問いは 2 つです。①原綴りで残す名前とカタカナで書
    `[\p{Lu}][\p{L}\p{M}\p{N}'’._-]{3,}` + @handle で拾い、4 文字以上・stoplist・上限 40
    （`src/shared/messages.ts:23`）。fixture は `bench/serve.mjs:69-71` が `contextTerms` を
    `<article data-testid="tweet">` に描画し、`live2.mjs:52-76` の `CASES` が固定リストで渡します
-   （tts2 = Roman / NASA Goddard / Kennedy Space Center / coronagraph）。
+   （tts2 = Roman / NASA Goddard / Kennedy Space Center / coronagraph）。fixture から拡張への経路はこの
+   `<article>` だけで（`serve.mjs:70` が `<span>語.</span>` を並べ、content が `innerText` を正規表現で読む）、
+   単語は先頭が大文字（`:2975` の `[\p{Lu}]`・`:2998` で再確認）、語列は各語が大文字始まり（`:3066`）でなければ
+   拾いません。**`coronagraph` は小文字始まりなので一度も抽出されず**、`with` モード（§4-3）でもページ由来には
+   なりません。マスクもされず、モデルの自由です。
 8. 字幕ログ（`src/shared/caption-display-log.ts:17-34`）はページごとに `cueId / pageId / line0 / line1 /
    sourceText / translationPath / appearedAt / replacedAt` を持ち、上限 400 ページ（`:11`）。
    `cueId` は `${line.id}:${index}`（`overlay.ts:1223`・index は 1 つの cue を分割したときの番号）で、
@@ -132,8 +155,12 @@ sora の問いは 2 つです。①原綴りで残す名前とカタカナで書
    待ち行列が詰まると隣り合う cue を 1 つに merge し（`overlay.ts:1393-1452`）、`cueId` は `1:0+2:0` の形
    （`:1431-1432`）、`sourceIds` は両方の連結（`:1433-1436`）、`sourceText` も両方の連結（`:1419-1425`）に
    なります。merge の条件は `fallback` が等しいことだけです（`cue-queue.ts:56-59`）。
-   認識器が同じ語で始まる長い節を後から確定したとき（改訂）、表示は増えた尾だけですが
-   （`overlay.ts:1068-1113`・`overlay.test.ts:783`）、`sourceText` は改訂後の**全文**です（`:1187`・`:1227`）。
+   認識器が同じ語で始まる長い節を後から確定したとき（改訂・`source.startsWith(lastAcceptedSource)`・
+   `overlay.ts:1079-1083`）、表示が増えた尾だけになるのは 2 つの分岐だけです。翻訳どうしで日本語も前の行の
+   日本語で始まるとき（`primary.startsWith(lastAcceptedPrimary)`・`:1093-1104`・`overlay.test.ts:783`）と、
+   片方が英語素通しで英語の尾を出すとき（`:1105-1112`）。翻訳どうしでも日本語が前の行で始まらなければ
+   **全文の翻訳をそのまま追記します**（`:1084` の `primary = fullPrimary` が `:1087-1104` で触られない）。
+   どの分岐でも `sourceText` は改訂後の**全文**です（`:1187`・`:1227`）。
    `appearedAt` / `replacedAt` は `Date.now()` を `toISOString()` した**文字列**です
    （`caption-display-log.ts:32`・`:262`・`:296`・`:609-611`）。`live2.mjs:861-905` は終了時に worker からこのログを読み、
    **滞留時間の分位点だけ**残してページを捨てています。
@@ -356,7 +383,8 @@ export interface NameTerm {
 - **確実に誤り**の機械判定が可能な 2 類。**語内の混在**: 1 つのカタカナ語の中に別スクリプトが入る
   （「оパус」のキリル文字）。**名前内の混在**: 複数語の名前で、語の一部だけが原綴りで残り、残りが
   仮名・漢字になっている（「ケネディ Space Center」「ケネディの Space Center」）。どちらも Unicode の
-  スクリプトと表の `term` の語列から定義で判定できます。「Roman 宇宙望遠鏡」は混在ではありません
+  スクリプトと、その名前の英語綴り（表の `term`、表外なら `terms.txt` の行）の語列から定義で判定できます。
+  表の行を持たない名前に機械で言える誤りはこの 2 類だけです（`rejected` は表の行にしかない・§5-2）。「Roman 宇宙望遠鏡」は混在ではありません
   （"宇宙望遠鏡" は `term` の外）。rev0 は名前内の混在を `variant` に数えていましたが、1 つの名前が
   2 つのスクリプトで出ているので誤りです。ベースラインに 3 走行 3 件あります（§1-11）。
 - 表の定訳と最頻出力がずれた（ドリフト）、の検出。
@@ -423,9 +451,9 @@ export interface NameTerm {
    （`CueData` にはある・`overlay.ts:1228`）を足します。`sources` は、そのページを出した cue が束ねる
    **原文行の配列**で、要素は `{ id, text, rung }` です。
    - `id`: `CueData.sourceIds` の要素（`overlay.ts:84`）。merge した cue（`:1433-1436`）では 2 つ以上になります。
-   - `text`: その行の**実効テキスト**（§5-0 D。改訂なら尾、それ以外は全文）。`acceptCommittedClause` が
-     `lines[]` に書くのと**同じ 1 つの値**で、`createCueSegments`（`:1182`）に渡す引数を 1 つ足して cue に
-     複写します。ページ側で別に計算しません（2 か所で計算すると rev3 のようにずれる）。既存の `sourceText`
+   - `text`: その行の**実効テキスト**（§5-0 D。表示する `primary` を切り詰めた行なら英語の尾、それ以外は全文）。
+     `acceptCommittedClause` が `lines[]` に書くのと**同じ 1 つの値**で、`createCueSegments`（`:1182`）に渡す
+     引数を 1 つ足して cue に複写します。ページ側で別に計算しません（2 か所で計算すると rev3 のようにずれる）。既存の `sourceText`
      （全文・merge では連結）は消しません（`run-bench.mjs:554` が読みます）。
    - `rung`: その行を作った段。値は梯子の順（§1-4）で `masked`（占位子復元）/ `translator-masked` /
      `translator-unmasked` / `lm-unmasked` / `passthrough`。`27e8290` が `fallback: true` を中継した前例に沿い、
@@ -440,10 +468,11 @@ export interface NameTerm {
    **最後の早期 return を通過した直後**に `recordLineAccepted({ id, text, rung })` を呼びます。早期 return は 2 つ
    あり、重複と clear watermark（`overlay.ts:1049-1054`）の後に**順序 guard**（`:1056-1066`・`line.id` が受理済みの
    最大 id より小さければ捨てる）が続きます。rev3 は 1 つ目の直後に置いていたので、2 つ目で捨てられた行
-   （cue を作らず表示にも出ない）が分母に入り `missing` に化けます。呼ぶ位置は `isRevision`（`:1079-1083`）が
-   決まった後・`lastAcceptedSource` を上書きする（`:1119-1122`）前で、`text` はそこで計算する実効テキスト
-   （§5-0 D）です。この位置から `createCueSegments`（`:1124`）と `enforceQueueDiscipline`（`:1154`）までに
-   他の早期 return はありません（`:1067-1123` は計算と代入だけ）。`createCueSegments` が `[]` を返して cue を
+   （cue を作らず表示にも出ない）が分母に入り `missing` に化けます。呼ぶ位置は表示する `primary` の切り詰め分岐
+   （`:1087-1113`）を抜けた直後・`lastAcceptedPrimary` / `lastAcceptedSource` を上書きする（`:1115-1122`）前で、
+   `text` はそこで計算する実効テキスト（§5-0 D）です。切り詰めたかは分岐の中で立てる 1 つの真偽値で持ち、
+   `isRevision` からは作りません（rev4 の穴・§5-0 D）。この位置から `createCueSegments`（`:1124`）と
+   `enforceQueueDiscipline`（`:1154`）までに他の早期 return はありません（`:1114-1123` は代入だけ）。`createCueSegments` が `[]` を返して cue を
    作らない行（`:1131-1144`・`:1197-1199`）は記録の後なので入り、これは意図どおりです（翻訳が空で表示に出ない
    行は脱落）。呼び出し側の `receiveCommittedClause` にも同じ 2 条件の guard（`:990-996`）と、`ja` が空の行を
    `pendingFinals` に**保留**する分岐（`:1007-1029`）がありますが、どちらも記録の前です。保留は捨てるのでは
@@ -451,18 +480,29 @@ export interface NameTerm {
    記録されます。`clear()`（`:517`）と破棄（`:744`）で消える保留は一度も受理されないので D の外です
    （利用者の操作か終了であって、待ち行列の損失ではない）。ログは `lines[]`（`{ id, text, rung, acceptedAt }`）
    に積みます。
-   `enforceQueueDiscipline` が `waitingCues.shift()` した cue（`:1458`）は `recordCueDropped({ cueId, sourceIds })` で
-   `drops[]` に残します。`drops[]` は分母ではなく `missing` の内訳（表示前に落ちた / 表示されたが表記が無い）に
-   使います。`lines[]` の上限は `pages` と同じ 400 にし、超えた分は `linesTruncated` に数えて JSON に書きます
-   （無音で落とさない）。サンプラは `host.dataset.cueDrops` も読み、`drops[]` の件数と突き合わせます。
+   `enforceQueueDiscipline` が `waitingCues.shift()` した cue（`:1458`）は
+   `recordCueDropped({ cueId, sourceIds, droppedAt })` で `drops[]` に残します。`droppedAt` は `acceptedAt` /
+   `appearedAt` と同じ作り（ログ側の `isoNow()`・`caption-display-log.ts:296` と同じ時計を ISO 文字列で）で、
+   bench が `pages` / `lines[]` と同じ `replayStartedAtMs` で切るためにあります（§5-2 手順 1）。これが無いと、
+   消去に失敗したログ（`captionLogCleared: false`）に残る前走行の drop とウォームアップ中の drop が切れず、
+   行 id は走行ごとに振り直されるので、切った `lines[]` と `sourceIds` で突き合わせると別の走行の行に当たります。
+   `drops[]` は分母ではなく `missing` の内訳（表示前に落ちた / 表示されたが表記が無い）に使います。`lines[]` の
+   上限は `pages` と同じ 400 にし、超えた分は `linesTruncated` に数えて JSON に書きます（無音で落とさない）。
+   `acceptedAt` / `droppedAt` が `Date.parse` で NaN になった要素も残さず、`linesUnparsed` / `dropsUnparsed` に
+   数えます（`pagesUnparsed` と同じ）。サンプラは `host.dataset.cueDrops` も読み、`drops[]` のうち `droppedAt` が **Chrome の起動時刻以降**の件数と
+   突き合わせます。`cueDrops` は overlay の生成（`overlay.ts:303`）から数えるので、`replayStartedAtMs` で切った後の件数とは
+   合わず（ウォームアップ中の落下が入る）、切る前の全件とも合いません（消去に失敗したログに残る前走行の drop は
+   この走行の overlay が数えていない）。前走行の `droppedAt` は起動より前、この走行の落下は起動より後なので、
+   起動時刻で分ければ両方を外さずに済みます。それでも合わないときは `cueDropsMismatch` に両方の値を書き、
+   rate の算出は続けます（この検査は記録の欠落を見つけるためのもので、分母の条件ではない）。
 7. **拡張側の 3 点目: offscreen の `queue-drop` に本文を足す。** `translate.ts:349-351` の data に `text: dropped.text`
    を 1 つ足します（`console.warn` は既に `textLength` を持っている）。中継の検査（`messages.ts:779-797`）は
    `kind` / `requestId` / `lineId` を見るだけで未知の鍵を拒む節は読んだ範囲に無いので、`text` の受理は実装時に
    1 度確かめます。bench はこの節を `rung: "dropped-before-translation"` の行として**分母に足し**（§5-0 D の
    第 2 項）、id が `lines[]` と重ならないことを検査します（落とした節は content に届かないので、重なれば bug）。
-   この節は overlay に届かないので改訂の判定を受けられず、`text` は全文です。後続の改訂が同じ接頭辞を
-   表示していた場合は接頭辞の名前を 2 度数える方向（`missing` の過大）の誤りが残りますが、捨てた事実を消す
-   側には倒しません。この経路の記録が
+   この節は overlay に届かないので切り詰めの判定（§5-0 D）を受けられず、`text` は全文です。後続の行が同じ
+   接頭辞を表示していた場合は接頭辞の名前を 2 度数える方向（`missing` の過大）の誤りが残りますが、捨てた事実を
+   消す側には倒しません。この経路の記録が
    中継の欠落で消えた場合、落下そのものが見えなくなります。§1-10 と同じ穴で、中継の修正は前提作業です。
 
 ### 4.2 クリップの出どころ
@@ -476,8 +516,16 @@ export interface NameTerm {
 | **実クリップ** | `yt-dlp` で `bench/work/` に落とす（tibo の前例・`run-bench.mjs:443-447`・コミット禁止・`localOnly`） | 素材次第 | 高（認識の繰り返し等、合成では出ない挙動。1 節が複数ページに割れる） |
 
 台本の名前は `terms.txt` に書きます。書くのは英語綴りだけで、日本語表記は書きません（表記を決めるのは
-表であって fixture ではない）。台本を作る段でモデルを使う場合、費用は**クリップ 1 本につき 1 回**で、
-走行や集計には乗りません。
+表であって fixture ではない）。`terms.txt` は「ページが名指しする名前」の一覧で、`with` モード（§4-3）でページ由来
+（§1-3・§2-4）になる語だけを置きます。つまり `extractPostContextTerms` が拾う綴り（単語は先頭大文字・4 字以上・
+stoplist 外・語列は各語が大文字始まり・`index.ts:2975`・`:3066`）でなければ置けません。拾われない語は
+ページに描いても守られず、`with` と `without` の差が出ないからです。この規約は bench に抽出規則を複製せずに
+検査します: `src/content/index.test.ts:300` の DOM ハーネスで各ケースの `<article>` 本文（`serve.mjs:41` の
+`casePageHtml` と同じ並び）を組み、**実物の `extractPostContextTerms` を呼んで** `terms.txt` の全行が返ることを
+単体テストで見ます（§2-5 の複写 import と同じ規律・解析器を 2 つ持たない）。いまの tts2 では `coronagraph` が
+これに落ちるので（§1-7・小文字始まり）、`terms.txt` から外して `script.txt` にだけ残します。用語（普通名詞）で
+あって名前ではなく、本設計の対象外です（§2-2）。台本を作る段でモデルを使う場合、費用は**クリップ 1 本につき
+1 回**で、走行や集計には乗りません。
 
 ### 4.3 無人バッチ
 
@@ -525,11 +573,13 @@ export interface NameTerm {
 - `replayStartedAt` / `captionLogCleared` / `pagesUnparsed`（§4-1-2）。
 - `display.pages[]`（§4-1-2。`cueId, pageId, line0, line1, sourceText, sources[{ id, text, rung }],
   translationPath, fallback, appearedAt, replacedAt`）。
-- `lines[]` / `drops[]` / `linesTruncated`（§4-1-6）。
+- `lines[]`（`{ id, text, rung, acceptedAt }`）/ `drops[]`（`{ cueId, sourceIds, droppedAt }`）/ `linesTruncated` /
+  `linesUnparsed` / `dropsUnparsed`（§4-1-6）。`pages` と同じ切り（§4-1-2）を当てた後の形です。
 - `naming`（走行単体の自己記述）: 表の語と `terms.txt` の語ごとに、英語側の出現数（§5-0 D）・出力側の
   **生の表記と件数**・分類（§5-2）・`missing` の内訳（表示前に落ちた /
-  翻訳前に捨てた / 表示されたが無い）。分類はその走行が使った表（`nameTableHash`）に対するものです。1 走行を開けば、その走行の
-  名前の状態が読める形にします。
+  翻訳前に捨てた / 表示されたが無い）。分類はその走行が使った表（`nameTableHash`）に対するもので、`expected` を
+  持たない語（§5-0 A の Y の外。`without` の表外語など）は生の表記と件数だけを持ち、分類を持ちません。1 走行を
+  開けば、その走行の名前の状態が読める形にします。
 
 ### 4.5 蓄積（人が merge しない）
 
@@ -599,12 +649,18 @@ score-ja の judge（agy）は**このループの外**に置きます（名前�
 **D（分母）: 走行の名前 X の英語側出現数 = 次の 2 つに含まれる X の出現数の和。**
 
 1. overlay が受理した各行の**実効テキスト**。`acceptCommittedClause` が受理の瞬間（最後の早期 return
-   `:1056-1066` の後・`lastAcceptedSource` の更新 `:1119-1122` の前）に 1 回だけ計算する値で、その行が直前の
-   受理行の改訂（`source.startsWith(lastAcceptedSource)`・`:1079-1083`）なら
-   `source.slice(lastAcceptedSource.length).trimStart()` の尾、そうでなければ `source` の全文。overlay はこれを
-   `lines[].text` に書き、同じ値をページの `sources[].text` に複写します（§4-1-5・§4-1-6）。改訂の判定は
-   日本語側の分岐（`:1087-1113`。翻訳どうしなら `lastAcceptedPrimary` で切る）と無関係に英語側だけで決めます。
-   利用者が新しく見た英語がこれで、接頭辞は前の行で数え済みです。
+   `:1056-1066` の後・表示する `primary` の切り詰め分岐 `:1087-1113` を抜けた直後・`lastAcceptedPrimary` /
+   `lastAcceptedSource` の更新 `:1115-1122` の前）に 1 回だけ計算する値で、**その行の `primary` が実際に
+   切り詰められたなら** `source.slice(lastAcceptedSource.length).trimStart()` の尾、**切り詰められなかったなら**
+   `source` の全文。切り詰めが起きる分岐は 2 つだけです。改訂（`source.startsWith(lastAcceptedSource)`・
+   `:1079-1083`）で翻訳どうし（`:1088-1092`）かつ日本語も前の行の日本語で始まる（`primary.startsWith(lastAcceptedPrimary)`・
+   `:1093-1104`）ときと、改訂で片方が英語素通しのとき（`:1105-1112`・英語の尾を表示）。改訂でも 1 つ目の日本語側の
+   条件が外れた行は `primary` が `fullPrimary` のまま（`:1084`）で、overlay は**全文の翻訳を追記します**。
+   その行の実効テキストは全文です。利用者は接頭辞の名前をもう 1 度見ているので、その出現は数えます。
+   `isRevision` だけで尾にする（rev4）と、この行の接頭辞に出た名前が分母から落ち、尾の出現に接頭辞の形を
+   帰属させるか、新しく表示された誤形を数え漏らして `nameExpectedRate` を上げます。
+   overlay はこれを `lines[].text` に書き、同じ値をページの `sources[].text` に複写します（§4-1-5・§4-1-6）。
+   集計は切り詰めを判定しません（overlay が立てた真偽値の結果を読むだけ）。
 2. offscreen が翻訳前に捨てた節（`queue-drop`・§4-1-7）の全文。overlay に届かないので改訂の判定はありません。
 
 **入らないもの**: 台本（周回数が走行で違う・§1-14）、ページの `sourceText`（全文の繰り返し・§1-8）、
@@ -612,9 +668,31 @@ score-ja の judge（agy）は**このループの外**に置きます（名前�
 （表示に出ないと overlay が決めた行・§4-1-6）、`pendingFinals` のまま `clear()` / 破棄で消えた行（同）。
 表示に届かず落ちた cue（`drops[]`）の行は**入ります**（受理はしたが表示できなかった行で、D の第 1 項）。
 
-**A（合否）: 変更の対象名を X、その走行群の表と `terms.txt` にある X 以外の各名前を Y として、次の 5 つ。**
+**A（合否）: 変更の対象名を X、その走行群で `expected` を持つ X 以外の各名前を Y として、次の 5 つ。**
 比較と書いたものはすべて §5-3 の 1 つの形（走行ごとの率・一側 exact Wilcoxon・三値）で、上限値はどこにも
 ありません。
+
+**Y の範囲と `expected`。** `expected` は「決定論的な機構がその名前に与える形」で、機構は 2 つしかありません。
+①その走行の表（H_run・§4-5）の行: `render` どおり（原綴りか `ja`）。②表に無いが `terms.txt` にあり、`with`
+モードでページ由来になる語（§4-2 の規約でページ由来になる綴りだけが `terms.txt` にある）: **原綴り**。表が
+与える形ではなく、ページ由来のマスクが原綴りで復元する（§1-3）という、§2-4 が「変えない」と言う既定そのものです。
+`expected` は**名前ごと**に 1 つで、出現ごとには決めません。マスクは節ごとに決まる（ページ由来の出現が節に 5 つ以上
+あれば計画自体が無い・`term-masking.ts:38-46`）ので、同じ名前が守られた出現と守られなかった出現を 1 走行に持ちます。
+守られなかった出現にも名前の `expected` を当てるのは意図で、A は同じクリップの before と after を比べる（§5-3）ため、
+枠の奪い合いで守られなくなった出現は `variant` / `missing` に落ちて A-4 の率を下げ、それが捕まえたい後退です
+（下の A-4）。出現ごとに計画を見て `expected` を外すと、守れなくなったことが率から消えます。その代わり
+`nameExpectedRate` の絶対値は翻訳の良さではなく、同じクリップの比較にしか読みません（分母を併記する規約と同じ）。
+これ以外の名前は「モデルの自由」で `expected` を持たず、**A の外**です: `without` モードの表外語（ページに無い）、
+`without` モードの曖昧語（ページの名指し以外の証拠が無ければマスクされない・§1-2・§4-3）、`terms.txt` に置けない
+綴りの語（§1-7 の `coronagraph`）。これらは生の表記件数・`nameVariants`・候補票（§3）で観測するだけです。
+曖昧語は節に版や姉妹名の証拠があればその出現だけ守られます（`glossary.ts:77-90`）が、それは節の文面が決める形で
+名前の形ではないので、A には入れません。そこでの後退は `nameVariants` の観測にしか出ず、A は見逃します。
+見逃す側に倒すのは、証拠付きの出現だけを拾って名前の率にすると、証拠の有無が走行ごとに違う ASR の揺れが
+率の差に化けるからです。
+表外の名前に日本語表記の方針を作らない（§2-4）ので、A がそれらに何かを要求することはありません。
+②の名前は `ja` を持たないので `keptLatin` になれず、`rejected` を持たないので `wrongKnown` はスクリプト混在の
+2 類（§3）だけです。A-2 と A-4 はこの Y を同じ範囲で走ります（rev4 は Y を「表と `terms.txt` の和」と書き、
+`expected` の無い名前で A-4 が計算できませんでした）。
 
 1. `nameWrongKnown(X) = 0`（after の全走行）。0 は必要条件であって証明ではありません。5 走行で X の出現が
    15〜20 なら、0/20 が言えるのは真の率が 2 割に満たないことまでです。
@@ -622,13 +700,15 @@ score-ja の judge（agy）は**このループの外**に置きます（名前�
 3. `nameExpectedRate(X)`: after が before を**下回る**証拠なし（分母 D を必ず併記。分母を出さない率は読まない）。
 4. 各 Y の `nameExpectedRate`: 後退の証拠なし。2 だけでは、Y が `expected` から `variant` / `missing` に落ちても
    `wrongKnown` が 0 のままなら見えません。表優先の順序（§2-5）や上限 4 の枠（`term-masking.ts:38-46`・`:66-79`）
-   の奪い合いでページ由来の Y が守られなくなる後退は、この項でしか捕まりません。
+   の奪い合いでページ由来の Y（上の②）が守られなくなる後退は、この項でしか捕まりません。②の `expected` が
+   原綴りなのはそのためで、枠を失った語がカタカナに化ければ `variant`、消えれば `missing` に落ちて率が下がります。
 5. `englishPassthrough` 率: 後退の証拠なし（名前を守って英語に落ちたら名前の改善ではない・§1-13）。
 
 **結果**: 1 が破れるか 2〜5 のどれかが「後退」なら不合格。どれかが「判定不能」（走行数不足・分母を持たない走行・
 §5-2 の検査に落ちた走行）で後退が無ければ判定不能。すべて「後退の証拠なし」で初めて合格。「後退の証拠なし」は
 「後退なし」ではありません（§5-3 の試算）。Y は名前ごとに独立に比べ、Y の分母が 0 の走行はその Y の比較から
-外します（before + after の全走行で 0 の Y は、そのクリップに無い名前なので対象外）。名前の数だけ検定が
+外します（before + after の全走行で 0 の Y は、そのクリップに無い名前なので対象外）。Y の範囲は走行群の
+`termsMode` で変わる（`with` だけが②を持つ）ので、before と after は同じ `termsMode` の走行どうしで比べます。名前の数だけ検定が
 並ぶので偽の「後退」は増えますが、その費用は走行のやり直しで、見逃しの費用は利用者に見える後退です。
 向きはこれで固定します。
 
@@ -660,8 +740,8 @@ rev1 は「`cueId` の `:` より前で `line.id` に束ねる」でした。パ
 
 - merge した cue の `cueId` は `1:0+2:0`（`overlay.ts:1431-1432`）。`:` で切ると連結した全文が行 1 に付き、
   行 2 は丸ごと消えて、後半の名前の出現数と `missing` が両方ずれます。
-- 改訂の cue は尾だけ表示して `sourceText` は全文（`:1068-1113`・`:1227`）。ページの `sourceText` を分母に
-  すると、前の節で既に表示した名前をもう 1 度数えて `missing` にします。
+- 切り詰めが効いた改訂の cue は尾だけ表示して `sourceText` は全文（`:1068-1113`・`:1227`・§1-8）。ページの
+  `sourceText` を分母にすると、前の節で既に表示した名前をもう 1 度数えて `missing` にします。
 - merge は `fallback` しか見ない（`cue-queue.ts:56-59`）ので、ページに 1 つの `rung` を持たせると段別の
   内訳が壊れます。
 
@@ -670,16 +750,19 @@ rev1 は「`cueId` の `:` より前で `line.id` に束ねる」でした。パ
 
 手順:
 
-1. `Date.parse(appearedAt) >= replayStartedAtMs` のページと、`Date.parse(acceptedAt) >= replayStartedAtMs` の
-   `lines[]` だけ残す（§4-1-2）。
+1. `Date.parse(appearedAt) >= replayStartedAtMs` のページ、`Date.parse(acceptedAt) >= replayStartedAtMs` の
+   `lines[]`、`Date.parse(droppedAt) >= replayStartedAtMs` の `drops[]` だけ残す（§4-1-2・§4-1-6）。3 つとも
+   同じ切りで、検証（下）はすべて切った後の集合に対して行います。切っていない `drops[]` を切った `lines[]` に
+   突き合わせると、前走行の drop（消去失敗）やウォームアップの drop の `sourceIds` が、振り直された同じ id の
+   行に当たります。
 2. `cueId` を**不透明な鍵**としてページを cue に束ねる（`:` でも `+` でも切らない）。cue の `sources[]` は
    そのどのページでも同じです。
 3. 原文行 `id` を共有する cue を 1 つに繋ぐ（union-find）。できた連結成分が**単位**です。ほとんどは 1 行 1 cue、
    長い節を割った cue（`${id}:0` / `:1`）は 1 行 n cue、merge した cue は n 行 1 cue で、両方が混ざることも
    あります。`lines[]` にあってどの cue にも現れない id（落ちた cue・空の翻訳）は 1 行だけの単位になります。
-4. 英語側 = **D**（§5-0）。`lines[]` の各 id の `text`（実効テキスト。改訂なら尾）を 1 回採り、offscreen で捨てた節
-   （§4-1-7）を足す。ページの `sources[].text` は同じ値の複写で、検証①で `lines[].text` と一致することを見ます。
-   集計は改訂を判定しません（overlay が判定した結果を読むだけ）。ページを 1 つも持たない単位は出力側が空なので、
+4. 英語側 = **D**（§5-0）。`lines[]` の各 id の `text`（実効テキスト。表示を切り詰めた行なら尾、それ以外は全文）を
+   1 回採り、offscreen で捨てた節（§4-1-7）を足す。ページの `sources[].text` は同じ値の複写で、検証①で
+   `lines[].text` と一致することを見ます。集計は切り詰めを判定しません（overlay が判定した結果を読むだけ）。ページを 1 つも持たない単位は出力側が空なので、
    全出現が `missing` に落ちます。
    出力側 = 単位の全ページの `line0` / `line1` を `appearedAt` 順に連結した 1 文字列。
 5. 表の語ごとに、英語側の出現数 n を行別に数え（同じ行に 2 回なら 2）、出力側で見つけた各形の件数を n を
@@ -693,13 +776,16 @@ rev1 は「`cueId` の `:` より前で `line.id` に束ねる」でした。パ
 
 rev1 の手順 3（同じ `line.id` の `:0` / `pageId 0` への戻りを改訂の境目にする）は消します。`acceptedFinalIds`
 （`overlay.ts:1050`）が同じ id を 2 度受けないので、この境目はありません。改訂は**別の id** で来て
-（`overlay.test.ts:783` は id 1 → id 2）、`sources[].text` が尾だけを持つので、単位を分けるだけで正しく
-数えられます。表示のリセット（`:532`）の後に id が振り直されるかは実装時に `pages` で確かめ、同じ id が
+（`overlay.test.ts:783` は id 1 → id 2）、`sources[].text` が「その行で表示に出た分」（切り詰めたなら尾、
+全文を追記したなら全文・§5-0 D）を持つので、単位を分けるだけで正しく数えられます。表示のリセット（`:532`）の後に id が振り直されるかは実装時に `pages` で確かめ、同じ id が
 離れた時刻に別の `text` で現れたら別の単位にします。
 
-検証は集合で行い、件数の一致では行いません（件数は落下と無関係に 1 ずれる・§1-16）。①ページの `sources[].id` は
-すべて `lines[]` にあり、同じ id の `text` が一致する ②`drops[]` の `sourceIds` はすべて `lines[]` にある ③offscreen `queue-drop` の `lineId` は
-`lines[]` に**無い** ④`lines[]` の id 数 ≥ 単位に現れた id 数。1 つでも破れたら走行に印を付け、率を出しません。
+検証は集合で行い、件数の一致では行いません（件数は落下と無関係に 1 ずれる・§1-16）。集合はすべて手順 1 で
+切った後のものです。①ページの `sources[].id` はすべて `lines[]` にあり、同じ id の `text` が一致する ②`drops[]` の
+`sourceIds` はすべて `lines[]` にある（切りの前に受理され後に落ちた cue はここで破れます。巻き戻し前の排出
+（`live2.mjs:604`）が待ち行列を空にしている前提なので、破れたら排出の失敗であって、drop を黙って残す側には
+倒しません）③offscreen `queue-drop` の `lineId` は `lines[]` に**無い** ④`lines[]` の id 数 ≥ 単位に現れた id 数。
+1 つでも破れたら走行に印を付け、率を出しません。
 
 | 分類 | 条件 |
 |---|---|
@@ -708,6 +794,11 @@ rev1 の手順 3（同じ `line.id` の `:0` / `pageId 0` への戻りを改訂�
 | `wrongKnown` | 次のいずれか。①表の `rejected` に載る表記（`ja` と原綴りの出現を除いた残りに対して照合する。「ローマン」の中の「ローマ」を拾わないため）②語内のスクリプト混在 ③名前内のスクリプト混在（§3） |
 | `variant` | 上のどれでもないカタカナ表記（候補票へ） |
 | `missing` | 出力側に対応する表記が見つからない（脱落） |
+
+分類が付くのは `expected` を持つ名前（§5-0 A の Y と X）だけです。表に無くページ由来の `terms.txt` の語
+（`with` モード）は `expected` = 原綴りで、`keptLatin` は起きず、`wrongKnown` は②③だけです。`expected` を持たない
+語（`without` の表外語・曖昧語、`terms.txt` に置けない綴り）には分類を付けず、生の表記と件数だけを持ちます
+（§4-4）。
 
 **ゲートは名前単位で読みます。** 走行全体の `nameWrongKnown = 0` は issue-49 rev5 の到達目標として毎バッチ
 報告しますが、変更ごとの合否にはしません。Roman のベースラインが 05:30 以降のすべての走行で赤（§1-13）なので、
@@ -718,8 +809,8 @@ rev1 の手順 3（同じ `line.id` の `:0` / `pageId 0` への戻りを改訂�
 観測は 1 つ: **`nameVariants`**。バッチ内の名前ごとの異なる表記数。バッチをまたいで増えないこと。
 これは合否でなく、候補票の入力です。
 
-`without` モードの曖昧語はゲートに入れません（§4-3）。マスクされないので、表を測っておらずモデルを
-測っています。この分は候補票と表外の基準線に使います。
+`without` モードの曖昧語はゲートに入れません（§4-3・§5-0 A の Y の外）。マスクされないので、表を測っておらず
+モデルを測っています。この分は候補票と表外の基準線に使います。
 
 ### 5.3 「効いた」と言える計測
 
@@ -763,10 +854,12 @@ rev1 の手順 3（同じ `line.id` の `:0` / `pageId 0` への戻りを改訂�
   見えません。細かい差を主張するなら走行を増やす前に**出現密度の高い台本**（§4-2 公有英文）を足します。
 - `nameWrongKnown(Kennedy Space Center) = 0`（A-1・after 全走行）。既存走行の混在 3/43（§1-11）は変更前の表でも
   `wrongKnown` です（§3）。
-- Y = Roman / NASA / Goddard / NASA Goddard / coronagraph（表と `terms.txt`）の `nameWrongKnown` 率（A-2）と
-  `nameExpectedRate`（A-4）、`englishPassthrough` 率（A-5）に後退の証拠が無いこと（同じ検定）。この変更は
-  表優先の順序（§2-5）を含むので、A-4 が見るのはまさに「Kennedy が枠を取って coronagraph や NASA Goddard が
-  守られなくなった」型の後退です。
+- Y = Roman / NASA / Goddard（表・`expected` は原綴り）と NASA Goddard（表外・ページ由来・`expected` は原綴り・
+  §5-0 A の②）の `nameWrongKnown` 率（A-2）と `nameExpectedRate`（A-4）、`englishPassthrough` 率（A-5）に後退の
+  証拠が無いこと（同じ検定）。`coronagraph` は Y に入りません。小文字始まりで一度も抽出されず（§1-7）、before でも
+  after でも守られていない語なので、比べるものがありません（§4-2 で `terms.txt` から外します）。この変更は
+  表優先の順序（§2-5）を含むので、A-4 が見るのはまさに「Kennedy が枠を取って NASA Goddard が守られなくなった」
+  型の後退です。
 - 「ケネディの Space Center」型の混在は `wrongKnown` に落ちるので（§3）、A-1 で読みます。
   `nameVariants(Kennedy)` は観測として、after で増えていないこと。
 - 標本の限界: 95 秒クリップに Kennedy は 1 走行 3〜4 出現（台本 1 周に 1・§1-14）、5 走行で 15〜20。
@@ -818,7 +911,8 @@ sora が動ける言い方にすると:
    検証: 1 走行で `display.pages.length` が `display.blocks.length` と一致し（ウォームアップの 1 枚が落ちて
    いて、全ページが落ちてはいない）、`sourceText` が `original` 行より長い。表を 1 字変えてビルドせずに
    走らせ、bench が止まること（存在の確認と作動の確認は別）。ログに `lines[]` / `drops[]` があれば（6 の後）
-   同じ切り方で `result.display.lines` / `drops` に書く。
+   同じ切り方（`lines[]` は `acceptedAt`・`drops[]` は `droppedAt`・§5-2 手順 1）で `result.display.lines` /
+   `drops` に書き、NaN は `linesUnparsed` / `dropsUnparsed` に数える。
 2. **集計 `naming-corpus.mjs` と候補票。** 表は §2-5 の複写 import で読み、`loadKeepLatinEntries` の
    正規表現はここで消します。既存の結果ファイル（`display.blocks` と original-on の `samples[].original`）
    だけでも §1-11 の集計は出るので、1 を待たずに書けます。検証: §1-11 の **original-on 11 走行**（stamp 列挙）
@@ -831,16 +925,21 @@ sora が動ける言い方にすると:
 4. **定訳の復元と表優先の順序、救済プロンプトのブロック分け**（`term-masking.ts` / `translate.ts` /
    `glossary.ts`）。検証: 単体テスト＋ §5-3 の 5 走行。
 5. **ケース定義のファイル化とバッチ**（`live2-batch.mjs`）。検証: 失敗署名を 1 つ人為的に起こして再試行と
-   停止を目視する（存在の確認と作動の確認は別）。
+   停止を目視する（存在の確認と作動の確認は別）。`terms.txt` の全行を実物の `extractPostContextTerms` が返す
+   単体テスト（§4-2）をここで足し、tts2 の `coronagraph` を `terms.txt` に残したまま走らせて落ちることを先に
+   見せる（fail-before）。
 6. **字幕ログに `sources[]`（`id` / `text` / `rung`）と `fallback`、`lines[]` と `drops[]` を足し、offscreen の
    `queue-drop` に `text` を足す**（拡張側の 3 点・§4-1-5〜7）。
    検証: 単体テストで ①merge した cue のページが 2 行の `sources` を持つ（`overlay.test.ts:1444` の状況）
    ②改訂の cue の `text` が尾だけ（`:783` の状況）③段の違う 2 行を merge したページが行ごとの `rung` を持つ
-   ④待ち行列の圧力で落ちた cue の行が `lines[]` にあり、`drops[]` に id があり、ページに**無い**。rev2 の形では
-   この行が分母から消えることを先に見せる（fail-before）⑤offscreen で捨てた節の `text` が `__devLog` に届く
-   ⑥改訂の行（`:783` の状況）の `lines[].text` が尾だけで、ページの `sources[].text` と一致する。rev3 の形
-   （全文）では接頭辞の名前が 2 度数えられることを先に見せる ⑦順序 guard（`overlay.ts:1056-1066`）で捨てた行が
-   `lines[]` に**無い**。rev3 の位置では入ることを先に見せる。
+   ④待ち行列の圧力で落ちた cue の行が `lines[]` にあり、`drops[]` に id と `droppedAt` があり、ページに**無い**。
+   rev2 の形ではこの行が分母から消えることを先に見せる（fail-before）⑤offscreen で捨てた節の `text` が
+   `__devLog` に届く ⑥改訂の行（`:783` の状況）の `lines[].text` が尾だけで、ページの `sources[].text` と一致する。
+   rev3 の形（全文）では接頭辞の名前が 2 度数えられることを先に見せる ⑦順序 guard（`overlay.ts:1056-1066`）で
+   捨てた行が `lines[]` に**無い**。rev3 の位置では入ることを先に見せる ⑧改訂だが翻訳どうしで日本語が前の行の
+   日本語で始まらない行（`:1093-1098` の条件が外れる状況）の `lines[].text` が**全文**で、その cue のページに接頭辞の
+   訳が再び出ている。rev4 の形（`isRevision` で尾）では接頭辞の名前が分母から消えることを先に見せる
+   ⑨`droppedAt` が切りより前の drop が、bench の切り（1 の後）で `result.display.drops` に**無い**。
    走行では、マスクなし再試行の行がその印を持つ。
 
 1〜2 は今夜から回せます。6 は小さく、2 の単位が本来の形で動くのに要るので、2 と同じ日に入れます。
