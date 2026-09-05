@@ -133,6 +133,28 @@ export function annotateDisplayMeta(gates, { displayConfig, displayCoverage }) {
   };
 }
 
+export function finalizeGates(result) {
+  // Captured counts remain evidence of failed display gates; error marks the run.
+  if (result.gates.lines !== 0) {
+    return result;
+  }
+  const identityFields = new Set([
+    "displayConfig",
+    "showOriginal",
+    "displayCoverage",
+  ]);
+  return {
+    ...result,
+    gates: Object.fromEntries(
+      Object.entries(result.gates).map(([key, value]) => [
+        key,
+        identityFields.has(key) ? value : null,
+      ]),
+    ),
+    gatesSuppressed: "no captured lines",
+  };
+}
+
 export function coverageNote(displayCoverage, displayConfig) {
   if (displayCoverage !== "single") {
     return undefined;
@@ -218,6 +240,7 @@ export function combineDisplayReports(reports) {
         report.showOriginal ?? report.displayConfig === "original-on",
       outFile: report.outFile,
       gates: report.gates,
+      gatesSuppressed: report.gatesSuppressed,
       observations: report.observations,
       error: report.error,
     };

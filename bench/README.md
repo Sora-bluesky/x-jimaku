@@ -49,6 +49,8 @@ result JSON 保存・機械ゲート出力までを 1 コマンドで行う。�
 
 `Extensions.loadUnpacked`の後で、workerのbuild stampを`dist/manifest.json`の`version_name`と照合する。不一致またはworker未起動なら、計測を始めず終了コード`1`で止まる。`--keep-profile-dir`を付けると、デバッグ用に`x-jimaku-bench`を残す。2026-09-05より前の結果は、古いworkerを測った可能性がある。
 
+字幕を1行も採取できなかった実行では、`gates`の識別情報（`displayConfig`・`showOriginal`・`displayCoverage`）を残し、それ以外の値をすべて`null`にして、結果のトップレベルに`gatesSuppressed: "no captured lines"`を記録する。未採取を問題件数`0`として扱わず、`0`だけで正常と判断しない。`score-ja.mjs prepare`と`assert-smoke.mjs`は、空でない文字列の`error`を持つ結果を拒否する。結果ファイルを集計する処理も、`error`がある結果を除外する。
+
 翻訳経路の報告時刻と準備時間は次の3値で観測する。いずれも巻き戻した動画の再生開始を0とし、再生前なら負数になる。`gates` オブジェクトへ保存するが、合否には使わない。
 
 | 名前 | 観測内容 |

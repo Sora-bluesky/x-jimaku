@@ -52,6 +52,10 @@ try {
     throw new Error(`Cannot parse ${latest.name}: ${error.message}`);
   }
 
+  if (typeof result?.error === "string" && result.error.length > 0) {
+    throw new Error(`latest result carries an error: ${result.error}`);
+  }
+
   const metrics = result?.metrics;
   if (metrics === null || typeof metrics !== "object" || Array.isArray(metrics)) {
     throw new Error("metrics must be an object");
