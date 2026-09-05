@@ -43,6 +43,12 @@ result JSON 保存・機械ゲート出力までを 1 コマンドで行う。�
 `--case tts|tts2` / `--model` / `--backend` / `--chrome` / `--profile` / `--extension` で切替。
 表示の数字に設定の名前が付いていないものは証拠にならない。
 
+### service workerをbuild済みのdistと揃える
+
+`live2`は同じ`--user-data-dir`内の`x-jimaku-bench`を起動前に削除し、実行ごとに新しいプロファイルディレクトリを作る。削除できないとき（前回のファイルがしばらくロックされたままのことがある）は`x-jimaku-bench-<時刻>`を使い、その旨を出力と結果JSONの`profileDirectory`に残す。Chromeは拡張のservice workerをプロファイルごとにcacheするため、同じディレクトリを再利用すると、build後の`dist/`を前回のworkerで測ることがある。モデルはuser-data-dirのrootから共有される。
+
+`Extensions.loadUnpacked`の後で、workerのbuild stampを`dist/manifest.json`の`version_name`と照合する。不一致またはworker未起動なら、計測を始めず終了コード`1`で止まる。`--keep-profile-dir`を付けると、デバッグ用に`x-jimaku-bench`を残す。2026-09-05より前の結果は、古いworkerを測った可能性がある。
+
 翻訳経路の報告時刻と準備時間は次の3値で観測する。いずれも巻き戻した動画の再生開始を0とし、再生前なら負数になる。`gates` オブジェクトへ保存するが、合否には使わない。
 
 | 名前 | 観測内容 |

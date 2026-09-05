@@ -2,6 +2,9 @@ import {
   execFileSync,
 } from "node:child_process";
 import {
+  readFileSync,
+} from "node:fs";
+import {
   copyFile,
   mkdir,
   readFile,
@@ -18,16 +21,38 @@ import {
   type Plugin,
 } from "vite";
 import {
+  formatVersionName,
   stampManifest,
+  type BuildStamp,
 } from "./src/build/manifest";
 
 const projectRoot = fileURLToPath(
   new URL(".", import.meta.url),
 );
+const manifestSource = readFileSync(
+  resolve(
+    projectRoot,
+    "public/manifest.json",
+  ),
+  "utf8",
+);
+const manifest = JSON.parse(
+  manifestSource,
+) as {
+  readonly version: string;
+};
+const buildStampPlaceholder =
+  "__X_JIMAKU_BUILD_PLACEHOLDER__";
 
 export default defineConfig({
   base: "/",
   publicDir: false,
+  define: {
+    __X_JIMAKU_BUILD__:
+      JSON.stringify(
+        buildStampPlaceholder,
+      ),
+  },
   build: {
     target: "esnext",
     outDir: resolve(projectRoot, "dist"),
@@ -68,6 +93,9 @@ export default defineConfig({
 
 function finalizeDist(): Plugin {
   const outDir = resolve(projectRoot, "dist");
+  let buildStamp:
+    | BuildStamp
+    | undefined;
 
   const htmlOutputs = [
     {
@@ -86,11 +114,43 @@ function finalizeDist(): Plugin {
     },
   ] as const;
 
+  function requireBuildStamp(): BuildStamp {
+    if (buildStamp === undefined) {
+      throw new Error(
+        "Build stamp is unavailable before buildStart",
+      );
+    }
+
+    return buildStamp;
+  }
+
   return {
     name: "x-jimaku-finalize-dist",
     enforce: "post",
 
+    buildStart(): void {
+      buildStamp = {
+        ...getGitBuildState(),
+        builtAt: new Date(),
+      };
+    },
+
+    renderChunk(code): string {
+      const buildVersionName =
+        formatVersionName(
+          manifest.version,
+          requireBuildStamp(),
+        );
+
+      return code.replaceAll(
+        buildStampPlaceholder,
+        () => buildVersionName,
+      );
+    },
+
     async closeBundle(): Promise<void> {
+      const currentBuildStamp =
+        requireBuildStamp();
       const htmlPlans = await Promise.all(
         htmlOutputs.map(async (output) => ({
           ...output,
@@ -142,19 +202,12 @@ function finalizeDist(): Plugin {
       await mkdir(outDir, {
         recursive: true,
       });
-      const manifestSource = await readFile(
-        resolve(
-          projectRoot,
-          "public/manifest.json",
-        ),
-        "utf8",
-      );
       await writeFile(
         resolve(outDir, "manifest.json"),
-        stampManifest(manifestSource, {
-          ...getGitBuildState(),
-          builtAt: new Date(),
-        }),
+        stampManifest(
+          manifestSource,
+          currentBuildStamp,
+        ),
         "utf8",
       );
 

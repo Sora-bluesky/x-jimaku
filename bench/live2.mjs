@@ -15,7 +15,13 @@
 // the only way in.
 import puppeteer from "puppeteer-core";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { startBenchServer } from "./serve.mjs";
@@ -48,6 +54,19 @@ const STOP_DRAIN_TIMEOUT_MS = 45000;
 // JSON claims the one that was asked for.
 const ALLOWED_MODELS = ["tiny", "base", "small", "turbo"];
 const ALLOWED_BACKENDS = ["auto", "translator", "prompt-api"];
+// Must match src/content/index.ts's DEV_ORIGIN. handleOffscreenDevLog only
+// relays a dev-log entry (postMessage + console) when the page's own origin
+// equals this value (src/content/index.ts:432), so the dev-log relay
+// invariant below only applies when the fixture is actually serving it.
+const DEV_ORIGIN = "http://127.0.0.1:8123";
+const PROFILE_DIRECTORY_NAME =
+  "x-jimaku-bench";
+const SERVICE_WORKER_START_TIMEOUT_MS =
+  20000;
+const SERVICE_WORKER_WAKE_INTERVAL_MS =
+  3000;
+const SERVICE_WORKER_POLL_INTERVAL_MS =
+  250;
 
 const CASES = {
   tts: { mediaFile: path.join(here, "refs", "tts-speech.wav"), contextTerms: [] },
@@ -170,6 +189,94 @@ function splitEnglishClauses(text) {
     .filter(Boolean);
 }
 
+async function readServiceWorkerBuild(
+  browser,
+  extensionId,
+) {
+  const extensionOrigin =
+    `chrome-extension://${extensionId}`;
+  const deadlineAt =
+    Date.now()
+    + SERVICE_WORKER_START_TIMEOUT_MS;
+  let nextWakeAt =
+    Date.now()
+    + SERVICE_WORKER_WAKE_INTERVAL_MS;
+  let wakePage = null;
+  let started = false;
+
+  try {
+    while (Date.now() < deadlineAt) {
+      const target = browser.targets().find(
+        (candidate) =>
+          candidate.type() === "service_worker"
+          && candidate.url().startsWith(
+            extensionOrigin,
+          ),
+      );
+
+      if (target) {
+        started = true;
+        try {
+          const worker =
+            await target.worker();
+          if (worker) {
+            const build =
+              await worker.evaluate(
+                () =>
+                  globalThis
+                    .__xJimakuBuild,
+              );
+            // The module may not have evaluated yet; keep polling until it has.
+            if (typeof build === "string") {
+              return { started, build };
+            }
+          }
+        } catch {
+          // The worker can stop between target discovery and evaluation.
+        }
+      }
+
+      if (Date.now() >= nextWakeAt) {
+        wakePage ??=
+          await browser.newPage();
+        try {
+          await wakePage.goto(
+            `${extensionOrigin}/options.html`,
+            {
+              waitUntil:
+                "domcontentloaded",
+              timeout:
+                SERVICE_WORKER_WAKE_INTERVAL_MS,
+            },
+          );
+        } catch {
+          // A blocked extension page is retried until the shared deadline.
+        }
+        nextWakeAt =
+          Date.now()
+          + SERVICE_WORKER_WAKE_INTERVAL_MS;
+      }
+
+      await new Promise((resolvePoll) =>
+        setTimeout(
+          resolvePoll,
+          SERVICE_WORKER_POLL_INTERVAL_MS,
+        ),
+      );
+    }
+  } finally {
+    if (wakePage) {
+      await wakePage
+        .close()
+        .catch(() => undefined);
+    }
+  }
+
+  return {
+    started,
+    build: undefined,
+  };
+}
 
 const options = parseArgs(process.argv.slice(2));
 
@@ -177,6 +284,7 @@ if (options.help) {
   console.log(
     "Usage: node bench/live2.mjs [--case tts|tts2] [--model base] [--backend prompt-api]\n" +
       "                           [--duration 95] [--chrome <exe>] [--profile <dir>] [--extension <dir>]\n" +
+      "                           [--keep-profile-dir]\n" +
       "                           [--show-original | --no-show-original]\n" +
       "With neither display flag, both original-off and original-on are captured.",
   );
@@ -313,7 +421,56 @@ const server = await startBenchServer({
 });
 console.error(`[live2] fixture ${server.caseUrl}`);
 
-mkdirSync(options.profile, { recursive: true });
+mkdirSync(options.profile, {
+  recursive: true,
+});
+
+// The directory must not exist when Chrome starts: a reused one carries the
+// cached service worker. When the previous directory cannot be removed (its
+// files stay locked for a while after a run ends), a timestamped name is used
+// instead, which is just as fresh; the leftover is reported, not hidden.
+let profileDirectoryName = PROFILE_DIRECTORY_NAME;
+const profileDirectoryPath = path.resolve(
+  options.profile,
+  PROFILE_DIRECTORY_NAME,
+);
+if (!options.keepProfileDir) {
+  const relativeProfileDirectory =
+    path.relative(
+      options.profile,
+      profileDirectoryPath,
+    );
+  if (
+    path.basename(profileDirectoryPath)
+      !== PROFILE_DIRECTORY_NAME
+    || relativeProfileDirectory
+      !== PROFILE_DIRECTORY_NAME
+  ) {
+    throw new Error(
+      `refusing to reset profile directory: ${profileDirectoryPath}`,
+    );
+  }
+  try {
+    rmSync(profileDirectoryPath, {
+      recursive: true,
+      force: true,
+      maxRetries: 5,
+      retryDelay: 400,
+    });
+    console.error(
+      `[live2] profile directory reset: ${profileDirectoryPath}`,
+    );
+  } catch (error) {
+    const stamp = new Date()
+      .toISOString()
+      .replace(/[-:.]/g, "");
+    profileDirectoryName =
+      `${PROFILE_DIRECTORY_NAME}-${stamp}`;
+    console.error(
+      `[live2] profile directory ${profileDirectoryPath} could not be removed (${error.code ?? error.message}); using ${profileDirectoryName} instead`,
+    );
+  }
+}
 
 const browser = await puppeteer.launch({
   executablePath: options.chromePath,
@@ -325,6 +482,7 @@ const browser = await puppeteer.launch({
   args: [
     ...baseArgs,
     `--user-data-dir=${options.profile}`,
+    `--profile-directory=${profileDirectoryName}`,
     "--enable-features=AIPromptAPI,OptimizationGuideManifestBroker,OnDeviceModelLitertLmBackend",
     "--enable-unsafe-extension-debugging",
     "--autoplay-policy=no-user-gesture-required",
@@ -346,6 +504,9 @@ const result = {
   displayCoverage: "single",
   showOriginal: options.showOriginal,
   durationSeconds: options.durationSeconds,
+  profileDirectory:
+    profileDirectoryName,
+  serviceWorkerBuild: null,
   collection: "live2 unattended (CDP Extensions.loadUnpacked + autoplay)",
   diagnostics: {
     devLog: [],
@@ -371,8 +532,59 @@ try {
   result.extensionId = installed.id;
   console.error(`[live2] installed extension ${installed.id}`);
 
+  const manifestPath = path.join(
+    options.extension,
+    "manifest.json",
+  );
+  const manifest = JSON.parse(
+    readFileSync(manifestPath, "utf8"),
+  );
+  if (
+    typeof manifest !== "object"
+    || manifest === null
+    || Array.isArray(manifest)
+    || typeof manifest.version_name
+      !== "string"
+  ) {
+    throw new Error(
+      `dist/manifest.json has no string version_name: ${manifestPath}`,
+    );
+  }
+
+  const workerProbe =
+    await readServiceWorkerBuild(
+      browser,
+      installed.id,
+    );
+  if (!workerProbe.started) {
+    throw new Error(
+      "service worker never started",
+    );
+  }
+
+  result.serviceWorkerBuild =
+    typeof workerProbe.build === "string"
+      ? workerProbe.build
+      : String(workerProbe.build);
+  if (
+    result.serviceWorkerBuild
+    !== manifest.version_name
+  ) {
+    throw new Error(
+      "service worker build "
+      + `${JSON.stringify(result.serviceWorkerBuild)} `
+      + "does not match dist/manifest.json "
+      + JSON.stringify(manifest.version_name),
+    );
+  }
+  console.error(
+    `[live2] service worker build verified: ${result.serviceWorkerBuild}`,
+  );
+
   const pages = await browser.pages();
   const page = pages[0] ?? (await browser.newPage());
+
+
   await page.goto(server.caseUrl, { waitUntil: "domcontentloaded" });
   await new Promise((r) => setTimeout(r, 1500));
   console.error("[live2] fixture loaded");
@@ -929,6 +1141,23 @@ if (!result.error && lines.length === 0) {
   // A missed toggle, a failed capture or a renamed overlay selector all end here
   // with no exception, and the file would be unusable to score-ja.
   result.error = "capture produced no caption lines";
+  console.error(`[live2] ${result.error}`);
+}
+// clause-timing fires once per terminal (ledger) line, so terminal lines with
+// zero clause-timing entries means the devLog relay broke somewhere between
+// handleOffscreenDevLog's postMessage and this bench's listener, even though
+// the overlay still rendered captions through the independent DOM path this
+// bench also drains. Gated to the fixture origin because the relay is
+// deliberately limited to it (src/content/index.ts:432); elsewhere, a
+// clause-timing-less run is expected, not a bug.
+if (
+  !result.error
+  && lines.length > 0
+  && result.diagnostics.clauseTimings.length === 0
+  && new URL(server.caseUrl).origin === DEV_ORIGIN
+) {
+  result.error =
+    "terminal lines present but devLog has no clause-timing entries";
   console.error(`[live2] ${result.error}`);
 }
 const joined = lines.join("\n");
