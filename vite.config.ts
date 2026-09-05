@@ -23,6 +23,7 @@ import {
 import {
   formatVersionName,
   stampManifest,
+  type BuildStamp,
 } from "./src/build/manifest";
 
 const projectRoot = fileURLToPath(
@@ -40,22 +41,17 @@ const manifest = JSON.parse(
 ) as {
   readonly version: string;
 };
-const buildStamp = {
-  ...getGitBuildState(),
-  builtAt: new Date(),
-};
-const buildVersionName =
-  formatVersionName(
-    manifest.version,
-    buildStamp,
-  );
+const buildStampPlaceholder =
+  "__X_JIMAKU_BUILD_PLACEHOLDER__";
 
 export default defineConfig({
   base: "/",
   publicDir: false,
   define: {
     __X_JIMAKU_BUILD__:
-      JSON.stringify(buildVersionName),
+      JSON.stringify(
+        buildStampPlaceholder,
+      ),
   },
   build: {
     target: "esnext",
@@ -97,6 +93,9 @@ export default defineConfig({
 
 function finalizeDist(): Plugin {
   const outDir = resolve(projectRoot, "dist");
+  let buildStamp:
+    | BuildStamp
+    | undefined;
 
   const htmlOutputs = [
     {
@@ -115,11 +114,43 @@ function finalizeDist(): Plugin {
     },
   ] as const;
 
+  function requireBuildStamp(): BuildStamp {
+    if (buildStamp === undefined) {
+      throw new Error(
+        "Build stamp is unavailable before buildStart",
+      );
+    }
+
+    return buildStamp;
+  }
+
   return {
     name: "x-jimaku-finalize-dist",
     enforce: "post",
 
+    buildStart(): void {
+      buildStamp = {
+        ...getGitBuildState(),
+        builtAt: new Date(),
+      };
+    },
+
+    renderChunk(code): string {
+      const buildVersionName =
+        formatVersionName(
+          manifest.version,
+          requireBuildStamp(),
+        );
+
+      return code.replaceAll(
+        buildStampPlaceholder,
+        () => buildVersionName,
+      );
+    },
+
     async closeBundle(): Promise<void> {
+      const currentBuildStamp =
+        requireBuildStamp();
       const htmlPlans = await Promise.all(
         htmlOutputs.map(async (output) => ({
           ...output,
@@ -175,7 +206,7 @@ function finalizeDist(): Plugin {
         resolve(outDir, "manifest.json"),
         stampManifest(
           manifestSource,
-          buildStamp,
+          currentBuildStamp,
         ),
         "utf8",
       );
