@@ -28,7 +28,7 @@ import {
   clearCaptionDisplayLog,
   formatCaptionDisplayLogExport,
   readCaptionDisplayLogEnabled,
-  readCaptionDisplayLogPages,
+  readCaptionDisplayLogDocument,
   writeCaptionDisplayLogEnabled,
 } from "../shared/caption-display-log";
 import type {
@@ -748,11 +748,11 @@ async function clearCaptionDisplayLogFromPage():
 
 async function buildCaptionDisplayLogExport():
   Promise<string> {
-  const pages =
-    await readCaptionDisplayLogPages();
+  const document =
+    await readCaptionDisplayLogDocument();
 
   return formatCaptionDisplayLogExport(
-    pages,
+    document,
     nowIso(),
   );
 }
