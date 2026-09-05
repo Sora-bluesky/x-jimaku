@@ -76,6 +76,11 @@ import {
   SilentInputTracker,
 } from "./silent-input-tracker";
 
+(globalThis as {
+  __xJimakuBuild?: string;
+}).__xJimakuBuild =
+  __X_JIMAKU_BUILD__;
+
 const OFFSCREEN_DOCUMENT_PATH =
   "offscreen.html";
 const CONTENT_SCRIPT_PATH = "content.js";

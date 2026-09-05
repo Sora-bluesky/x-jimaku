@@ -2,6 +2,9 @@ import {
   execFileSync,
 } from "node:child_process";
 import {
+  readFileSync,
+} from "node:fs";
+import {
   copyFile,
   mkdir,
   readFile,
@@ -18,16 +21,42 @@ import {
   type Plugin,
 } from "vite";
 import {
+  formatVersionName,
   stampManifest,
 } from "./src/build/manifest";
 
 const projectRoot = fileURLToPath(
   new URL(".", import.meta.url),
 );
+const manifestSource = readFileSync(
+  resolve(
+    projectRoot,
+    "public/manifest.json",
+  ),
+  "utf8",
+);
+const manifest = JSON.parse(
+  manifestSource,
+) as {
+  readonly version: string;
+};
+const buildStamp = {
+  ...getGitBuildState(),
+  builtAt: new Date(),
+};
+const buildVersionName =
+  formatVersionName(
+    manifest.version,
+    buildStamp,
+  );
 
 export default defineConfig({
   base: "/",
   publicDir: false,
+  define: {
+    __X_JIMAKU_BUILD__:
+      JSON.stringify(buildVersionName),
+  },
   build: {
     target: "esnext",
     outDir: resolve(projectRoot, "dist"),
@@ -142,19 +171,12 @@ function finalizeDist(): Plugin {
       await mkdir(outDir, {
         recursive: true,
       });
-      const manifestSource = await readFile(
-        resolve(
-          projectRoot,
-          "public/manifest.json",
-        ),
-        "utf8",
-      );
       await writeFile(
         resolve(outDir, "manifest.json"),
-        stampManifest(manifestSource, {
-          ...getGitBuildState(),
-          builtAt: new Date(),
-        }),
+        stampManifest(
+          manifestSource,
+          buildStamp,
+        ),
         "utf8",
       );
 

@@ -4,6 +4,23 @@ export interface BuildStamp {
   readonly builtAt: Date;
 }
 
+export function formatVersionName(
+  version: string,
+  stamp: BuildStamp,
+): string {
+  const dirtyMarker =
+    stamp.dirty ? "-dirty" : "";
+  const buildTime = stamp.builtAt
+    .toISOString()
+    .replace(/\.\d{3}Z$/u, "Z");
+
+  return (
+    `${version} `
+    + `${stamp.revision}${dirtyMarker} `
+    + buildTime
+  );
+}
+
 /**
  * Whether Chrome will accept this as a manifest version.
  *
@@ -75,15 +92,11 @@ export function stampManifest(
     );
   }
 
-  const dirtyMarker =
-    stamp.dirty ? "-dirty" : "";
-  const buildTime = stamp.builtAt
-    .toISOString()
-    .replace(/\.\d{3}Z$/u, "Z");
   const versionName =
-    `${manifest.version} ` +
-    `${stamp.revision}${dirtyMarker} ` +
-    buildTime;
+    formatVersionName(
+      manifest.version,
+      stamp,
+    );
 
   return `${JSON.stringify(
     {

@@ -24,6 +24,7 @@ export function parseArgs(argv, env = process.env) {
     // not evidence for the other.
     displayMode: "both",
     showOriginal: false,
+    keepProfileDir: false,
     durationSeconds: 95,
     chromePath:
       chromeFromEnvironment
@@ -44,6 +45,10 @@ export function parseArgs(argv, env = process.env) {
     }
     if (flag === "--no-show-original") {
       sawNoShowOriginal = true;
+      continue;
+    }
+    if (flag === "--keep-profile-dir") {
+      options.keepProfileDir = true;
       continue;
     }
 

@@ -67,6 +67,18 @@ describe("parseArgs display mode", () => {
       "pass only one of --show-original and --no-show-original",
     );
   });
+
+  it("keeps the profile directory only when requested", () => {
+    expect(
+      parseArgs([], {}).keepProfileDir,
+    ).toBe(false);
+    expect(
+      parseArgs(
+        ["--keep-profile-dir"],
+        {},
+      ).keepProfileDir,
+    ).toBe(true);
+  });
 });
 
 describe("both-mode reports", () => {

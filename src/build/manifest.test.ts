@@ -4,6 +4,7 @@ import {
   it,
 } from "vitest";
 import {
+  formatVersionName,
   isChromeVersion,
   stampManifest,
 } from "./manifest";
@@ -37,6 +38,39 @@ function getStampedManifest(
 }
 
 describe("stampManifest", () => {
+  it(
+    "uses formatVersionName for version_name",
+    () => {
+      const manifest = JSON.parse(
+        MANIFEST_SOURCE,
+      ) as {
+        version: string;
+      };
+      const stamp = {
+        revision: "abc1234",
+        dirty: false,
+        builtAt: new Date(
+          "2026-09-02T03:04:05.000Z",
+        ),
+      };
+      const stamped = JSON.parse(
+        stampManifest(
+          MANIFEST_SOURCE,
+          stamp,
+        ),
+      ) as {
+        version_name: string;
+      };
+
+      expect(stamped.version_name).toBe(
+        formatVersionName(
+          manifest.version,
+          stamp,
+        ),
+      );
+    },
+  );
+
   it(
     "writes the commit into version_name",
     () => {
