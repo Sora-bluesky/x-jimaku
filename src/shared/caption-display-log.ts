@@ -212,6 +212,22 @@ export async function readCaptionDisplayLogPages():
   );
 }
 
+export async function readCaptionDisplayLogDocument():
+  Promise<CaptionDisplayLogDocument> {
+  const storage =
+    createChromeCaptionDisplayLogStorage();
+
+  if (storage === null) {
+    return emptyLogDocument();
+  }
+
+  return parseCaptionDisplayLogDocument(
+    await storage.get(
+      CAPTION_DISPLAY_LOG_STORAGE_KEY,
+    ),
+  );
+}
+
 export async function clearCaptionDisplayLog():
   Promise<void> {
   const storage =
@@ -228,17 +244,27 @@ export async function clearCaptionDisplayLog():
 }
 
 export function formatCaptionDisplayLogExport(
-  pages: readonly CaptionDisplayLogPage[],
+  document: CaptionDisplayLogDocument,
   exportedAt: string,
 ): string {
+  // Everything the log holds goes out: a report that showed only the pages
+  // could not say which lines were accepted or which cues were dropped.
   return `${JSON.stringify(
     {
       version: 1,
       exportedAt,
       maxPages:
         CAPTION_DISPLAY_LOG_MAX_PAGES,
-      pageCount: pages.length,
-      pages,
+      pageCount: document.pages.length,
+      lineCount: document.lines.length,
+      dropCount: document.drops.length,
+      linesTruncated:
+        document.linesTruncated,
+      dropsTruncated:
+        document.dropsTruncated,
+      pages: document.pages,
+      lines: document.lines,
+      drops: document.drops,
     },
     null,
     2,

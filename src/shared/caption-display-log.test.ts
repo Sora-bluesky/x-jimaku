@@ -8,6 +8,7 @@ import {
   CAPTION_DISPLAY_LOG_MAX_PAGES,
   CAPTION_DISPLAY_LOG_STORAGE_KEY,
   createCaptionDisplayLog,
+  formatCaptionDisplayLogExport,
   parseCaptionDisplayLogDocument,
   type CaptionDisplayLogStorage,
   type CaptionDisplayPageInput,
@@ -441,6 +442,49 @@ describe("caption display log", () => {
     );
     expect([document.lines.length, document.linesTruncated]).toEqual([400, 60]);
   });
+
+  it(
+    "exports the lines, drops and truncation counts next to the pages",
+    () => {
+      const exported = JSON.parse(
+        formatCaptionDisplayLogExport(
+          {
+            version: 1,
+            pages: [],
+            lines: [
+              {
+                id: 7,
+                text: "seven",
+                rung: "masked",
+                acceptedAt:
+                  "2026-09-05T00:00:00.000Z",
+              },
+            ],
+            drops: [
+              {
+                cueId: "7:0",
+                sourceIds: [7],
+                droppedAt:
+                  "2026-09-05T00:00:01.000Z",
+              },
+            ],
+            linesTruncated: 3,
+            dropsTruncated: 1,
+          },
+          "2026-09-05T00:00:02.000Z",
+        ),
+      );
+
+      expect(exported.lineCount).toBe(1);
+      expect(exported.dropCount).toBe(1);
+      expect(exported.lines[0]?.text)
+        .toBe("seven");
+      expect(exported.drops[0]?.cueId)
+        .toBe("7:0");
+      expect(exported.linesTruncated).toBe(3);
+      expect(exported.dropsTruncated).toBe(1);
+    },
+  );
 
   it(
     "writes nothing while recording is off",
