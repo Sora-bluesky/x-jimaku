@@ -43,6 +43,8 @@ result JSON 保存・機械ゲート出力までを 1 コマンドで行う。�
 `--case tts|tts2` / `--model` / `--backend` / `--chrome` / `--profile` / `--extension` で切替。
 表示の数字に設定の名前が付いていないものは証拠にならない。
 
+各走行の結果には、`dist/build-info.json`から読んだ`build`と`nameTableHash`を記録する。このファイルが無い場合や、ディスク上の名前表がビルド時と異なる場合は、再ビルドを求めて停止する。前回ログを消去できたかは`captionLogCleared`に残す。`display.pages`には`replayStartedAt`以降に現れた字幕ログのページを保存し、時刻を解析できなかったページは`pagesUnparsed`に数える。
+
 ### service workerをbuild済みのdistと揃える
 
 `live2`は同じ`--user-data-dir`内の`x-jimaku-bench`を起動前に削除し、実行ごとに新しいプロファイルディレクトリを作る。削除できないとき（前回のファイルがしばらくロックされたままのことがある）は`x-jimaku-bench-<時刻>`を使い、その旨を出力と結果JSONの`profileDirectory`に残す。Chromeは拡張のservice workerをプロファイルごとにcacheするため、同じディレクトリを再利用すると、build後の`dist/`を前回のworkerで測ることがある。モデルはuser-data-dirのrootから共有される。

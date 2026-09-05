@@ -1,6 +1,7 @@
 import {
   execFileSync,
 } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   readFileSync,
 } from "node:fs";
@@ -21,6 +22,7 @@ import {
   type Plugin,
 } from "vite";
 import {
+  formatBuildInfo,
   formatVersionName,
   stampManifest,
   type BuildStamp,
@@ -208,6 +210,26 @@ function finalizeDist(): Plugin {
           manifestSource,
           currentBuildStamp,
         ),
+        "utf8",
+      );
+
+      const nameTableHash = createHash("sha256")
+        .update(await readFile(resolve(
+          projectRoot,
+          "src/offscreen/glossary.data.ts",
+        )))
+        .digest("hex");
+      await writeFile(
+        resolve(outDir, "build-info.json"),
+        `${JSON.stringify(
+          formatBuildInfo(
+            currentBuildStamp,
+            manifest.version,
+            nameTableHash,
+          ),
+          null,
+          2,
+        )}\n`,
         "utf8",
       );
 

@@ -5,6 +5,76 @@ import { fileURLToPath } from "node:url";
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, "..");
 
+export function checkBuildInfo({ buildInfo, sourceHash, versionName }) {
+  if (
+    buildInfo === null
+    || typeof buildInfo !== "object"
+    || Array.isArray(buildInfo)
+    || typeof buildInfo.revision !== "string"
+    || typeof buildInfo.dirty !== "boolean"
+    || typeof buildInfo.builtAt !== "string"
+    || !Number.isFinite(Date.parse(buildInfo.builtAt))
+    || typeof buildInfo.versionName !== "string"
+    || typeof buildInfo.nameTableHash !== "string"
+  ) {
+    return {
+      ok: false,
+      reason: "dist/build-info.json is missing; run npm run build",
+    };
+  }
+  // A build-info.json left over from an interrupted build can outlive the
+  // manifest it was written with; the loaded worker was verified against
+  // manifest.version_name, so build attribution must match that too.
+  if (
+    typeof versionName === "string"
+    && buildInfo.versionName !== versionName
+  ) {
+    return {
+      ok: false,
+      reason:
+        `dist/build-info.json is from a different build (${buildInfo.versionName}) than dist/manifest.json (${versionName}); run npm run build`,
+    };
+  }
+  if (buildInfo.nameTableHash !== sourceHash) {
+    return {
+      ok: false,
+      reason:
+        "name table changed after the last build (src/offscreen/glossary.data.ts); run npm run build",
+    };
+  }
+  return { ok: true };
+}
+
+export function cutCaptionLog({ pages, lines, drops, replayStartedAtMs }) {
+  function cut(entries, timeField) {
+    if (!Array.isArray(entries)) {
+      return { entries: null, unparsed: null };
+    }
+    let unparsed = 0;
+    const kept = entries.filter((entry) => {
+      const time = Date.parse(entry?.[timeField]);
+      if (!Number.isFinite(time)) {
+        unparsed += 1;
+        return false;
+      }
+      return time >= replayStartedAtMs;
+    });
+    return { entries: kept, unparsed };
+  }
+
+  const pageCut = cut(pages, "appearedAt");
+  const lineCut = cut(lines, "acceptedAt");
+  const dropCut = cut(drops, "droppedAt");
+  return {
+    pages: pageCut.entries,
+    pagesUnparsed: pageCut.unparsed,
+    lines: lineCut.entries,
+    linesUnparsed: lineCut.unparsed,
+    drops: dropCut.entries,
+    dropsUnparsed: dropCut.unparsed,
+  };
+}
+
 export function parseArgs(argv, env = process.env) {
   const chromeFromEnvironment =
     typeof env.BENCH_CHROME === "string"

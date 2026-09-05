@@ -4,6 +4,28 @@ export interface BuildStamp {
   readonly builtAt: Date;
 }
 
+export function formatBuildInfo(
+  stamp: BuildStamp,
+  version: string,
+  nameTableHash: string,
+): {
+  revision: string;
+  dirty: boolean;
+  builtAt: string;
+  versionName: string;
+  nameTableHash: string;
+} {
+  return {
+    revision: stamp.revision,
+    dirty: stamp.dirty,
+    builtAt: stamp.builtAt
+      .toISOString()
+      .replace(/\.\d{3}Z$/u, "Z"),
+    versionName: formatVersionName(version, stamp),
+    nameTableHash,
+  };
+}
+
 export function formatVersionName(
   version: string,
   stamp: BuildStamp,
