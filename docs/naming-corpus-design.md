@@ -489,8 +489,12 @@ export interface NameTerm {
    `drops[]` は分母ではなく `missing` の内訳（表示前に落ちた / 表示されたが表記が無い）に使います。`lines[]` の
    上限は `pages` と同じ 400 にし、超えた分は `linesTruncated` に数えて JSON に書きます（無音で落とさない）。
    `acceptedAt` / `droppedAt` が `Date.parse` で NaN になった要素も残さず、`linesUnparsed` / `dropsUnparsed` に
-   数えます（`pagesUnparsed` と同じ）。サンプラは `host.dataset.cueDrops` も読み、切る前の `drops[]` の件数と
-   突き合わせます（`cueDrops` は走行の開始から数えるので、切った後の件数とは合いません）。
+   数えます（`pagesUnparsed` と同じ）。サンプラは `host.dataset.cueDrops` も読み、`drops[]` のうち `droppedAt` が **Chrome の起動時刻以降**の件数と
+   突き合わせます。`cueDrops` は overlay の生成（`overlay.ts:303`）から数えるので、`replayStartedAtMs` で切った後の件数とは
+   合わず（ウォームアップ中の落下が入る）、切る前の全件とも合いません（消去に失敗したログに残る前走行の drop は
+   この走行の overlay が数えていない）。前走行の `droppedAt` は起動より前、この走行の落下は起動より後なので、
+   起動時刻で分ければ両方を外さずに済みます。それでも合わないときは `cueDropsMismatch` に両方の値を書き、
+   rate の算出は続けます（この検査は記録の欠落を見つけるためのもので、分母の条件ではない）。
 7. **拡張側の 3 点目: offscreen の `queue-drop` に本文を足す。** `translate.ts:349-351` の data に `text: dropped.text`
    を 1 つ足します（`console.warn` は既に `textLength` を持っている）。中継の検査（`messages.ts:779-797`）は
    `kind` / `requestId` / `lineId` を見るだけで未知の鍵を拒む節は読んだ範囲に無いので、`text` の受理は実装時に
