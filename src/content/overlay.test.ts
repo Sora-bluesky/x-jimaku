@@ -26,9 +26,15 @@ import {
   CUE_MINIMUM_DISPLAY_MS,
 } from "./overlay";
 import {
+  CAPTION_DISPLAY_LOG_STORAGE_KEY,
   createCaptionDisplayLog,
+  parseCaptionDisplayLogDocument,
   type CaptionDisplayLogSink,
+  type CaptionDisplayLogStorage,
 } from "../shared/caption-display-log";
+import type {
+  TranslationRung,
+} from "../shared/messages";
 
 const BUILD_STAMP =
   "0.6.0 abc1234-dirty 2026-09-02T03:04:05Z";
@@ -243,14 +249,81 @@ function showFinal(
   id: number,
   ja: string,
   text: string = `source-${id}`,
+  rung?: TranslationRung,
 ): void {
   overlay.showCaption({
     id,
     text,
     ja,
+    rung,
     final: true,
     at: "2026-09-01T00:00:00.000Z",
   });
+}
+
+function createDisplayLogProbe() {
+  return {
+    recordPageShown:
+      vi.fn<
+        CaptionDisplayLogSink[
+          "recordPageShown"
+        ]
+      >(),
+    recordPageHidden:
+      vi.fn<
+        CaptionDisplayLogSink[
+          "recordPageHidden"
+        ]
+      >(),
+    recordLineAccepted:
+      vi.fn<
+        CaptionDisplayLogSink[
+          "recordLineAccepted"
+        ]
+      >(),
+    recordCueDropped:
+      vi.fn<
+        CaptionDisplayLogSink[
+          "recordCueDropped"
+        ]
+      >(),
+  };
+}
+
+function createMemoryDisplayLogStorage():
+  CaptionDisplayLogStorage {
+  const data = new Map<string, unknown>();
+
+  return {
+    async get(key) {
+      return data.get(key);
+    },
+    async set(key, value) {
+      data.set(key, value);
+    },
+  };
+}
+
+function applyMergePressure(
+  overlay: CaptionOverlay,
+): void {
+  showFinal(overlay, 1, "active");
+
+  for (let id = 2; id <= 8; id += 1) {
+    showFinal(
+      overlay,
+      id,
+      `訳-${id}`,
+      `source-${id}`,
+      id % 2 === 0
+        ? "masked"
+        : "translator-unmasked",
+    );
+  }
+
+  vi.advanceTimersByTime(
+    CUE_ACCELERATED_DISPLAY_MS * 8,
+  );
 }
 
 async function flushCueMutations():
@@ -2313,6 +2386,265 @@ describe(
         expect(pages[0]?.cueId).toBe(
           pages[1]?.cueId,
         );
+      },
+    );
+
+    it(
+      "old merged-page shape loses the second source line",
+      () => {
+        const log = createDisplayLogProbe();
+        const overlay = createOverlay({
+          displayLog: log,
+        });
+
+        applyMergePressure(overlay);
+
+        const merged =
+          log.recordPageShown.mock.calls
+            .map(([page]) => page)
+            .find(
+              (page) =>
+                page.cueId.includes("+"),
+            );
+
+        expect(merged?.sources).toHaveLength(
+          2,
+        );
+      },
+    );
+
+    it(
+      "old revised-page shape stores the full source instead of its tail",
+      () => {
+        const log = createDisplayLogProbe();
+        const overlay = createOverlay({
+          displayLog: log,
+        });
+
+        showFinal(
+          overlay,
+          1,
+          "先行訳",
+          "source prefix",
+          "masked",
+        );
+        showFinal(
+          overlay,
+          2,
+          "先行訳 tail",
+          "source prefix tail",
+          "translator-unmasked",
+        );
+        vi.advanceTimersByTime(
+          CUE_MINIMUM_DISPLAY_MS * 2,
+        );
+
+        const page =
+          log.recordPageShown.mock.calls
+            .map(([value]) => value)
+            .find(
+              (value) =>
+                value.cueId === "2:0",
+            );
+
+        expect(page?.sources[0]?.text)
+          .toBe("tail");
+      },
+    );
+
+    it(
+      "old cue-level rung shape loses each merged line's rung",
+      () => {
+        const log = createDisplayLogProbe();
+        const overlay = createOverlay({
+          displayLog: log,
+        });
+
+        applyMergePressure(overlay);
+
+        const merged =
+          log.recordPageShown.mock.calls
+            .map(([page]) => page)
+            .find(
+              (page) =>
+                page.cueId.includes("+"),
+            );
+
+        expect(
+          new Set(
+            merged?.sources.map(
+              (source) => source.rung,
+            ),
+          ),
+        ).toEqual(
+          new Set([
+            "masked",
+            "translator-unmasked",
+          ]),
+        );
+      },
+    );
+
+    it(
+      "old log shape loses an accepted cue dropped under pressure",
+      async () => {
+        const storage =
+          createMemoryDisplayLogStorage();
+        const log = createCaptionDisplayLog({
+          storage,
+          flushDelayMs: 60_000,
+        });
+        const overlay = createOverlay({
+          displayLog: log,
+        });
+        const symbols = [
+          "一", "二", "三", "四",
+          "五", "六", "七", "八",
+        ];
+
+        symbols.forEach((symbol, index) => {
+          showFinal(
+            overlay,
+            index + 1,
+            symbol.repeat(14),
+          );
+        });
+        await log.flush();
+
+        const document =
+          parseCaptionDisplayLogDocument(
+            await storage.get(
+              CAPTION_DISPLAY_LOG_STORAGE_KEY,
+            ),
+          );
+        const drop = document.drops[0];
+
+        expect(
+          document.lines.some(
+            (line) => line.id === 2,
+          ),
+        ).toBe(true);
+        expect(drop).toMatchObject({
+          cueId: "2:0",
+          sourceIds: [2],
+        });
+        expect(
+          Date.parse(drop?.droppedAt ?? ""),
+        ).not.toBeNaN();
+        expect(
+          document.pages.some((page) =>
+            page.sources.some(
+              (source) => source.id === 2,
+            ),
+          ),
+        ).toBe(false);
+      },
+    );
+
+    it(
+      "old accepted-line shape disagrees with the revised page tail",
+      () => {
+        const log = createDisplayLogProbe();
+        const overlay = createOverlay({
+          displayLog: log,
+        });
+
+        showFinal(
+          overlay,
+          1,
+          "先行訳",
+          "source prefix",
+        );
+        showFinal(
+          overlay,
+          2,
+          "先行訳 tail",
+          "source prefix tail",
+        );
+        vi.advanceTimersByTime(
+          CUE_MINIMUM_DISPLAY_MS * 2,
+        );
+
+        const line =
+          log.recordLineAccepted.mock.calls
+            .map(([value]) => value)
+            .find((value) => value.id === 2);
+        const page =
+          log.recordPageShown.mock.calls
+            .map(([value]) => value)
+            .find(
+              (value) =>
+                value.cueId === "2:0",
+            );
+
+        expect(line?.text).toBe("tail");
+        expect(page?.sources[0]?.text)
+          .toBe(line?.text);
+      },
+    );
+
+    it(
+      "old record position includes a line rejected by the order guard",
+      () => {
+        const log = createDisplayLogProbe();
+        const overlay = createOverlay({
+          displayLog: log,
+        });
+
+        showFinal(overlay, 10, "ten");
+        showFinal(overlay, 9, "nine");
+
+        expect(
+          log.recordLineAccepted.mock.calls
+            .map(([line]) => line.id),
+        ).toEqual([10]);
+      },
+    );
+
+    it(
+      "old revision shortcut removes the prefix when Japanese does not match",
+      () => {
+        const log = createDisplayLogProbe();
+        const overlay = createOverlay({
+          displayLog: log,
+        });
+
+        showFinal(
+          overlay,
+          1,
+          "以前の訳",
+          "source prefix",
+        );
+        showFinal(
+          overlay,
+          2,
+          "言い直した訳",
+          "source prefix tail",
+        );
+        vi.advanceTimersByTime(
+          CUE_MINIMUM_DISPLAY_MS * 2,
+        );
+
+        const page =
+          log.recordPageShown.mock.calls
+            .map(([value]) => value)
+            .find(
+              (value) =>
+                value.cueId === "2:0",
+            );
+        const line =
+          log.recordLineAccepted.mock.calls
+            .map(([value]) => value)
+            .find((value) => value.id === 2);
+
+        expect(line?.text).toBe(
+          "source prefix tail",
+        );
+        expect(page?.line0).toBe(
+          "言い直した訳",
+        );
+        expect(page?.sources[0]?.text)
+          .toBe("source prefix tail");
       },
     );
 

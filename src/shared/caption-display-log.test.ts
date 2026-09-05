@@ -5,8 +5,10 @@ import {
 } from "vitest";
 import {
   CAPTION_DISPLAY_LOG_ENABLED_KEY,
+  CAPTION_DISPLAY_LOG_MAX_PAGES,
   CAPTION_DISPLAY_LOG_STORAGE_KEY,
   createCaptionDisplayLog,
+  parseCaptionDisplayLogDocument,
   type CaptionDisplayLogStorage,
   type CaptionDisplayPageInput,
 } from "./caption-display-log";
@@ -34,6 +36,14 @@ function samplePage(
     line0: "上の行",
     line1: "下の行",
     sourceText: "Upper line",
+    sources: [
+      {
+        id: 1,
+        text: "Upper line",
+        rung: "lm-unmasked",
+      },
+    ],
+    fallback: false,
     translationPath: "language-model",
     showOriginal: false,
     showTentative: false,
@@ -171,6 +181,207 @@ describe("caption display log", () => {
 
       expect(cleared.pages).toEqual([]);
       expect(log.getPages()).toEqual([]);
+    },
+  );
+
+  it(
+    "round-trips accepted lines and drops through flush and hydrate",
+    async () => {
+      const storage = createMemoryStorage();
+      const first = createCaptionDisplayLog({
+        storage,
+        now: () => 1_000,
+        flushDelayMs: 60_000,
+      });
+
+      first.recordLineAccepted({
+        id: 1,
+        text: "first",
+        rung: "masked",
+      });
+      first.recordCueDropped({
+        cueId: "1:0",
+        sourceIds: [1],
+      });
+      await first.flush();
+
+      const hydrated =
+        createCaptionDisplayLog({
+          storage,
+          now: () => 2_000,
+          flushDelayMs: 60_000,
+        });
+      hydrated.recordLineAccepted({
+        id: 2,
+        text: "second",
+        rung: null,
+      });
+      hydrated.recordCueDropped({
+        cueId: "2:0",
+        sourceIds: [2],
+      });
+      await hydrated.flush();
+
+      const document =
+        parseCaptionDisplayLogDocument(
+          await storage.get(
+            CAPTION_DISPLAY_LOG_STORAGE_KEY,
+          ),
+        );
+
+      expect(
+        document.lines.map((line) => line.id),
+      ).toEqual([1, 2]);
+      expect(
+        document.drops.map(
+          (drop) => drop.cueId,
+        ),
+      ).toEqual(["1:0", "2:0"]);
+    },
+  );
+
+  it(
+    "defaults an old document's missing provenance fields",
+    () => {
+      const legacyPage:
+        Record<string, unknown> = {
+          ...samplePage(),
+          appearedAt:
+            "2026-09-01T00:00:00.000Z",
+          replacedAt: null,
+        };
+      delete legacyPage.sources;
+      delete legacyPage.fallback;
+
+      const document =
+        parseCaptionDisplayLogDocument({
+          version: 1,
+          pages: [legacyPage],
+        });
+
+      expect(document.pages[0]?.sources)
+        .toEqual([]);
+      expect(document.pages[0]?.fallback)
+        .toBe(false);
+      expect(document.lines).toEqual([]);
+      expect(document.drops).toEqual([]);
+      expect(document.linesTruncated)
+        .toBe(0);
+      expect(document.dropsTruncated)
+        .toBe(0);
+    },
+  );
+
+  it(
+    "counts accepted lines truncated beyond the 400-entry cap",
+    async () => {
+      const storage = createMemoryStorage();
+      const log = createCaptionDisplayLog({
+        storage,
+        now: () => 0,
+        flushDelayMs: 60_000,
+      });
+
+      for (
+        let id = 0;
+        id <= CAPTION_DISPLAY_LOG_MAX_PAGES;
+        id += 1
+      ) {
+        if (
+          id ===
+          CAPTION_DISPLAY_LOG_MAX_PAGES
+        ) {
+          await log.flush();
+        }
+
+        log.recordLineAccepted({
+          id,
+          text: String(id),
+          rung: null,
+        });
+        log.recordCueDropped({
+          cueId: `${id}:0`,
+          sourceIds: [id],
+        });
+      }
+
+      await log.flush();
+      const document =
+        parseCaptionDisplayLogDocument(
+          await storage.get(
+            CAPTION_DISPLAY_LOG_STORAGE_KEY,
+          ),
+        );
+
+      expect(document.lines).toHaveLength(
+        CAPTION_DISPLAY_LOG_MAX_PAGES,
+      );
+      expect(document.lines[0]?.id).toBe(1);
+      expect(document.linesTruncated).toBe(1);
+      expect(document.drops).toHaveLength(
+        CAPTION_DISPLAY_LOG_MAX_PAGES,
+      );
+      expect(document.drops[0]?.cueId)
+        .toBe("1:0");
+      expect(document.dropsTruncated)
+        .toBe(1);
+
+      await log.clear();
+      const cleared =
+        parseCaptionDisplayLogDocument(
+          await storage.get(
+            CAPTION_DISPLAY_LOG_STORAGE_KEY,
+          ),
+        );
+
+      expect(cleared.linesTruncated)
+        .toBe(0);
+      expect(cleared.dropsTruncated)
+        .toBe(0);
+    },
+  );
+
+  it(
+    "counts a line truncated before the first flush exactly once",
+    async () => {
+      const storage = createMemoryStorage();
+      const log = createCaptionDisplayLog({
+        storage,
+        now: () => 0,
+        flushDelayMs: 60_000,
+      });
+
+      for (
+        let id = 0;
+        id <= CAPTION_DISPLAY_LOG_MAX_PAGES;
+        id += 1
+      ) {
+        log.recordLineAccepted({
+          id,
+          text: String(id),
+          rung: null,
+        });
+        log.recordCueDropped({
+          cueId: `${id}:0`,
+          sourceIds: [id],
+        });
+      }
+
+      await log.flush();
+      await log.flush();
+      const document =
+        parseCaptionDisplayLogDocument(
+          await storage.get(
+            CAPTION_DISPLAY_LOG_STORAGE_KEY,
+          ),
+        );
+
+      expect(document.lines).toHaveLength(
+        CAPTION_DISPLAY_LOG_MAX_PAGES,
+      );
+      expect(document.linesTruncated).toBe(1);
+      expect(document.dropsTruncated)
+        .toBe(1);
     },
   );
 

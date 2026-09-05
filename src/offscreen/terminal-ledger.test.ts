@@ -58,6 +58,7 @@ describe("TerminalLedger", () => {
             "2026-09-02T00:00:01.000Z",
           ja: "source-1",
           fallback: true,
+          rung: "passthrough",
         },
       ],
       [
@@ -72,6 +73,7 @@ describe("TerminalLedger", () => {
             "2026-09-02T00:00:02.000Z",
           ja: "source-2",
           fallback: true,
+          rung: "passthrough",
         },
       ],
     ]);
@@ -84,11 +86,19 @@ describe("TerminalLedger", () => {
 
     register(ledger, 1);
     register(ledger, 2);
-    ledger.translated(2, "二");
+    ledger.translated(
+      2,
+      "二",
+      "translator-unmasked",
+    );
 
     expect(release).not.toHaveBeenCalled();
 
-    ledger.translated(1, "一");
+    ledger.translated(
+      1,
+      "一",
+      "masked",
+    );
 
     expect(
       release.mock.calls.map(
@@ -98,10 +108,12 @@ describe("TerminalLedger", () => {
       expect.objectContaining({
         id: 1,
         ja: "一",
+        rung: "masked",
       }),
       expect.objectContaining({
         id: 2,
         ja: "二",
+        rung: "translator-unmasked",
       }),
     ]);
 
@@ -111,7 +123,11 @@ describe("TerminalLedger", () => {
 
     expect(release).toHaveBeenCalledTimes(2);
 
-    ledger.translated(3, "三");
+    ledger.translated(
+      3,
+      "三",
+      "lm-unmasked",
+    );
 
     expect(
       release.mock.calls.slice(2).map(
@@ -121,11 +137,13 @@ describe("TerminalLedger", () => {
       expect.objectContaining({
         id: 3,
         ja: "三",
+        rung: "lm-unmasked",
       }),
       expect.objectContaining({
         id: 4,
         ja: "source-4",
         fallback: true,
+        rung: "passthrough",
       }),
     ]);
   });
@@ -137,10 +155,18 @@ describe("TerminalLedger", () => {
 
     register(ledger, 5);
     ledger.fallback([5]);
-    ledger.translated(5, "late");
+    ledger.translated(
+      5,
+      "late",
+      "masked",
+    );
 
     register(ledger, 6);
-    ledger.translated(6, "六");
+    ledger.translated(
+      6,
+      "六",
+      "translator-masked",
+    );
     ledger.fallback([6]);
 
     expect(

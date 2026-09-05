@@ -72,8 +72,7 @@ function installLanguageModel(
 function createTestEngine(
   backend: "prompt-api" | "translator",
   properNouns: string[],
-  onTranslated:
-    TranslationEngineOptions["onTranslated"],
+  onTranslated: ReturnType<typeof vi.fn>,
   onDevLog?:
     TranslationEngineOptions["onDevLog"],
 ): TranslationEngine {
@@ -92,7 +91,13 @@ function createTestEngine(
         available: false,
         ja: "",
       })),
-    onTranslated,
+    onTranslated(line, ja) {
+      // The existing assertions look at two arguments; the rung is dropped here.
+      (onTranslated as unknown as (
+        line: unknown,
+        ja: string,
+      ) => void)(line, ja);
+    },
     onPathChanged: vi.fn(),
     onDevLog,
   });

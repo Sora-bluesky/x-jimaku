@@ -7,6 +7,9 @@ import {
 } from "vitest";
 
 import {
+  isM1Message,
+} from "../shared/messages";
+import {
   normalizeLanguageModelResponse,
   stripBalancedWrappingPair,
   stripCodeFence,
@@ -75,7 +78,9 @@ function createGateEngine(
           ja: "",
         })),
       onSettled,
-      onTranslated,
+      onTranslated(line, ja) {
+        onTranslated(line, ja);
+      },
       onPathChanged,
       onDevLog,
     });
@@ -169,7 +174,9 @@ function createRescueHarness(
         properNouns: ["Roman"],
       }),
       requestContentTranslation,
-      onTranslated,
+      onTranslated(line, ja) {
+        onTranslated(line, ja);
+      },
       onPathChanged: vi.fn(),
       onDevLog,
     });
@@ -1037,6 +1044,7 @@ describe(
           1,
           expect.objectContaining({ id: 1 }),
           "一",
+          expect.any(String),
         );
         expect(
           onTranslated,
@@ -1044,6 +1052,7 @@ describe(
           2,
           expect.objectContaining({ id: 2 }),
           "二",
+          expect.any(String),
         );
         expect(
           onTranslated,
@@ -1051,6 +1060,7 @@ describe(
           3,
           expect.objectContaining({ id: 3 }),
           "三",
+          expect.any(String),
         );
 
         engine.destroy();
@@ -1058,7 +1068,7 @@ describe(
     );
 
     it(
-      "keeps the live-path drop and logs only id and text length",
+      "old queue-drop data loses the dropped text required by the validator",
       async () => {
         const first =
           createDeferred<string>();
@@ -1086,9 +1096,11 @@ describe(
           .mockImplementation(() => {
           });
         const onTranslated = vi.fn();
+        const onDevLog = vi.fn();
         const engine =
           new TranslationEngine({
             backend: "translator",
+            requestId: "request-queue",
             getContext: () => ({
               recentPairs: [],
               properNouns: [],
@@ -1098,8 +1110,11 @@ describe(
                 available: false,
                 ja: "",
               })),
-            onTranslated,
+            onTranslated(line, ja) {
+              onTranslated(line, ja);
+            },
             onPathChanged: vi.fn(),
+            onDevLog,
           });
 
         await engine.initialize();
@@ -1128,6 +1143,22 @@ describe(
             "[translate] dropped oldest pending committed clause (id=2, textLength=6)",
           ],
         ]);
+
+        const queueDrop = onDevLog.mock.calls
+          .map(([message]) => message)
+          .find(
+            (message) =>
+              message.data?.kind ===
+              "queue-drop",
+          );
+
+        expect(queueDrop?.data).toMatchObject({
+          lineId: 2,
+          text: "second",
+        });
+        expect(isM1Message(queueDrop)).toBe(
+          true,
+        );
 
         const drainPromise = engine.drain();
 
@@ -2001,6 +2032,7 @@ describe("TranslationEngine drain", () => {
         text: "the final clause",
       }),
       "最後の節",
+      expect.any(String),
     );
 
     engine.destroy();

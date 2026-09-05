@@ -38,6 +38,13 @@ export type TranslationPath =
   | "language-model"
   | "none";
 
+export type TranslationRung =
+  | "masked"
+  | "translator-masked"
+  | "translator-unmasked"
+  | "lm-unmasked"
+  | "passthrough";
+
 export interface ProbeError {
   name: string;
   message: string;
@@ -272,6 +279,7 @@ export interface OffDevLogData {
   kind: OffDevLogKind;
   requestId: string;
   lineId: number;
+  text?: string;
   path?: TranslationPath;
   outcome?: ClauseTimingOutcome;
   enqueueToTerminalMs?: number;
@@ -374,6 +382,7 @@ export interface RecognitionPayload {
   at: string;
   ja?: string;
   fallback?: boolean;
+  rung?: TranslationRung;
 }
 
 export interface OffRecognitionMessage
@@ -796,6 +805,11 @@ export function isM1Message(
             ) &&
             value.data.lineId >= 0 &&
             (
+              value.data.text === undefined ||
+              typeof value.data.text ===
+                "string"
+            ) &&
+            (
               value.data.path === undefined ||
               isTranslationPath(
                 value.data.path,
@@ -1159,6 +1173,18 @@ export function isTranslationPath(
   );
 }
 
+export function isTranslationRung(
+  value: unknown,
+): value is TranslationRung {
+  return (
+    value === "masked" ||
+    value === "translator-masked" ||
+    value === "translator-unmasked" ||
+    value === "lm-unmasked" ||
+    value === "passthrough"
+  );
+}
+
 function isRecognitionPayload(
   value: Record<string, unknown>,
 ): boolean {
@@ -1176,6 +1202,10 @@ function isRecognitionPayload(
     (
       value.fallback === undefined ||
       typeof value.fallback === "boolean"
+    ) &&
+    (
+      value.rung === undefined ||
+      isTranslationRung(value.rung)
     )
   );
 }

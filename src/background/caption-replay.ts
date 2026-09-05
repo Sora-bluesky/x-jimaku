@@ -28,6 +28,9 @@ export function createRecognitionRelays(
     ...(line.fallback === undefined
       ? {}
       : { fallback: line.fallback }),
+    ...(line.rung === undefined
+      ? {}
+      : { rung: line.rung }),
   };
 
   return {

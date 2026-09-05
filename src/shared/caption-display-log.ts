@@ -1,5 +1,7 @@
-import type {
-  TranslationPath,
+import {
+  isTranslationRung,
+  type TranslationPath,
+  type TranslationRung,
 } from "./messages";
 
 export const CAPTION_DISPLAY_LOG_STORAGE_KEY =
@@ -14,12 +16,20 @@ export const CAPTION_DISPLAY_LOG_MAX_PAGES =
 export const CAPTION_DISPLAY_LOG_FLUSH_MS =
   250;
 
+export interface CaptionSourceLine {
+  id: number;
+  text: string;
+  rung: TranslationRung | null;
+}
+
 export interface CaptionDisplayPageInput {
   cueId: string;
   pageId: string;
   line0: string;
   line1: string;
   sourceText: string;
+  sources: readonly CaptionSourceLine[];
+  fallback: boolean;
   translationPath: TranslationPath | null;
   showOriginal: boolean;
   showTentative: boolean;
@@ -33,11 +43,31 @@ export interface CaptionDisplayLogPage
   replacedAt: string | null;
 }
 
+export interface CaptionDisplayLogLine
+  extends CaptionSourceLine {
+  acceptedAt: string;
+}
+
+export interface CaptionDisplayLogDrop {
+  cueId: string;
+  sourceIds: readonly number[];
+  droppedAt: string;
+}
+
 export interface CaptionDisplayLogSink {
   recordPageShown(
     page: CaptionDisplayPageInput,
   ): void;
   recordPageHidden(): void;
+  recordLineAccepted(
+    line: CaptionSourceLine,
+  ): void;
+  recordCueDropped(
+    drop: Omit<
+      CaptionDisplayLogDrop,
+      "droppedAt"
+    >,
+  ): void;
 }
 
 export interface CaptionDisplayLogStorage {
@@ -56,11 +86,8 @@ export interface CaptionDisplayLogStorage {
   ): void;
 }
 
-export interface CaptionDisplayLog {
-  recordPageShown(
-    page: CaptionDisplayPageInput,
-  ): void;
-  recordPageHidden(): void;
+export interface CaptionDisplayLog
+  extends CaptionDisplayLogSink {
   setEnabled(enabled: boolean): void;
   getPages(): CaptionDisplayLogPage[];
   flush(): Promise<void>;
@@ -75,9 +102,13 @@ interface CaptionDisplayLogOptions {
   enabled?: boolean;
 }
 
-interface CaptionDisplayLogDocument {
+export interface CaptionDisplayLogDocument {
   version: 1;
   pages: CaptionDisplayLogPage[];
+  lines: CaptionDisplayLogLine[];
+  drops: CaptionDisplayLogDrop[];
+  linesTruncated: number;
+  dropsTruncated: number;
 }
 
 export function createCaptionDisplayLog(
@@ -217,17 +248,51 @@ export function formatCaptionDisplayLogExport(
 export function parseCaptionDisplayLogPages(
   value: unknown,
 ): CaptionDisplayLogPage[] {
+  return parseCaptionDisplayLogDocument(
+    value,
+  ).pages;
+}
+
+export function parseCaptionDisplayLogDocument(
+  value: unknown,
+): CaptionDisplayLogDocument {
   if (
     !isRecord(value) ||
-    value.version !== 1 ||
-    !Array.isArray(value.pages)
+    value.version !== 1
   ) {
-    return [];
+    return emptyLogDocument();
   }
 
-  return value.pages.filter(
-    isCaptionDisplayLogPage,
-  );
+  return {
+    version: 1,
+    pages: Array.isArray(value.pages)
+      ? value.pages
+          .map(withCaptionPageDefaults)
+          .filter(isCaptionDisplayLogPage)
+      : [],
+    lines: Array.isArray(value.lines)
+      ? value.lines.filter(
+          isCaptionDisplayLogLine,
+        )
+      : [],
+    drops: Array.isArray(value.drops)
+      ? value.drops.filter(
+          isCaptionDisplayLogDrop,
+        )
+      : [],
+    linesTruncated:
+      isNonNegativeInteger(
+        value.linesTruncated,
+      )
+        ? value.linesTruncated
+        : 0,
+    dropsTruncated:
+      isNonNegativeInteger(
+        value.dropsTruncated,
+      )
+        ? value.dropsTruncated
+        : 0,
+  };
 }
 
 class CaptionDisplayLogWriter
@@ -243,6 +308,12 @@ class CaptionDisplayLogWriter
 
   private pages: CaptionDisplayLogPage[] =
     [];
+  private lines: CaptionDisplayLogLine[] =
+    [];
+  private drops: CaptionDisplayLogDrop[] =
+    [];
+  private linesTruncated = 0;
+  private dropsTruncated = 0;
   private openIndex: number | null = null;
   private enabled: boolean;
   private dirty = false;
@@ -296,6 +367,10 @@ class CaptionDisplayLogWriter
       appearedAt: this.isoNow(),
       replacedAt: null,
       sourceText: page.sourceText,
+      sources: page.sources.map(
+        (source) => ({ ...source }),
+      ),
+      fallback: page.fallback,
       translationPath: page.translationPath,
       showOriginal: page.showOriginal,
       showTentative: page.showTentative,
@@ -319,6 +394,55 @@ class CaptionDisplayLogWriter
       return;
     }
 
+    this.dirty = true;
+    this.scheduleFlush();
+  }
+
+  recordLineAccepted(
+    line: CaptionSourceLine,
+  ): void {
+    if (!this.enabled) {
+      return;
+    }
+
+    this.lines.push({
+      ...line,
+      acceptedAt: this.isoNow(),
+    });
+    // Truncation is counted by the writer that cuts, at the moment it cuts.
+    // The merge below never counts: what it cuts beyond the cap is either an
+    // entry this writer already counted or one from another writer or run,
+    // and the stored counter keeps the largest count seen so far.
+    this.linesTruncated += Math.max(
+      0,
+      this.lines.length - this.maxPages,
+    );
+    this.lines = this.capEntries(this.lines);
+    this.dirty = true;
+    this.scheduleFlush();
+  }
+
+  recordCueDropped(
+    drop: Omit<
+      CaptionDisplayLogDrop,
+      "droppedAt"
+    >,
+  ): void {
+    if (!this.enabled) {
+      return;
+    }
+
+    this.drops.push({
+      cueId: drop.cueId,
+      sourceIds: [...drop.sourceIds],
+      droppedAt: this.isoNow(),
+    });
+    this.dropsTruncated += Math.max(
+      0,
+      this.drops.length - this.maxPages,
+    );
+    this.drops =
+      this.capEntries(this.drops);
     this.dirty = true;
     this.scheduleFlush();
   }
@@ -352,19 +476,37 @@ class CaptionDisplayLogWriter
     this.flushing = true;
 
     try {
-      const pages = this.replaceOnFlush
-        ? this.pages.map((page) => ({
-            ...page,
-          }))
+      const document = this.replaceOnFlush
+        ? {
+            version: 1,
+            pages: this.pages.map(
+              (page) => ({ ...page }),
+            ),
+            lines: this.lines.map(
+              (line) => ({ ...line }),
+            ),
+            drops: this.drops.map(
+              (drop) => ({
+                ...drop,
+                sourceIds:
+                  [...drop.sourceIds],
+              }),
+            ),
+            linesTruncated:
+              this.linesTruncated,
+            dropsTruncated:
+              this.dropsTruncated,
+          } satisfies CaptionDisplayLogDocument
         : await this.mergedWithStored();
 
       await this.storage.set(
         CAPTION_DISPLAY_LOG_STORAGE_KEY,
-        {
-          version: 1,
-          pages,
-        } satisfies CaptionDisplayLogDocument,
+        document,
       );
+      this.linesTruncated =
+        document.linesTruncated;
+      this.dropsTruncated =
+        document.dropsTruncated;
       this.dirty = false;
     } finally {
       this.flushing = false;
@@ -382,13 +524,17 @@ class CaptionDisplayLogWriter
    * a log missing the part they were describing.
    */
   private async mergedWithStored(): Promise<
-    CaptionDisplayLogPage[]
+    CaptionDisplayLogDocument
   > {
     const stored = await this.storage?.get(
       CAPTION_DISPLAY_LOG_STORAGE_KEY,
     );
+    const storedDocument =
+      parseCaptionDisplayLogDocument(
+        stored,
+      );
     const storedPages =
-      parseCaptionDisplayLogPages(stored);
+      storedDocument.pages;
     const seen = new Set<string>();
     const merged: CaptionDisplayLogPage[] = [];
 
@@ -420,11 +566,43 @@ class CaptionDisplayLogWriter
           : 0,
     );
 
-    return this.capPages(merged);
+    const mergedLines =
+      mergeCaptionLogEntries(
+        storedDocument.lines,
+        this.lines,
+        (line) => line.acceptedAt,
+      );
+
+    const mergedDrops =
+      mergeCaptionLogEntries(
+        storedDocument.drops,
+        this.drops,
+        (drop) => drop.droppedAt,
+      );
+
+    return {
+      version: 1,
+      pages: this.capPages(merged),
+      lines:
+        this.capEntries(mergedLines),
+      drops: this.capEntries(mergedDrops),
+      linesTruncated: Math.max(
+        storedDocument.linesTruncated,
+        this.linesTruncated,
+      ),
+      dropsTruncated: Math.max(
+        storedDocument.dropsTruncated,
+        this.dropsTruncated,
+      ),
+    };
   }
 
   async clear(): Promise<void> {
     this.pages = [];
+    this.lines = [];
+    this.drops = [];
+    this.linesTruncated = 0;
+    this.dropsTruncated = 0;
     this.openIndex = null;
     this.dirty = true;
     // Clearing replaces; merging would put back what was just discarded.
@@ -446,10 +624,12 @@ class CaptionDisplayLogWriter
         CAPTION_DISPLAY_LOG_ENABLED_KEY,
       );
     const closedAt = this.isoNow();
-    const loaded =
-      parseCaptionDisplayLogPages(
+    const loadedDocument =
+      parseCaptionDisplayLogDocument(
         stored,
-      ).map((page) =>
+      );
+    const loaded =
+      loadedDocument.pages.map((page) =>
         page.replacedAt === null
           ? { ...page, replacedAt: closedAt }
           : page,
@@ -460,6 +640,23 @@ class CaptionDisplayLogWriter
       ...this.pages,
     ]);
     this.recomputeOpenIndex();
+    this.linesTruncated = Math.max(
+      loadedDocument.linesTruncated,
+      this.linesTruncated,
+    );
+    this.dropsTruncated = Math.max(
+      loadedDocument.dropsTruncated,
+      this.dropsTruncated,
+    );
+    this.lines = [
+      ...loadedDocument.lines,
+      ...this.lines,
+    ];
+    this.capLines();
+    this.drops = this.capEntries([
+      ...loadedDocument.drops,
+      ...this.drops,
+    ]);
 
     if (
       this.enabledOverride === undefined &&
@@ -473,6 +670,10 @@ class CaptionDisplayLogWriter
       // had turned recording off. Nothing kept, nothing to flush: an opt-out
       // honoured a few storage reads late is not an opt-out.
       this.pages = [];
+      this.lines = [];
+      this.drops = [];
+      this.linesTruncated = 0;
+      this.dropsTruncated = 0;
       this.openIndex = null;
       this.dirty = false;
     }
@@ -506,17 +707,27 @@ class CaptionDisplayLogWriter
     }
 
     const incoming =
-      parseCaptionDisplayLogPages(
+      parseCaptionDisplayLogDocument(
         changes[
           CAPTION_DISPLAY_LOG_STORAGE_KEY
         ]?.newValue,
       );
 
-    if (incoming.length > 0) {
+    if (
+      incoming.pages.length > 0 ||
+      incoming.lines.length > 0 ||
+      incoming.drops.length > 0 ||
+      incoming.linesTruncated > 0 ||
+      incoming.dropsTruncated > 0
+    ) {
       return;
     }
 
     this.pages = [];
+    this.lines = [];
+    this.drops = [];
+    this.linesTruncated = 0;
+    this.dropsTruncated = 0;
     this.openIndex = null;
     this.dirty = false;
     this.cancelFlush();
@@ -560,6 +771,21 @@ class CaptionDisplayLogWriter
     return pages.slice(
       pages.length - this.maxPages,
     );
+  }
+
+  private capLines(): void {
+    this.lines =
+      this.capEntries(this.lines);
+  }
+
+  private capEntries<T>(
+    entries: T[],
+  ): T[] {
+    return entries.length <= this.maxPages
+      ? entries
+      : entries.slice(
+          entries.length - this.maxPages,
+        );
   }
 
   private recomputeOpenIndex(): void {
@@ -613,7 +839,28 @@ class CaptionDisplayLogWriter
 
 function emptyLogDocument():
   CaptionDisplayLogDocument {
-  return { version: 1, pages: [] };
+  return {
+    version: 1,
+    pages: [],
+    lines: [],
+    drops: [],
+    linesTruncated: 0,
+    dropsTruncated: 0,
+  };
+}
+
+function withCaptionPageDefaults(
+  value: unknown,
+): unknown {
+  if (!isRecord(value)) {
+    return value;
+  }
+
+  return {
+    ...value,
+    sources: value.sources ?? [],
+    fallback: value.fallback ?? false,
+  };
 }
 
 function isCaptionDisplayLogPage(
@@ -634,6 +881,11 @@ function isCaptionDisplayLogPage(
       typeof value.replacedAt === "string"
     ) &&
     typeof value.sourceText === "string" &&
+    Array.isArray(value.sources) &&
+    value.sources.every(
+      isCaptionSourceLine,
+    ) &&
+    typeof value.fallback === "boolean" &&
     isStoredTranslationPath(
       value.translationPath,
     ) &&
@@ -645,6 +897,83 @@ function isCaptionDisplayLogPage(
       "boolean" &&
     typeof value.tentativeRowVisible ===
       "boolean"
+  );
+}
+
+function isCaptionSourceLine(
+  value: unknown,
+): value is CaptionSourceLine {
+  return (
+    isRecord(value) &&
+    isNonNegativeInteger(value.id) &&
+    typeof value.text === "string" &&
+    (
+      value.rung === null ||
+      isTranslationRung(value.rung)
+    )
+  );
+}
+
+function isCaptionDisplayLogLine(
+  value: unknown,
+): value is CaptionDisplayLogLine {
+  return (
+    isRecord(value) &&
+    typeof value.acceptedAt === "string" &&
+    isCaptionSourceLine(value)
+  );
+}
+
+function isCaptionDisplayLogDrop(
+  value: unknown,
+): value is CaptionDisplayLogDrop {
+  return (
+    isRecord(value) &&
+    typeof value.cueId === "string" &&
+    Array.isArray(value.sourceIds) &&
+    value.sourceIds.every(
+      isNonNegativeInteger,
+    ) &&
+    typeof value.droppedAt === "string"
+  );
+}
+
+function mergeCaptionLogEntries<T extends object>(
+  stored: readonly T[],
+  current: readonly T[],
+  timestamp: (entry: T) => string,
+): T[] {
+  const seen = new Set<string>();
+  const merged = [...stored, ...current]
+    .filter((entry) => {
+      const identity =
+        JSON.stringify(entry) ?? "";
+
+      if (seen.has(identity)) {
+        return false;
+      }
+
+      seen.add(identity);
+      return true;
+    });
+
+  merged.sort((left, right) =>
+    timestamp(left) < timestamp(right)
+      ? -1
+      : timestamp(left) > timestamp(right)
+        ? 1
+        : 0,
+  );
+  return merged;
+}
+
+function isNonNegativeInteger(
+  value: unknown,
+): value is number {
+  return (
+    typeof value === "number" &&
+    Number.isSafeInteger(value) &&
+    value >= 0
   );
 }
 
