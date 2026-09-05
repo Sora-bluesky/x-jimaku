@@ -15,6 +15,7 @@
 // the only way in.
 import puppeteer from "puppeteer-core";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
@@ -36,6 +37,8 @@ import {
   coverageNote,
   assertCaseMedia,
   countPageLineReuse,
+  checkBuildInfo,
+  cutCaptionLog,
 } from "./live2-config.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -401,6 +404,7 @@ if (options.displayMode === "both") {
 // Filled from the extension worker after the capture; see the probe near teardown.
 let captionLogEntries = null;
 let captionLogDwell = null;
+let captionLog = null;
 
 const baseArgs = puppeteer
   .defaultArgs({ headless: false })
@@ -582,6 +586,28 @@ try {
     `[live2] service worker build verified: ${result.serviceWorkerBuild}`,
   );
 
+  let buildInfo;
+  try {
+    buildInfo = JSON.parse(readFileSync(
+      path.join(options.extension, "build-info.json"),
+      "utf8",
+    ));
+  } catch {
+    throw new Error(
+      "dist/build-info.json is missing; run npm run build",
+    );
+  }
+  const sourceHash = createHash("sha256")
+    .update(readFileSync(path.join(root, "src/offscreen/glossary.data.ts")))
+    .digest("hex");
+  const buildInfoCheck = checkBuildInfo({ buildInfo, sourceHash });
+  if (!buildInfoCheck.ok) {
+    throw new Error(buildInfoCheck.reason);
+  }
+  const { revision, dirty, builtAt, versionName, nameTableHash } = buildInfo;
+  result.build = { revision, dirty, builtAt, versionName };
+  result.nameTableHash = nameTableHash;
+
   const pages = await browser.pages();
   const page = pages[0] ?? (await browser.newPage());
 
@@ -647,15 +673,18 @@ try {
         t.url().startsWith(`chrome-extension://${result.extensionId}`)
         && (t.type() === "service_worker" || t.type() === "background_page"),
     );
-    if (clearWorker) {
-      const w = await clearWorker.worker();
-      await w.evaluate(async () => {
-        await chrome.storage.local.remove("captionDisplayLog");
-      });
+    if (!clearWorker) {
+      throw new Error("no-worker-target");
     }
-  } catch {
-    // A run that could not clear still reports its own count honestly enough;
-    // the number is a floor, and the probe says how many pages closed.
+    const w = await clearWorker.worker();
+    await w.evaluate(async () => {
+      await chrome.storage.local.remove("captionDisplayLog");
+    });
+    result.captionLogCleared = true;
+  } catch (error) {
+    result.captionLogCleared = false;
+    result.captionLogClearError =
+      error instanceof Error ? error.message : String(error);
   }
   console.error(`[live2] settings applied; ${JSON.stringify(result.builtinAi)}`);
 
@@ -830,6 +859,7 @@ try {
       await video.play();
       return Date.now();
     });
+  result.replayStartedAt = new Date(replayStartedAtMs).toISOString();
 
   await page.evaluate(() => {
     window.__samples = [];
@@ -1109,6 +1139,12 @@ try {
 
         return {
           entries: pages.length,
+          pages,
+          lines: Array.isArray(value?.lines) ? value.lines : null,
+          drops: Array.isArray(value?.drops) ? value.drops : null,
+          ...(value?.linesTruncated !== undefined
+            ? { linesTruncated: value.linesTruncated }
+            : {}),
           closed: rows.length,
           dwellMsP10: at(dwell, 0.1),
           dwellMsP50: at(dwell, 0.5),
@@ -1117,6 +1153,7 @@ try {
           charsPerSecondP90: at(speed, 0.9),
         };
       });
+      captionLog = probe;
       captionLogEntries = probe.entries;
       captionLogDwell = probe.closed === undefined
         ? null
@@ -1269,8 +1306,22 @@ for (const sample of samples) {
   });
 }
 
+const captionCut = cutCaptionLog({
+  ...(typeof captionLogEntries === "number"
+    && Number.isFinite(replayStartedAtMs) ? captionLog : {}),
+  replayStartedAtMs,
+});
+result.pagesUnparsed = captionCut.pagesUnparsed;
+result.linesUnparsed = captionCut.linesUnparsed;
+result.dropsUnparsed = captionCut.dropsUnparsed;
+if (captionLog?.linesTruncated !== undefined) {
+  result.linesTruncated = captionLog.linesTruncated;
+}
 result.display = {
   ...(result.display ?? {}),
+  pages: captionCut.pages,
+  lines: captionCut.lines,
+  drops: captionCut.drops,
   blocks: pageBlocks,
 };
 

@@ -15,9 +15,108 @@ import {
   finalizeGates,
   assertCaseMedia,
   countPageLineReuse,
+  checkBuildInfo,
+  cutCaptionLog,
 } from "./live2-config.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
+
+describe("checkBuildInfo", () => {
+  const sourceHash = "a".repeat(64);
+  const buildInfo = {
+    revision: "abc1234",
+    dirty: false,
+    builtAt: "2026-09-02T03:04:05Z",
+    versionName: "0.6.0 abc1234 2026-09-02T03:04:05Z",
+    nameTableHash: sourceHash,
+  };
+
+  it.each([undefined, null, {}, [], "invalid"])(
+    "rejects missing or invalid build info: %j",
+    (value) => {
+      expect(checkBuildInfo({ buildInfo: value, sourceHash })).toEqual({
+        ok: false,
+        reason: "dist/build-info.json is missing; run npm run build",
+      });
+    },
+  );
+
+  it("rejects a changed name table", () => {
+    expect(checkBuildInfo({
+      buildInfo,
+      sourceHash: "b".repeat(64),
+    })).toEqual({
+      ok: false,
+      reason:
+        "name table changed after the last build (src/offscreen/glossary.data.ts); run npm run build",
+    });
+  });
+
+  it("accepts the built name table", () => {
+    expect(checkBuildInfo({ buildInfo, sourceHash })).toEqual({ ok: true });
+  });
+});
+
+describe("cutCaptionLog", () => {
+  const instant = "2026-09-02T03:04:05.123Z";
+  const replayStartedAtMs = Date.parse(instant);
+  const before = new Date(replayStartedAtMs - 1).toISOString();
+
+  it("cuts pages by numeric time and preserves stored fields", () => {
+    const kept = {
+      cueId: "cue-1", pageId: "0", line0: "字幕", line1: "",
+      sourceText: "full source", translationPath: "prompt-api",
+      fallback: false, appearedAt: instant, replacedAt: null,
+      sources: [{ id: "line-1", text: "full source", rung: "masked" }],
+      showOriginal: false, showTentative: true,
+      originalRowVisible: false, tentativeRowVisible: true,
+    };
+    const pages = [
+      { ...kept, appearedAt: before },
+      kept,
+      { ...kept, appearedAt: "garbage" },
+    ];
+    const cut = cutCaptionLog({ pages, replayStartedAtMs });
+    expect(cut).toEqual({
+      pages: [kept], pagesUnparsed: 1,
+      lines: null, linesUnparsed: null,
+      drops: null, dropsUnparsed: null,
+    });
+    expect(pages).toHaveLength(3);
+    expect(cut.pages[0]).toEqual(kept);
+  });
+
+  it("cuts lines and drops at their own timestamps", () => {
+    const lines = [before, instant, "garbage"].map((acceptedAt) => ({
+      id: "line-1", text: "source", rung: "masked", acceptedAt,
+    }));
+    const drops = [before, instant, "garbage"].map((droppedAt) => ({
+      cueId: "cue-1", sourceIds: ["line-1"], droppedAt,
+    }));
+    expect(cutCaptionLog({
+      pages: [], lines, drops, replayStartedAtMs,
+    })).toEqual({
+      pages: [], pagesUnparsed: 0,
+      lines: [lines[1]], linesUnparsed: 1,
+      drops: [drops[1]], dropsUnparsed: 1,
+    });
+  });
+
+  it("distinguishes unavailable logs and does not synthesize sources", () => {
+    expect(cutCaptionLog({ replayStartedAtMs })).toEqual({
+      pages: null, pagesUnparsed: null,
+      lines: null, linesUnparsed: null,
+      drops: null, dropsUnparsed: null,
+    });
+    const cut = cutCaptionLog({
+      pages: [{ appearedAt: instant }],
+      lines: {}, drops: [], replayStartedAtMs,
+    });
+    expect(cut.pages[0]).not.toHaveProperty("sources");
+    expect(cut.lines).toBeNull();
+    expect(cut.drops).toEqual([]);
+  });
+});
 
 describe("parseArgs display mode", () => {
   it("defaults to both configurations", () => {

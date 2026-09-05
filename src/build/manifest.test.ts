@@ -4,6 +4,7 @@ import {
   it,
 } from "vitest";
 import {
+  formatBuildInfo,
   formatVersionName,
   isChromeVersion,
   stampManifest,
@@ -36,6 +37,32 @@ function getStampedManifest(
     version_name: string;
   };
 }
+
+describe("formatBuildInfo", () => {
+  it.each([false, true])(
+    "round-trips the manifest stamp with dirty=%s",
+    (dirty) => {
+      const stamp = {
+        revision: "abc1234",
+        dirty,
+        builtAt: new Date("2026-09-02T03:04:05.123Z"),
+      };
+      const info = formatBuildInfo(stamp, "0.6.0", "a".repeat(64));
+      expect(JSON.parse(JSON.stringify(info))).toEqual(info);
+      expect(info).toEqual({
+        revision: "abc1234",
+        dirty,
+        builtAt: "2026-09-02T03:04:05Z",
+        versionName: formatVersionName("0.6.0", stamp),
+        nameTableHash: "a".repeat(64),
+      });
+      expect(info.versionName).toBe(
+        JSON.parse(stampManifest(MANIFEST_SOURCE, stamp)).version_name,
+      );
+      expect(info.versionName.endsWith(` ${info.builtAt}`)).toBe(true);
+    },
+  );
+});
 
 describe("stampManifest", () => {
   it(
