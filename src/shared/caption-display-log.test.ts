@@ -385,6 +385,63 @@ describe("caption display log", () => {
     },
   );
 
+  it("keeps truncation counts exact across writers", async () => {
+    const storage = createMemoryStorage();
+    const options = { storage, now: () => 0, flushDelayMs: 60_000 };
+    const tabA = createCaptionDisplayLog(options);
+    const tabB = createCaptionDisplayLog(options);
+    await Promise.all([tabA.flush(), tabB.flush()]);
+
+    for (let id = 0; id < 600; id += 1) {
+      const writer = id < 300 ? tabA : tabB;
+      writer.recordLineAccepted({ id, text: String(id), rung: null });
+      writer.recordCueDropped({ cueId: `${id}:0`, sourceIds: [id] });
+    }
+
+    await tabA.flush();
+    await tabB.flush();
+    const readDocument = async () =>
+      parseCaptionDisplayLogDocument(
+        await storage.get(CAPTION_DISPLAY_LOG_STORAGE_KEY),
+      );
+    let document = await readDocument();
+    expect([document.lines.length, document.linesTruncated]).toEqual([400, 200]);
+    expect([document.drops.length, document.dropsTruncated]).toEqual([400, 200]);
+
+    tabA.recordPageShown(samplePage({ cueId: "a:0" }));
+    await tabA.flush();
+    document = await readDocument();
+    expect([document.linesTruncated, document.dropsTruncated]).toEqual([200, 200]);
+
+    tabB.recordPageShown(samplePage({ cueId: "b:0" }));
+    await tabB.flush();
+    document = await readDocument();
+    expect([document.linesTruncated, document.dropsTruncated]).toEqual([200, 200]);
+  });
+
+  it("adds the hydrated truncation base to later overflow", async () => {
+    const storage = createMemoryStorage();
+    const options = { storage, now: () => 0, flushDelayMs: 60_000 };
+    const first = createCaptionDisplayLog(options);
+
+    for (let id = 0; id < 450; id += 1) {
+      first.recordLineAccepted({ id, text: String(id), rung: null });
+    }
+    await first.flush();
+
+    const hydrated = createCaptionDisplayLog(options);
+    await hydrated.flush();
+    for (let id = 450; id < 460; id += 1) {
+      hydrated.recordLineAccepted({ id, text: String(id), rung: null });
+    }
+    await hydrated.flush();
+
+    const document = parseCaptionDisplayLogDocument(
+      await storage.get(CAPTION_DISPLAY_LOG_STORAGE_KEY),
+    );
+    expect([document.lines.length, document.linesTruncated]).toEqual([400, 60]);
+  });
+
   it(
     "writes nothing while recording is off",
     async () => {

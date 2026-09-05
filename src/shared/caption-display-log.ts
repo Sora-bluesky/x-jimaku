@@ -312,8 +312,10 @@ class CaptionDisplayLogWriter
     [];
   private drops: CaptionDisplayLogDrop[] =
     [];
-  private linesTruncated = 0;
-  private dropsTruncated = 0;
+  private baseLinesTruncated = 0;
+  private baseDropsTruncated = 0;
+  private pendingLines: CaptionDisplayLogLine[] = [];
+  private pendingDrops: CaptionDisplayLogDrop[] = [];
   private openIndex: number | null = null;
   private enabled: boolean;
   private dirty = false;
@@ -409,15 +411,7 @@ class CaptionDisplayLogWriter
       ...line,
       acceptedAt: this.isoNow(),
     });
-    // Truncation is counted by the writer that cuts, at the moment it cuts.
-    // The merge below never counts: what it cuts beyond the cap is either an
-    // entry this writer already counted or one from another writer or run,
-    // and the stored counter keeps the largest count seen so far.
-    this.linesTruncated += Math.max(
-      0,
-      this.lines.length - this.maxPages,
-    );
-    this.lines = this.capEntries(this.lines);
+    this.pendingLines.push(this.lines[this.lines.length - 1]!);
     this.dirty = true;
     this.scheduleFlush();
   }
@@ -437,12 +431,7 @@ class CaptionDisplayLogWriter
       sourceIds: [...drop.sourceIds],
       droppedAt: this.isoNow(),
     });
-    this.dropsTruncated += Math.max(
-      0,
-      this.drops.length - this.maxPages,
-    );
-    this.drops =
-      this.capEntries(this.drops);
+    this.pendingDrops.push(this.drops[this.drops.length - 1]!);
     this.dirty = true;
     this.scheduleFlush();
   }
@@ -492,10 +481,8 @@ class CaptionDisplayLogWriter
                   [...drop.sourceIds],
               }),
             ),
-            linesTruncated:
-              this.linesTruncated,
-            dropsTruncated:
-              this.dropsTruncated,
+            linesTruncated: 0,
+            dropsTruncated: 0,
           } satisfies CaptionDisplayLogDocument
         : await this.mergedWithStored();
 
@@ -503,10 +490,8 @@ class CaptionDisplayLogWriter
         CAPTION_DISPLAY_LOG_STORAGE_KEY,
         document,
       );
-      this.linesTruncated =
-        document.linesTruncated;
-      this.dropsTruncated =
-        document.dropsTruncated;
+      this.pendingLines = [];
+      this.pendingDrops = [];
       this.dirty = false;
     } finally {
       this.flushing = false;
@@ -588,11 +573,11 @@ class CaptionDisplayLogWriter
       drops: this.capEntries(mergedDrops),
       linesTruncated: Math.max(
         storedDocument.linesTruncated,
-        this.linesTruncated,
+        this.baseLinesTruncated + Math.max(0, mergedLines.length - this.maxPages),
       ),
       dropsTruncated: Math.max(
         storedDocument.dropsTruncated,
-        this.dropsTruncated,
+        this.baseDropsTruncated + Math.max(0, mergedDrops.length - this.maxPages),
       ),
     };
   }
@@ -601,8 +586,10 @@ class CaptionDisplayLogWriter
     this.pages = [];
     this.lines = [];
     this.drops = [];
-    this.linesTruncated = 0;
-    this.dropsTruncated = 0;
+    this.baseLinesTruncated = 0;
+    this.baseDropsTruncated = 0;
+    this.pendingLines = [];
+    this.pendingDrops = [];
     this.openIndex = null;
     this.dirty = true;
     // Clearing replaces; merging would put back what was just discarded.
@@ -640,23 +627,18 @@ class CaptionDisplayLogWriter
       ...this.pages,
     ]);
     this.recomputeOpenIndex();
-    this.linesTruncated = Math.max(
-      loadedDocument.linesTruncated,
-      this.linesTruncated,
+    this.baseLinesTruncated =
+      loadedDocument.linesTruncated;
+    this.baseDropsTruncated =
+      loadedDocument.dropsTruncated;
+    this.lines = mergeCaptionLogEntries(
+      loadedDocument.lines, this.lines,
+      (line) => line.acceptedAt,
     );
-    this.dropsTruncated = Math.max(
-      loadedDocument.dropsTruncated,
-      this.dropsTruncated,
+    this.drops = mergeCaptionLogEntries(
+      loadedDocument.drops, this.drops,
+      (drop) => drop.droppedAt,
     );
-    this.lines = [
-      ...loadedDocument.lines,
-      ...this.lines,
-    ];
-    this.capLines();
-    this.drops = this.capEntries([
-      ...loadedDocument.drops,
-      ...this.drops,
-    ]);
 
     if (
       this.enabledOverride === undefined &&
@@ -672,8 +654,10 @@ class CaptionDisplayLogWriter
       this.pages = [];
       this.lines = [];
       this.drops = [];
-      this.linesTruncated = 0;
-      this.dropsTruncated = 0;
+      this.baseLinesTruncated = 0;
+      this.baseDropsTruncated = 0;
+      this.pendingLines = [];
+      this.pendingDrops = [];
       this.openIndex = null;
       this.dirty = false;
     }
@@ -720,14 +704,28 @@ class CaptionDisplayLogWriter
       incoming.linesTruncated > 0 ||
       incoming.dropsTruncated > 0
     ) {
+      this.baseLinesTruncated =
+        incoming.linesTruncated;
+      this.baseDropsTruncated =
+        incoming.dropsTruncated;
+      this.lines = mergeCaptionLogEntries(
+        incoming.lines, this.pendingLines,
+        (line) => line.acceptedAt,
+      );
+      this.drops = mergeCaptionLogEntries(
+        incoming.drops, this.pendingDrops,
+        (drop) => drop.droppedAt,
+      );
       return;
     }
 
     this.pages = [];
     this.lines = [];
     this.drops = [];
-    this.linesTruncated = 0;
-    this.dropsTruncated = 0;
+    this.baseLinesTruncated = 0;
+    this.baseDropsTruncated = 0;
+    this.pendingLines = [];
+    this.pendingDrops = [];
     this.openIndex = null;
     this.dirty = false;
     this.cancelFlush();
@@ -773,10 +771,7 @@ class CaptionDisplayLogWriter
     );
   }
 
-  private capLines(): void {
-    this.lines =
-      this.capEntries(this.lines);
-  }
+
 
   private capEntries<T>(
     entries: T[],
