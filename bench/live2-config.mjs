@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, "..");
 
-export function checkBuildInfo({ buildInfo, sourceHash }) {
+export function checkBuildInfo({ buildInfo, sourceHash, versionName }) {
   if (
     buildInfo === null
     || typeof buildInfo !== "object"
@@ -20,6 +20,19 @@ export function checkBuildInfo({ buildInfo, sourceHash }) {
     return {
       ok: false,
       reason: "dist/build-info.json is missing; run npm run build",
+    };
+  }
+  // A build-info.json left over from an interrupted build can outlive the
+  // manifest it was written with; the loaded worker was verified against
+  // manifest.version_name, so build attribution must match that too.
+  if (
+    typeof versionName === "string"
+    && buildInfo.versionName !== versionName
+  ) {
+    return {
+      ok: false,
+      reason:
+        `dist/build-info.json is from a different build (${buildInfo.versionName}) than dist/manifest.json (${versionName}); run npm run build`,
     };
   }
   if (buildInfo.nameTableHash !== sourceHash) {

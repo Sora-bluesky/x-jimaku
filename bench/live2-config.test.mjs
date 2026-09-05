@@ -55,6 +55,25 @@ describe("checkBuildInfo", () => {
   it("accepts the built name table", () => {
     expect(checkBuildInfo({ buildInfo, sourceHash })).toEqual({ ok: true });
   });
+
+  it("rejects build info left over from a different build than the manifest", () => {
+    const check = checkBuildInfo({
+      buildInfo,
+      sourceHash,
+      versionName: "0.6.0 abc1234 2026-09-02T03:09:00Z",
+    });
+    expect(check.ok).toBe(false);
+    expect(check.reason).toContain("different build");
+    expect(check.reason).toContain("npm run build");
+  });
+
+  it("accepts build info whose version name matches the manifest", () => {
+    expect(checkBuildInfo({
+      buildInfo,
+      sourceHash,
+      versionName: buildInfo.versionName,
+    })).toEqual({ ok: true });
+  });
 });
 
 describe("cutCaptionLog", () => {

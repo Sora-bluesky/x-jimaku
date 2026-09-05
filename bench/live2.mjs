@@ -600,7 +600,11 @@ try {
   const sourceHash = createHash("sha256")
     .update(readFileSync(path.join(root, "src/offscreen/glossary.data.ts")))
     .digest("hex");
-  const buildInfoCheck = checkBuildInfo({ buildInfo, sourceHash });
+  const buildInfoCheck = checkBuildInfo({
+    buildInfo,
+    sourceHash,
+    versionName: manifest.version_name,
+  });
   if (!buildInfoCheck.ok) {
     throw new Error(buildInfoCheck.reason);
   }
