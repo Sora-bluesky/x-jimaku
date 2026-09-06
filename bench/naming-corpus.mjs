@@ -218,13 +218,13 @@ function scriptMixedForms(text, term) {
   // through the Japanese run that follows it (ゴダード, 宇宙センター), not the
   // whole clause, so the form can be compared with the expected one.
   const wordAlternatives = words.map(escapeRegExp).join("|");
-  // Either order: Latin words followed by a Japanese run (NASA ゴダード) or a
-  // Japanese run, optionally with の, followed by the Latin words
-  // (ケネディの Space Center). At least one side must be Japanese.
-  const spanPattern = new RegExp(
-    `(?:[\\p{Script=Katakana}\\p{Script=Han}ー々]+(?:の)?[ \u3000]?)?(?:${wordAlternatives})(?:[ \u3000]?(?:${wordAlternatives}))*(?:[ \u3000]?[\\p{Script=Katakana}\\p{Script=Han}ー々]+)?`,
-    "giu",
-  );
+  // Two shapes, tried in this order so that text before the name is never
+  // absorbed: Latin words followed by a Japanese run (NASA ゴダード), then,
+  // on what is left, a Japanese run with an optional の followed by the
+  // Latin words (ケネディの Space Center).
+  const wordsRun = `(?:${wordAlternatives})(?:[ \u3000]?(?:${wordAlternatives}))*`;
+  const trailingPattern = new RegExp(`${wordsRun}[ \u3000]?[\\p{Script=Katakana}\\p{Script=Han}ー々]+`, "giu");
+  const leadingPattern = new RegExp(`[\\p{Script=Katakana}\\p{Script=Han}ー々]+(?:の)?[ \u3000]?${wordsRun}`, "giu");
   for (const clause of String(text).split(/[。！？\n]/u)) {
     const wordsSeen = words.filter((word) =>
       latinPattern(word).test(clause),
@@ -234,10 +234,13 @@ function scriptMixedForms(text, term) {
       && wordsSeen < words.length
       && JAPANESE.test(clause)
     ) {
-      for (const match of clause.matchAll(spanPattern)) {
-        if (JAPANESE.test(match[0])) {
-          forms.push(match[0].trim());
-        }
+      let remainder = clause;
+      for (const match of clause.matchAll(trailingPattern)) {
+        forms.push(match[0].trim());
+        remainder = remainder.replace(match[0], " ");
+      }
+      for (const match of remainder.matchAll(leadingPattern)) {
+        forms.push(match[0].trim());
       }
     }
   }

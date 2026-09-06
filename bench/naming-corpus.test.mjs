@@ -679,6 +679,12 @@ describe("script-mixed span", () => {
     expect(spaced.classes.expected.count).toBe(1);
     expect(spaced.classes.wrongKnown.count).toBe(0);
 
+    const preceded = classifyName(
+      unit("望遠鏡NASA ゴダードは"),
+      definition,
+    );
+    expect(preceded.forms).toEqual({ "NASA ゴダード": 1 });
+    expect(preceded.classes.expected.count).toBe(1);
     const runOn = classifyName(
       unit("NASA ゴダードローマンは"),
       definition,
