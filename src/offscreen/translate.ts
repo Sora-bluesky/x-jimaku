@@ -69,6 +69,10 @@ export interface TranslationContext {
 interface TranslationAttemptResult {
   ja: string;
   recordHistory: boolean;
+  // A rescue that gave up on the placeholders is shown, but it must not
+  // become the [直前の文脈] example for the next line: one wrong form
+  // there teaches the model to replace the marker with a word.
+  keepOutOfHistory?: true;
   rung: TranslationRung;
 }
 
@@ -547,7 +551,10 @@ export class TranslationEngine {
         return;
       }
 
-      if (result.recordHistory) {
+      if (
+        result.recordHistory &&
+        result.keepOutOfHistory !== true
+      ) {
         this.recordHistory(
           line.text,
           result.ja,
@@ -942,6 +949,7 @@ export class TranslationEngine {
               ),
           ),
           recordHistory: true,
+          keepOutOfHistory: true,
           rung: "translator-unmasked",
         };
 
@@ -974,6 +982,7 @@ export class TranslationEngine {
         return {
           ja: response.ja,
           recordHistory: true,
+          keepOutOfHistory: true,
           rung: "translator-unmasked",
         };
       }
@@ -1576,6 +1585,7 @@ export class TranslationEngine {
       return {
         ja: normalized,
         recordHistory: true,
+        keepOutOfHistory: true,
         rung: "lm-unmasked",
       };
     } catch {
