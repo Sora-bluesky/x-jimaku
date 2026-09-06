@@ -949,7 +949,6 @@ export class TranslationEngine {
               ),
           ),
           recordHistory: true,
-          keepOutOfHistory: true,
           rung: "translator-unmasked",
         };
 
@@ -982,7 +981,6 @@ export class TranslationEngine {
         return {
           ja: response.ja,
           recordHistory: true,
-          keepOutOfHistory: true,
           rung: "translator-unmasked",
         };
       }
@@ -1337,7 +1335,10 @@ export class TranslationEngine {
         );
 
       if (unmaskedRescued !== null) {
-        return unmaskedRescued;
+        return {
+          ...unmaskedRescued,
+          keepOutOfHistory: true,
+        };
       }
 
       const unmaskedLanguageModel =
