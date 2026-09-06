@@ -26,6 +26,7 @@ import {
   renderNameTerm,
   selectGlossaryMatches,
 } from "./glossary";
+import { NAME_TERMS } from "./glossary.data";
 import {
   correctRejectedForms,
   countIntactPlaceholders,
@@ -1616,11 +1617,13 @@ export class TranslationEngine {
     attempt: TranslationAttempt,
   ): TranslationAttemptResult {
     const context = this.readContext();
-    const rows = keepLatinEntriesForTerms([
-      ...selectGlossaryMatches(request.original)
-        .keepLatin.map((row) => row.term),
-      ...(request.maskPlan?.entries.map((entry) => entry.term) ?? []),
-    ]);
+    // Every opted-in row, not the prompt's selection: that one keeps only
+    // the longest match, so Roman disappears behind Roman Space Telescope
+    // and the retry's ローマ would go uncorrected. correctRejectedForms
+    // checks that the term occurs in the clause.
+    const rows = NAME_TERMS.filter(
+      (row) => row.correct === true,
+    );
     const corrected = correctRejectedForms(
       result.ja,
       request.original,
