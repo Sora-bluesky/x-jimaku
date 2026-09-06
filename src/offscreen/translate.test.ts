@@ -675,18 +675,18 @@ describe(
         await translateRescueClause(
           harness.engine,
           1,
-          "Roman is here.",
+          "Roman passed final checks here.",
         );
 
         expect(
           harness.translator.translate,
         ).toHaveBeenCalledWith(
-          "%%1%% is here.",
+          "%%1%% passed final checks here.",
         );
         expect(
           harness.requestContentTranslation,
         ).toHaveBeenCalledWith(
-          "%%1%% is here.",
+          "%%1%% passed final checks here.",
         );
         expect(
           harness.translator.destroy,
@@ -718,12 +718,12 @@ describe(
         await translateRescueClause(
           harness.engine,
           11,
-          "Roman is here.",
+          "Roman passed final checks here.",
         );
         await translateRescueClause(
           harness.engine,
           12,
-          "Roman is there.",
+          "Roman passed early checks there.",
         );
 
         expect(
@@ -853,12 +853,12 @@ describe(
         await translateRescueClause(
           harness.engine,
           21,
-          "Roman is here.",
+          "Roman passed final checks here.",
         );
         await translateRescueClause(
           harness.engine,
           22,
-          "Roman is there.",
+          "Roman passed early checks there.",
         );
 
         expect(
@@ -902,12 +902,12 @@ describe(
         await translateRescueClause(
           harness.engine,
           31,
-          "Roman is here.",
+          "Roman passed final checks here.",
         );
         await translateRescueClause(
           harness.engine,
           32,
-          "Roman is there.",
+          "Roman passed early checks there.",
         );
 
         expect(
@@ -2167,7 +2167,7 @@ describe("TranslationEngine glossary prompt", () => {
 
   it("sends glossary instructions in the LanguageModel prompt", async () => {
     const sent = await sentPrompt(
-      "Hugging Face released Cursor.",
+      "Hugging Face released Cursor this week.",
     );
 
     expect(sent).toContain("[原綴り]");
@@ -2176,7 +2176,7 @@ describe("TranslationEngine glossary prompt", () => {
       "モデル・製品・組織名のときだけ原綴り（一般語は訳す）: Cursor",
     );
     expect(sent).toContain(
-      "[今訳す節]\n%%1%% released Cursor.",
+      "[今訳す節]\n%%1%% released Cursor this week.",
     );
   });
 

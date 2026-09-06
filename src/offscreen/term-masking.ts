@@ -1,4 +1,16 @@
 export const MAX_MASKED_OCCURRENCES = 4;
+export const MIN_REMAINING_CONTENT_WORDS = 3;
+
+const FUNCTION_WORDS = new Set(
+  ("the a an is are was were be been to of in on at for by with and or but " +
+    "it its this that these those will would can could has have had not as from").split(" "),
+);
+
+export function countContentWords(text: string): number {
+  return (text.match(/[A-Za-z]+(?:['’-][A-Za-z]+)*/g) ?? [])
+    .filter((word) => !FUNCTION_WORDS.has(word.toLowerCase()))
+    .length;
+}
 
 export interface MaskPlanEntry {
   number: number;
@@ -34,7 +46,7 @@ export function createMaskPlan(
   ) => string = (term) => term,
 ): MaskedTranslationLine {
   const glossaryOccurrences =
-    findNonOverlappingOccurrences(
+    findAllOccurrences(
       original,
       glossaryTerms,
     ).filter(
@@ -72,7 +84,7 @@ export function createMaskPlan(
       maskPlan: null,
     };
   }
-  const takenGlossary = [
+  const glossaryCandidates = [
     ...glossaryOccurrences,
   ]
     .sort(
@@ -80,12 +92,41 @@ export function createMaskPlan(
         right.term.length -
           left.term.length ||
         left.start - right.start,
-    )
-    .slice(
-      0,
-      MAX_MASKED_OCCURRENCES -
-        pageOccurrences.length,
     );
+  const takenGlossary: typeof glossaryCandidates = [];
+  const glossaryLimit =
+    MAX_MASKED_OCCURRENCES - pageOccurrences.length;
+
+  for (const candidate of glossaryCandidates) {
+    if (takenGlossary.length >= glossaryLimit) {
+      break;
+    }
+    if (
+      takenGlossary.some(
+        (taken) =>
+          candidate.start < taken.end &&
+          candidate.end > taken.start,
+      )
+    ) {
+      continue;
+    }
+
+    const candidateText = replaceOccurrences(
+      original,
+      [...pageOccurrences, ...takenGlossary, candidate]
+        .sort((left, right) => left.start - right.start),
+      () => "%%0%%",
+    );
+
+    if (
+      countContentWords(candidateText) <
+      MIN_REMAINING_CONTENT_WORDS
+    ) {
+      continue;
+    }
+    takenGlossary.push(candidate);
+  }
+
   const occurrences = [
     ...pageOccurrences,
     ...takenGlossary,
@@ -418,9 +459,24 @@ function normalizeTerms(
   );
 }
 
+function findAllOccurrences(
+  text: string,
+  terms: readonly string[],
+): LocatedTerm[] {
+  return findOccurrences(text, terms, true);
+}
+
 function findNonOverlappingOccurrences(
   text: string,
   terms: readonly string[],
+): LocatedTerm[] {
+  return findOccurrences(text, terms, false);
+}
+
+function findOccurrences(
+  text: string,
+  terms: readonly string[],
+  includeOverlaps: boolean,
 ): LocatedTerm[] {
   const occurrences: LocatedTerm[] = [];
 
@@ -440,6 +496,7 @@ function findNonOverlappingOccurrences(
       const end = start + match[0].length;
 
       if (
+        !includeOverlaps &&
         occurrences.some(
           (occurrence) =>
             start < occurrence.end &&
