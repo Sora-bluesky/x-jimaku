@@ -18,8 +18,10 @@ import {
 } from "./glossary";
 import { NAME_TERMS } from "./glossary.data";
 import {
+  countContentWords,
   countIntactPlaceholders,
   createMaskPlan,
+  explainRestoreRefusal,
   MAX_MASKED_OCCURRENCES,
   remaskPlannedTerms,
   restoreMaskedTranslation,
@@ -27,6 +29,9 @@ import {
 import {
   TranslationEngine,
 } from "./translate";
+
+const MASKING_CONTEXT =
+  " Engineers completed testing.";
 
 function installTranslator(
   respond: (
@@ -112,7 +117,7 @@ async function translateClause(
 ): Promise<void> {
   engine.enqueue({
     id,
-    text,
+    text: `${text}${MASKING_CONTEXT}`,
     final: true,
     at: "2026-08-30T00:00:00.000Z",
   });
@@ -212,8 +217,10 @@ function planKeepLatin(
   clause: string,
   properNouns: readonly string[] = [],
 ) {
-  return createMaskPlan(
-    clause,
+  // These helpers test glossary evidence and rendering. Direct tests below
+  // own the remaining-content boundary.
+  const result = createMaskPlan(
+    `${clause}${MASKING_CONTEXT}`,
     properNouns,
     KEEP_LATIN_ALL_TERMS,
     (hit) =>
@@ -224,6 +231,15 @@ function planKeepLatin(
       ),
     renderNameTerm,
   );
+
+  return {
+    original: clause,
+    masked: result.masked.slice(
+      0,
+      -MASKING_CONTEXT.length,
+    ),
+    maskPlan: result.maskPlan,
+  };
 }
 
 afterEach(() => {
@@ -282,6 +298,86 @@ describe("term masking", () => {
     );
   });
 
+  it.each([
+    ["isn't launch-ready 2027", 2],
+    ["打ち上げ準備完了", 0],
+    ["the a an is are was were be been to of in on at for by with and or but it its this that these those will would can could has have had not as from", 0],
+  ] as const)("counts content words in %s", (text, expected) => {
+    expect(countContentWords(text)).toBe(expected);
+  });
+
+  it("uses a nested row when the longest row leaves only two content words", () => {
+    const result = createMaskPlan(
+      "The Roman Space Telescope is ready for launch.",
+      [],
+      ["Roman Space Telescope", "Roman"],
+    );
+
+    expect(result.masked).toBe(
+      "The %%1%% Space Telescope is ready for launch.",
+    );
+    expect(result.maskPlan?.entries.map((entry) => entry.term))
+      .toEqual(["Roman"]);
+  });
+
+  it("keeps the longest row when enough content remains", () => {
+    const result = createMaskPlan(
+      "Engineers at Goddard say the Roman Space Telescope will change how we see the universe.",
+      [],
+      ["Roman Space Telescope", "Roman", "Goddard"],
+    );
+
+    expect(result.masked).toBe(
+      "Engineers at %%1%% say the %%2%% will change how we see the universe.",
+    );
+    expect(result.maskPlan?.entries.map((entry) => entry.term))
+      .toEqual(["Goddard", "Roman Space Telescope"]);
+  });
+
+  it("accepts two table rows when three content words remain", () => {
+    const result = createMaskPlan(
+      "After years of testing at NASA Goddard.",
+      [],
+      ["NASA", "Goddard"],
+    );
+
+    expect(result.masked).toBe(
+      "After years of testing at %%1%% %%2%%.",
+    );
+    expect(result.maskPlan?.entries.map((entry) => entry.term))
+      .toEqual(["NASA", "Goddard"]);
+  });
+
+  it("keeps page masks when a table row without a nested fallback is skipped", () => {
+    const result = createMaskPlan(
+      "Theo saw Roman Space Telescope.",
+      ["Theo"],
+      ["Roman Space Telescope"],
+    );
+
+    expect(result.masked).toBe(
+      "%%1%% saw Roman Space Telescope.",
+    );
+    expect(result.maskPlan?.entries.map((entry) => entry.term))
+      .toEqual(["Theo"]);
+  });
+
+  it("does not charge a skipped table row against the cap", () => {
+    const result = createMaskPlan(
+      "Theo Ada Lin Roman Space Telescope is ready for launch.",
+      ["Theo", "Ada", "Lin"],
+      ["Roman Space Telescope", "Roman"],
+    );
+
+    expect(result.masked).toBe(
+      "%%1%% %%2%% %%3%% %%4%% Space Telescope is ready for launch.",
+    );
+    expect(result.maskPlan?.entries.map((entry) => entry.term))
+      .toEqual(["Theo", "Ada", "Lin", "Roman"]);
+    expect(result.maskPlan?.entries)
+      .toHaveLength(MAX_MASKED_OCCURRENCES);
+  });
+
   it("passes through clauses with more than four occurrences", () => {
     const original =
       "Roman Roman Roman Roman Roman";
@@ -298,11 +394,7 @@ describe("term masking", () => {
   });
 
   it("masks a non-ambiguous glossary name and restores it in Latin", () => {
-    const result = createMaskPlan(
-      "Claude is here",
-      [],
-      KEEP_LATIN_MASK_TERMS,
-    );
+    const result = planKeepLatin("Claude is here");
 
     expect(result.masked).toBe(
       "%%1%% is here",
@@ -499,7 +591,7 @@ describe("term masking", () => {
 
   it("lets the table override the same page-derived name", () => {
     const result = createMaskPlan(
-      "Kennedy Space Center のチーム",
+      "Kennedy Space Center completed final launch checks のチーム",
       ["Kennedy Space Center"],
       KEEP_LATIN_ALL_TERMS,
       undefined,
@@ -507,7 +599,7 @@ describe("term masking", () => {
     );
 
     expect(result.masked).toBe(
-      "%%1%% のチーム",
+      "%%1%% completed final launch checks のチーム",
     );
     expect(result.maskPlan?.entries).toEqual([
       {
@@ -530,7 +622,7 @@ describe("term masking", () => {
     ).toBe("%%1%%のチーム");
 
     const latin = createMaskPlan(
-      "Claude team",
+      "Claude team completed final checks",
       [],
       KEEP_LATIN_ALL_TERMS,
       undefined,
@@ -546,7 +638,7 @@ describe("term masking", () => {
 
   it("keeps the space between two restored names and drops it before a particle", () => {
     const plan = createMaskPlan(
-      "at NASA Goddard, Roman will map the sky",
+      "at NASA Goddard, Roman will map the wide sky",
       ["NASA Goddard", "Roman"],
       KEEP_LATIN_ALL_TERMS,
       undefined,
@@ -566,7 +658,7 @@ describe("term masking", () => {
   it("does not mask Roman history and masks the telescope as one term", () => {
     const history = "Roman history";
     const telescope =
-      "the Roman Space Telescope";
+      "the Roman Space Telescope completed final checks";
 
     expect(
       planKeepLatin(history),
@@ -579,7 +671,7 @@ describe("term masking", () => {
       planKeepLatin(telescope);
 
     expect(telescopePlan.masked).toBe(
-      "the %%1%%",
+      "the %%1%% completed final checks",
     );
     expect(
       telescopePlan.maskPlan?.entries,
@@ -612,10 +704,8 @@ describe("term masking", () => {
   });
 
   it("masks four glossary names and leaves NVIDIA", () => {
-    const result = createMaskPlan(
+    const result = planKeepLatin(
       "Anthropic Claude OpenAI Google NVIDIA",
-      [],
-      KEEP_LATIN_MASK_TERMS,
     );
 
     expect(result.masked).toBe(
@@ -637,10 +727,9 @@ describe("term masking", () => {
   });
 
   it("keeps a page noun masked when glossary names would exceed the cap", () => {
-    const result = createMaskPlan(
+    const result = planKeepLatin(
       "Theo and Claude and Anthropic and OpenAI and Google",
       ["Theo"],
-      KEEP_LATIN_MASK_TERMS,
     );
 
     expect(result.masked).toBe(
@@ -816,6 +905,29 @@ describe("term masking", () => {
   });
 
   it.each([
+    ["unknown-number", "%%2%%"],
+    ["missing", "ここです"],
+    ["duplicate", "%%1%%%%1%%"],
+    ["stray-marker", "%%1%%%%x%%"],
+    ["none", "%%1%%"],
+  ])(
+    "explains a %s restore result",
+    (refusal, output) => {
+      const result = createMaskPlan(
+        "Roman is here",
+        ["Roman"],
+      );
+
+      expect(
+        explainRestoreRefusal(
+          output,
+          result.maskPlan,
+        ),
+      ).toBe(refusal);
+    },
+  );
+
+  it.each([
     ["unknown number", "%%2%%です"],
     ["duplicate number", "%%1%%%%1%%です"],
     ["missing number", "ここです"],
@@ -871,7 +983,7 @@ describe("term masking", () => {
 
   it("remasks lowercase history and restores the canonical spelling", () => {
     const result = createMaskPlan(
-      "opus met opus",
+      "opus met opus after final checks",
       [],
       KEEP_LATIN_MASK_TERMS,
     );
@@ -926,7 +1038,7 @@ describe("TranslationEngine masking ladder", () => {
       );
 
       expect(translator).toHaveBeenCalledWith(
-        "%%1%% is here.",
+        `%%1%% is here.${MASKING_CONTEXT}`,
       );
       expect(onTranslated).toHaveBeenCalledWith(
         expect.objectContaining({ id: 1 }),
@@ -1011,6 +1123,8 @@ describe("TranslationEngine masking ladder", () => {
           path: "language-model",
           sent: 1,
           returned: 0,
+          response: "ここです",
+          refusal: "missing",
         },
       },
     ]);
@@ -1049,7 +1163,7 @@ describe("TranslationEngine masking ladder", () => {
           "placeholder-survival",
       );
 
-    expect(survival[0]?.data).toEqual({
+    expect(survival[0]?.data).toMatchObject({
       kind: "placeholder-survival",
       requestId: "request-mask",
       lineId: 22,
@@ -1063,7 +1177,7 @@ describe("TranslationEngine masking ladder", () => {
 
   it("restores a fullwidth placeholder without retrying", async () => {
     const prompt = installLanguageModel(
-      async () => "％％1％％です",
+      async () => "```\n％％1％％です\n```",
     );
     const onTranslated = vi.fn();
     const onDevLog = vi.fn();
@@ -1101,6 +1215,8 @@ describe("TranslationEngine masking ladder", () => {
       path: "language-model",
       sent: 1,
       returned: 1,
+      response: "％％1％％です",
+      refusal: "none",
     });
 
     engine.destroy();
@@ -1232,10 +1348,10 @@ describe("TranslationEngine masking ladder", () => {
     );
 
     expect(translator).toHaveBeenCalledWith(
-      "%%1%% is here.",
+      `%%1%% is here.${MASKING_CONTEXT}`,
     );
     expect(translator).toHaveBeenCalledWith(
-      "Roman is here.",
+      `Roman is here.${MASKING_CONTEXT}`,
     );
     expect(onTranslated).toHaveBeenCalledWith(
       expect.objectContaining({ id: 2 }),
@@ -1265,7 +1381,7 @@ describe("TranslationEngine masking ladder", () => {
 
     expect(onTranslated).toHaveBeenCalledWith(
       expect.objectContaining({ id: 2 }),
-      "Roman is here.",
+      `Roman is here.${MASKING_CONTEXT}`,
     );
 
     engine.destroy();
@@ -1290,7 +1406,7 @@ describe("TranslationEngine masking ladder", () => {
     );
 
     expect(translator).toHaveBeenCalledWith(
-      "%%1%% is here.",
+      `%%1%% is here.${MASKING_CONTEXT}`,
     );
     expect(onTranslated).toHaveBeenCalledWith(
       expect.objectContaining({ id: 3 }),
