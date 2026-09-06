@@ -27,9 +27,11 @@ import {
   selectGlossaryMatches,
 } from "./glossary";
 import {
+  correctRejectedForms,
   countIntactPlaceholders,
   createMaskPlan,
   explainRestoreRefusal,
+  findNonOverlappingOccurrences,
   remaskPlannedTerms,
   restoreMaskedTranslation,
 } from "./term-masking";
@@ -1335,8 +1337,15 @@ export class TranslationEngine {
         );
 
       if (unmaskedRescued !== null) {
+        const corrected =
+          this.correctUnmaskedRetryResult(
+            unmaskedRescued,
+            request,
+            lineId,
+            attempt,
+          );
         return {
-          ...unmaskedRescued,
+          ...corrected,
           keepOutOfHistory: true,
         };
       }
@@ -1348,7 +1357,12 @@ export class TranslationEngine {
         );
 
       if (unmaskedLanguageModel !== null) {
-        return unmaskedLanguageModel;
+        return this.correctUnmaskedRetryResult(
+          unmaskedLanguageModel,
+          request,
+          lineId,
+          attempt,
+        );
       }
     }
 
@@ -1593,6 +1607,55 @@ export class TranslationEngine {
       this.assertAttemptCurrent(attempt);
       return null;
     }
+  }
+
+  private correctUnmaskedRetryResult(
+    result: TranslationAttemptResult,
+    request: MaskedTranslationLine,
+    lineId: number,
+    attempt: TranslationAttempt,
+  ): TranslationAttemptResult {
+    const context = this.readContext();
+    const rows = keepLatinEntriesForTerms([
+      ...selectGlossaryMatches(request.original)
+        .keepLatin.map((row) => row.term),
+      ...(request.maskPlan?.entries.map((entry) => entry.term) ?? []),
+    ]);
+    const corrected = correctRejectedForms(
+      result.ja,
+      request.original,
+      rows,
+      (row) =>
+        row.ambiguous !== true ||
+        findNonOverlappingOccurrences(
+          request.original,
+          [row.term],
+        ).some((occurrence) =>
+          allowKeepLatinMaskOccurrence(
+            request.original,
+            occurrence,
+            context.properNouns,
+          )
+        ),
+    );
+
+    for (const correction of corrected.corrections) {
+      this.emitDevLog(
+        {
+          level: "info",
+          tag: "translate",
+          message: "rejected form corrected",
+          data: {
+            kind: "rejected-form-corrected",
+            lineId,
+            ...correction,
+          },
+        },
+        attempt,
+      );
+    }
+
+    return { ...result, ja: corrected.ja };
   }
 
   private recordPlaceholderSurvival(

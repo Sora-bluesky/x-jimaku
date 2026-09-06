@@ -28,9 +28,14 @@ export interface NameTerm {
   readonly confidence: "verified" | "conventional";
   readonly source: string;
   /**
-   * Known wrong forms used only for regression detection. The aggregator masks
-   * `ja` before matching these forms, so a rejected substring cannot count
-   * inside the accepted rendering.
+   * The rejected forms never mean anything but this name in a talk where
+   * `term` occurs. The unmasked retry may therefore correct them to `ja`.
+   */
+  readonly correct?: true;
+  /**
+   * Known wrong forms used for regression detection and, when `correct` is true,
+   * deterministic correction. Consumers mask `ja` before matching, so a
+   * rejected substring cannot count inside the accepted rendering.
    */
   readonly rejected?: readonly RejectedForm[];
 }
@@ -86,6 +91,7 @@ export const NAME_TERMS: readonly NameTerm[] = [
     ambiguous: true,
     confidence: "conventional",
     source: "https://www.isas.jaxa.jp/topics/003741.html",
+    correct: true,
     rejected: [
       { form: "ローマ", reason: "誤義: 都市のローマ" },
       { form: "ロマン", reason: "出典に無い綴り" },
@@ -111,6 +117,7 @@ export const NAME_TERMS: readonly NameTerm[] = [
     ja: "ゴダード",
     confidence: "conventional",
     source: "https://satnavi.jaxa.jp/gpmdpr_special/column/2013/post1118.html",
+    correct: true,
     rejected: [
       { form: "ゴッダード", reason: "出典に無い綴り" },
       { form: "ゴッドダード", reason: "出典に無い綴り" },
