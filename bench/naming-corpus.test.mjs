@@ -1,3 +1,5 @@
+import path from "node:path";
+
 import {
   describe,
   expect,
@@ -9,6 +11,7 @@ import {
   buildUnits,
   classifyName,
   compareRates,
+  parseArgs,
   renderCandidates,
   takeRun,
   wilcoxonRankSumOneSided,
@@ -101,6 +104,18 @@ function classifyFixture(
   });
   return classifyName(buildUnits(run), name);
 }
+
+describe("parseArgs", () => {
+  it("keeps result and output directories inside bench", () => {
+    for (const flag of ["--out", "--results"]) {
+      expect(() => parseArgs([flag, "/tmp/x"]))
+        .toThrow(/inside bench\//u);
+    }
+    expect(
+      parseArgs(["--out", "bench/results"]).outputDirectory,
+    ).toBe(path.resolve("bench/results"));
+  });
+});
 
 describe("buildUnits", () => {
   it("joins split cues and merged cues by source lines", () => {
@@ -256,6 +271,52 @@ describe("classifyName", () => {
       expect(result.classes.wrongKnown.count).toBe(1);
     },
   );
+
+  it("does not count a script-mixed remainder as a variant", () => {
+    const result = classifyFixture(
+      "Opus and Opus",
+      "オпус",
+      {
+        term: "Opus",
+        render: "latin",
+        rejected: [],
+      },
+    );
+    expect(result.classes.wrongKnown.count).toBe(1);
+    expect(result.classes.variant.count).toBe(0);
+    expect(result.classes.missing.count).toBe(1);
+  });
+
+  it("uses the candidate majority rule when classifying variants", () => {
+    const goddard = {
+      term: "Goddard",
+      render: "latin",
+      rejected: [],
+    };
+    const makeUnits = (texts) =>
+      texts.map((text, index) => ({
+        lines: [{
+          key: index,
+          text,
+          rung: "masked",
+        }],
+        output: "ゴッダード",
+      }));
+
+    const mostlyPositive = classifyName(
+      makeUnits([...Array(3).fill("Goddard"), "NASA gottered"]),
+      goddard,
+    );
+    expect(mostlyPositive.classes.variant.count).toBe(3);
+    expect(mostlyPositive.classes.missing.count).toBe(0);
+
+    const mostlyNegative = classifyName(
+      makeUnits(["Goddard", ...Array(3).fill("NASA gottered")]),
+      goddard,
+    );
+    expect(mostlyNegative.classes.variant.count).toBe(0);
+    expect(mostlyNegative.classes.missing.count).toBe(1);
+  });
 
   it("classifies an unknown Katakana form as a variant", () => {
     const result = classifyFixture(
@@ -471,6 +532,31 @@ describe("assessChange", () => {
       },
     };
   }
+
+  it("reads atCurrent when a run has no atRun and the table is unchanged", () => {
+    const fromCurrent = () => {
+      const run = assessmentRun();
+      return {
+        termsMode: run.termsMode,
+        tableChanged: false,
+        naming: { atCurrent: run.naming.atRun },
+      };
+    };
+    const assessment = assessChange({
+      runsBefore: Array.from({ length: 5 }, fromCurrent),
+      runsAfter: Array.from({ length: 5 }, fromCurrent),
+      target: "Roman",
+    });
+    expect(assessment.items.A3.verdict).toBe("no-evidence");
+
+    const changed = () => ({ ...fromCurrent(), tableChanged: true });
+    const undecidable = assessChange({
+      runsBefore: Array.from({ length: 5 }, changed),
+      runsAfter: Array.from({ length: 5 }, changed),
+      target: "Roman",
+    });
+    expect(undecidable.items.A3.verdict).toBe("undecidable");
+  });
 
   it("returns no-evidence when all five A comparisons are unchanged", () => {
     const before =

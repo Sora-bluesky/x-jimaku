@@ -59,7 +59,7 @@ result JSON 保存・機械ゲート出力までを 1 コマンドで行う。�
 
 コーパスは状態ではない。走行JSONを正本として、実行のたびにゼロから作り直す。`recognition.jaClauses`または新形式の`display.lines`が空でない走行を取り込む。`error`がない走行と、`display gate `で始まるエラーだけを採用し、`gatesSuppressed`がある走行は除外理由を記録する。
 
-名前表は`src/offscreen/glossary.data.ts`を`bench/work/name-table.mts`へバイト単位で複写し、SHA-256を記録してから読み込む。新形式の`display.lines`と`display.pages[].sources`がある走行では出現率を計算する。旧形式の走行は生の表記件数だけを残し、率を`null`にする。
+名前表は`src/offscreen/glossary.data.ts`を`bench/work/name-table.mts`へバイト単位で複写し、SHA-256を記録してから読み込む。この読み込みはNodeの型除去に頼るので、集計はNode 22.18以降で動く（古いNodeでは理由を出して止まる）。新形式の`display.lines`と`display.pages[].sources`がある走行では出現率を計算する。旧形式の走行は生の表記件数だけを残し、率を`null`にする。
 
 翻訳経路の報告時刻と準備時間は次の3値で観測する。いずれも巻き戻した動画の再生開始を0とし、再生前なら負数になる。`gates` オブジェクトへ保存するが、合否には使わない。
 

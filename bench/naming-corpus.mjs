@@ -622,6 +622,39 @@ export function buildUnits(run) {
   };
 }
 
+function negativeForms(units, term) {
+  const tally = new Map();
+
+  for (const unit of units) {
+    const englishKnown = unit.lines.some(
+      (line) => typeof line.text === "string" && line.text.trim() !== "",
+    );
+    if (!englishKnown) {
+      continue;
+    }
+
+    const bucket = sourceOccurrences(unit, term).length > 0
+      ? "with"
+      : "without";
+    for (const form of katakanaForms(unit.output)) {
+      const counts = tally.get(form) ?? { with: 0, without: 0 };
+      counts[bucket] += 1;
+      tally.set(form, counts);
+    }
+  }
+
+  const negative = new Set();
+  for (const [form, counts] of tally) {
+    if (
+      counts.without > counts.with
+      && counts.with + counts.without >= 3
+    ) {
+      negative.add(form);
+    }
+  }
+  return negative;
+}
+
 export function classifyName(
   unitsOrAnalysis,
   name,
@@ -640,15 +673,7 @@ export function classifyName(
   const formRungs = {};
   let english = 0;
 
-  const negativeCandidates = new Set();
-  for (const unit of units) {
-    const occurrences = sourceOccurrences(unit, name.term);
-    if (occurrences.length === 0) {
-      for (const form of katakanaForms(unit.output)) {
-        negativeCandidates.add(form);
-      }
-    }
-  }
+  const negativeCandidates = negativeForms(units, name.term);
 
   if (expected === null) {
     for (const unit of units) {
@@ -722,16 +747,13 @@ export function classifyName(
       : [];
 
     let remainingText = unit.output;
-    for (const entry of name.rejected ?? []) {
-      const form = typeof entry === "string"
-        ? entry
-        : entry?.form;
-      if (typeof form === "string" && form) {
-        remainingText = maskMatches(
-          remainingText,
-          rejectedPattern(form),
-        );
-      }
+    for (const form of wrongForms) {
+      remainingText = maskMatches(
+        remainingText,
+        rejectedForms.includes(form)
+          ? rejectedPattern(form)
+          : exactPattern(form),
+      );
     }
     remainingText = maskMatches(
       remainingText,
@@ -1046,6 +1068,12 @@ function runSnapshot(run) {
   if (run?.naming?.atRun) {
     return run.naming.atRun;
   }
+  // No run records its own classification yet (steps 4 and 5 add it). Until
+  // then a run classified with the table it was built with is the same
+  // thing, so atCurrent stands in when the table has not changed since.
+  if (run?.naming?.atCurrent && run.tableChanged !== true) {
+    return run.naming.atCurrent;
+  }
   if (run?.naming?.names) {
     return run.naming;
   }
@@ -1296,39 +1324,15 @@ function definitionsForRun(run, tableRows) {
 
 function candidateExclusions(units, definitions) {
   const excludedByName = new Map(
-    definitions.map(({ term }) => [term, new Set()]),
-  );
-  const cooccurrence = new Map(
-    definitions.map(({ term }) => [term, new Map()]),
+    definitions.map(({ term }) => [
+      term,
+      negativeForms(units, term),
+    ]),
   );
   for (const unit of units) {
     const present = definitions.filter(
       ({ term }) => sourceOccurrences(unit, term).length > 0,
     );
-    const presentNames = new Set(
-      present.map(({ term }) => term),
-    );
-    const outputForms = katakanaForms(unit.output);
-    // A unit whose English side is unknown (old-shape runs record no
-    // source text) says nothing about which names it lacks; using it as
-    // "a unit without the name" excluded every form of every name.
-    const englishKnown = unit.lines.some(
-      (line) => typeof line.text === "string" && line.text.trim() !== "",
-    );
-    // Co-occurrence is decided by majority, not by a single unit: the ASR
-    // misses a name now and then, and one unit whose English side lost the
-    // name would otherwise strike the form from the sheet for good.
-    if (englishKnown) {
-      for (const { term } of definitions) {
-        const bucket = presentNames.has(term) ? "with" : "without";
-        const tally = cooccurrence.get(term);
-        for (const form of outputForms) {
-          const counts = tally.get(form) ?? { with: 0, without: 0 };
-          counts[bucket] += 1;
-          tally.set(form, counts);
-        }
-      }
-    }
 
     const attributed = present.map((definition) => {
       const classes =
@@ -1358,18 +1362,6 @@ function candidateExclusions(units, definitions) {
             excludedByName.get(term).add(form);
           }
         }
-      }
-    }
-  }
-  for (const [term, tally] of cooccurrence) {
-    for (const [form, counts] of tally) {
-      // Thin evidence does not exclude: one ASR miss ("NASA gottered") was
-      // enough to strike ゴッダード from Goddard's row.
-      if (
-        counts.without > counts.with
-        && counts.with + counts.without >= 3
-      ) {
-        excludedByName.get(term).add(form);
       }
     }
   }
@@ -1754,6 +1746,14 @@ async function copyAndLoadNameTable() {
   const nameTableHash = createHash("sha256")
     .update(sourceBytes)
     .digest("hex");
+  // The copy is imported as TypeScript with the types stripped by Node
+  // itself (design §2-5); that needs Node 22.18 or newer, unflagged.
+  const [major, minor] = process.versions.node.split(".").map(Number);
+  if (major < 22 || (major === 22 && minor < 18)) {
+    throw new Error(
+      `naming-corpus needs Node 22.18 or newer to import the name table copy (running ${process.versions.node})`,
+    );
+  }
   const tableModule = await import(
     `${pathToFileURL(copyPath).href}?sha256=${nameTableHash}`,
   );
@@ -1772,7 +1772,18 @@ async function copyAndLoadNameTable() {
   };
 }
 
-function parseArgs(argv) {
+function resolveBenchPath(flag, value) {
+  const resolved = path.resolve(value);
+  const benchPrefix = `${path.resolve(here)}${path.sep}`;
+  if (!resolved.startsWith(benchPrefix)) {
+    throw new Error(
+      `${flag} must point inside bench/ (got ${resolved})`,
+    );
+  }
+  return resolved;
+}
+
+export function parseArgs(argv) {
   const options = {
     resultsDirectory: path.join(here, "results"),
     outputDirectory: null,
@@ -1798,9 +1809,11 @@ function parseArgs(argv) {
       }
       index += 1;
       if (flag === "--results") {
-        options.resultsDirectory = path.resolve(value);
+        options.resultsDirectory =
+          resolveBenchPath(flag, value);
       } else if (flag === "--out") {
-        options.outputDirectory = path.resolve(value);
+        options.outputDirectory =
+          resolveBenchPath(flag, value);
       } else if (flag === "--case") {
         options.caseName = value;
       } else if (flag === "--before") {
