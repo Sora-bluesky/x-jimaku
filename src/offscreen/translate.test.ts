@@ -122,7 +122,9 @@ function createRescueHarness(
     available: boolean;
     ja: string;
   }>,
-  promptRespond: () => Promise<string> = async () =>
+  promptRespond: (
+    _prompt: string,
+  ) => Promise<string> = async () =>
     "ここです",
 ) {
   const prompt = vi.fn(promptRespond);
@@ -174,8 +176,8 @@ function createRescueHarness(
         properNouns: ["Roman"],
       }),
       requestContentTranslation,
-      onTranslated(line, ja) {
-        onTranslated(line, ja);
+      onTranslated(line, ja, rung) {
+        onTranslated({ ...line, rung }, ja);
       },
       onPathChanged: vi.fn(),
       onDevLog,
@@ -189,6 +191,7 @@ function createRescueHarness(
 
   return {
     engine,
+    prompt,
     translator,
     requestContentTranslation,
     onTranslated,
@@ -759,6 +762,114 @@ describe(
             message:
               "Translator line rescue exhausted; passing through original",
           }),
+        );
+
+        harness.engine.destroy();
+      },
+    );
+
+    it.each([
+      {
+        rung: "lm-unmasked",
+        promptResponses: ["ここです", "ローマです", "%%1%%です"],
+        nextPromptIndex: 2,
+        translatorRespond: async (text: string) =>
+          text.includes("%%") ? "ここです" : "",
+        contentRespond: async (text: string) => ({
+          available: text.includes("%%"),
+          ja: text.includes("%%") ? "ここです" : "",
+        }),
+      },
+      {
+        rung: "translator-unmasked",
+        promptResponses: ["ここです", "%%1%%です"],
+        nextPromptIndex: 1,
+        translatorRespond: async (text: string) =>
+          text.includes("%%") ? "ここです" : "ローマです",
+        contentRespond: async () => ({
+          available: true,
+          ja: "ここです",
+        }),
+      },
+    ])(
+      "keeps a $rung rescue out of the next LanguageModel prompt",
+      async ({
+        rung,
+        promptResponses,
+        nextPromptIndex,
+        translatorRespond,
+        contentRespond,
+      }) => {
+        const harness = createRescueHarness(
+          translatorRespond,
+          contentRespond,
+          async () => promptResponses.shift() ?? "%%1%%です",
+        );
+
+        await harness.engine.initialize();
+        await translateRescueClause(
+          harness.engine, 41, "Roman passed final checks here.",
+        );
+        await translateRescueClause(
+          harness.engine, 42, "Roman passed early checks there.",
+        );
+
+        const nextPrompt = String(
+          harness.prompt.mock.calls[nextPromptIndex]?.[0] ?? "",
+        );
+        expect(nextPrompt).not.toContain("[直前の文脈]");
+        expect(harness.onTranslated).toHaveBeenNthCalledWith(
+          1,
+          expect.objectContaining({ id: 41, rung }),
+          "ローマです",
+        );
+        expect(
+          harness.onTranslated.mock.calls[0]?.[0],
+        ).not.toHaveProperty("fallback");
+        expect(harness.onDevLog).toHaveBeenCalledWith(
+          expect.objectContaining({
+            data: expect.objectContaining({
+              kind: "clause-timing",
+              lineId: 41,
+              outcome: "translated",
+            }),
+          }),
+        );
+
+        harness.engine.destroy();
+      },
+    );
+
+    it(
+      "keeps a masked result in the next LanguageModel prompt",
+      async () => {
+        const harness = createRescueHarness(
+          async () => "",
+          async () => ({
+            available: false,
+            ja: "",
+          }),
+          async () => "%%1%%です",
+        );
+
+        await harness.engine.initialize();
+        await translateRescueClause(
+          harness.engine, 61, "Roman passed final checks here.",
+        );
+        await translateRescueClause(
+          harness.engine, 62, "Roman passed early checks there.",
+        );
+
+        expect(harness.onTranslated).toHaveBeenNthCalledWith(
+          1,
+          expect.objectContaining({ id: 61, rung: "masked" }),
+          "ローマンです",
+        );
+        const nextPrompt = String(
+          harness.prompt.mock.calls[1]?.[0] ?? "",
+        );
+        expect(nextPrompt).toContain(
+          "[直前の文脈]\nEN: %%1%% passed final checks here.\nJA: %%1%%です",
         );
 
         harness.engine.destroy();
