@@ -948,7 +948,7 @@ async function handleCaptureStart(
           postToBackground(message);
         },
 
-        onTranslated(line, ja) {
+        onTranslated(line, ja, rung) {
           if (
             activeTranslationEngine !==
               translationEngine ||
@@ -961,7 +961,11 @@ async function handleCaptureStart(
 
           terminalLedgerGlue
             .engineCallbacks
-            .onTranslated(line, ja);
+            .onTranslated(
+              line,
+              ja,
+              rung,
+            );
         },
 
         onSettled(ids) {

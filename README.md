@@ -56,7 +56,9 @@ Captions that reached the screen are kept in this browser's storage. **On by def
 
 Every page is recorded as it appears: the first and second Japanese lines exactly as they were wrapped, the English sentence behind them, which page of which cue it was, and the times it appeared and went away. Wrap positions and durations are not the whole of it. The subtitles of whatever was watched are kept in full.
 
-The last 400 pages, roughly twenty minutes at three seconds a page. Older ones are dropped. Nothing is sent anywhere.
+Since the naming work, the log also keeps every English line the overlay accepted, with the step of the translation ladder that produced its Japanese, and a record of the cues that queue pressure dropped. That includes lines that never reached the screen. The reason is the same as for the pages: to pair what was shown with what was said.
+
+The last 400 pages and 400 lines, roughly twenty minutes at three seconds a page. Older ones are dropped, and the export says how many were. Nothing is sent anywhere.
 
 It exists for bug reports. Until now those were fixed from someone's memory of what they saw, which left us looking for a scene that matched the description.
 

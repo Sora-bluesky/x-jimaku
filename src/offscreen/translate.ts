@@ -8,6 +8,7 @@ import type {
   OffDevLogMessage,
   RecognitionPayload,
   TranslationPath,
+  TranslationRung,
 } from "../shared/messages";
 import type {
   TranslationBackend,
@@ -65,6 +66,7 @@ export interface TranslationContext {
 interface TranslationAttemptResult {
   ja: string;
   recordHistory: boolean;
+  rung: TranslationRung;
 }
 
 interface QueuedTranslation
@@ -146,6 +148,7 @@ export interface TranslationEngineOptions {
   onTranslated(
     line: RecognitionPayload,
     ja: string,
+    rung: TranslationRung,
   ): void;
   onSettled?(ids: number[]): void;
   onPathChanged(path: TranslationPath): void;
@@ -348,6 +351,7 @@ export class TranslationEngine {
           data: {
             kind: "queue-drop",
             lineId: dropped.id,
+            text: dropped.text,
           },
         });
       }
@@ -513,6 +517,7 @@ export class TranslationEngine {
           ? {
               ja: line.text,
               recordHistory: true,
+              rung: "passthrough" as const,
             }
           : await this.translateWithFallback(
               line,
@@ -556,6 +561,7 @@ export class TranslationEngine {
           ? line
           : { ...line, fallback: true },
         result.ja,
+        result.rung,
       );
     } finally {
       if (!this.isAttemptCurrent(attempt)) {
@@ -932,6 +938,7 @@ export class TranslationEngine {
               ),
           ),
           recordHistory: true,
+          rung: "translator-unmasked",
         };
 
       case "content-translator": {
@@ -963,6 +970,7 @@ export class TranslationEngine {
         return {
           ja: response.ja,
           recordHistory: true,
+          rung: "translator-unmasked",
         };
       }
 
@@ -1105,6 +1113,10 @@ export class TranslationEngine {
     return {
       ja: restored,
       recordHistory: true,
+      rung:
+        request.maskPlan === null
+          ? "lm-unmasked"
+          : "masked",
     };
   }
 
@@ -1334,6 +1346,7 @@ export class TranslationEngine {
     return {
       ja: request.original,
       recordHistory: false,
+      rung: "passthrough",
     };
   }
 
@@ -1441,6 +1454,10 @@ export class TranslationEngine {
         return {
           ja: restored,
           recordHistory: true,
+          rung:
+            request.maskPlan === null
+              ? "translator-unmasked"
+              : "translator-masked",
         };
       } catch (error) {
         this.assertAttemptCurrent(attempt);
@@ -1545,6 +1562,7 @@ export class TranslationEngine {
       return {
         ja: normalized,
         recordHistory: true,
+        rung: "lm-unmasked",
       };
     } catch {
       this.assertAttemptCurrent(attempt);

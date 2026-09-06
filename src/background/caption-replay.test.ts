@@ -18,13 +18,14 @@ interface ReplayCase {
 }
 
 describe("createCaptionReplay", () => {
-  it("A-6-4(b'''') preserves fallback in both live relays", () => {
+  it("preserves fallback and rung in both live relays", () => {
     expect(
       createRecognitionRelays({
         id: 9,
         text: "original",
         ja: "original",
         fallback: true,
+        rung: "passthrough",
         final: true,
         at: "2026-09-02T00:00:00.000Z",
       }),
@@ -35,6 +36,7 @@ describe("createCaptionReplay", () => {
         text: "original",
         ja: "original",
         fallback: true,
+        rung: "passthrough",
         final: true,
         at: "2026-09-02T00:00:00.000Z",
       },
@@ -44,6 +46,7 @@ describe("createCaptionReplay", () => {
         text: "original",
         ja: "original",
         fallback: true,
+        rung: "passthrough",
         final: true,
         at: "2026-09-02T00:00:00.000Z",
       },

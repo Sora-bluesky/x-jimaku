@@ -1,5 +1,6 @@
 import type {
   TranslationPath,
+  TranslationRung,
 } from "../shared/messages";
 import type {
   CaptionDisplayLogSink,
@@ -79,9 +80,16 @@ interface LayoutSnapshot {
   otherVideos: readonly OtherVideoLayout[];
 }
 
+interface CueSource {
+  id: number;
+  text: string;
+  rung: TranslationRung | null;
+}
+
 interface CueData {
   cueId: string;
   sourceIds: readonly number[];
+  sources: readonly CueSource[];
   primaryText: string;
   originalText: string;
   sourceText: string;
@@ -113,6 +121,7 @@ export interface CaptionLine {
   at: string;
   ja?: string;
   fallback?: boolean;
+  rung?: TranslationRung;
 }
 
 export type CaptionOverlayStatus =
@@ -1083,6 +1092,7 @@ export class CaptionOverlay {
       );
     let primary = fullPrimary;
     let sourceDiff = false;
+    let primaryWasTruncated = false;
 
     if (isRevision) {
       if (
@@ -1101,6 +1111,7 @@ export class CaptionOverlay {
               this.lastAcceptedPrimary.length,
             )
             .trimStart();
+          primaryWasTruncated = true;
         }
       } else {
         primary = source
@@ -1108,9 +1119,26 @@ export class CaptionOverlay {
             this.lastAcceptedSource.length,
           )
           .trimStart();
+        primaryWasTruncated = true;
         sourceDiff = true;
       }
     }
+
+    const effectiveText =
+      primaryWasTruncated
+        ? source
+            .slice(
+              this.lastAcceptedSource.length,
+            )
+            .trimStart()
+        : source;
+
+    this.options.displayLog
+      ?.recordLineAccepted({
+        id: line.id,
+        text: effectiveText,
+        rung: line.rung ?? null,
+      });
 
     if (fullPrimary !== "") {
       this.lastAcceptedPrimary = fullPrimary;
@@ -1124,6 +1152,7 @@ export class CaptionOverlay {
     const cues =
       this.createCueSegments(
         line,
+        effectiveText,
         primary,
         sourceDiff,
       );
@@ -1181,6 +1210,7 @@ export class CaptionOverlay {
 
   private createCueSegments(
     line: CaptionLine,
+    effectiveText: string,
     primaryOverride?: string,
     suppressOriginal = false,
   ): CueData[] {
@@ -1222,6 +1252,13 @@ export class CaptionOverlay {
       (part, index): CueData => ({
         cueId: `${line.id}:${index}`,
         sourceIds: [line.id],
+        sources: [
+          {
+            id: line.id,
+            text: effectiveText,
+            rung: line.rung ?? null,
+          },
+        ],
         primaryText: part,
         originalText: original,
         sourceText: source,
@@ -1434,6 +1471,10 @@ export class CaptionOverlay {
             ...left.sourceIds,
             ...right.sourceIds,
           ],
+          sources: [
+            ...left.sources,
+            ...right.sources,
+          ],
           primaryText: combinedPrimary,
           originalText: clampTail(
             combinedOriginal,
@@ -1466,6 +1507,11 @@ export class CaptionOverlay {
       this.droppedCueCount += 1;
       this.host.dataset.cueDrops =
         String(this.droppedCueCount);
+      this.options.displayLog
+        ?.recordCueDropped({
+          cueId: dropped.cueId,
+          sourceIds: dropped.sourceIds,
+        });
       this.droppedCuesSinceLastReport += 1;
 
       const now = performance.now();
@@ -1706,6 +1752,10 @@ export class CaptionOverlay {
         line1: secondLine,
         sourceText:
           activeCue.data.sourceText,
+        sources:
+          activeCue.data.sources,
+        fallback:
+          activeCue.data.fallback === true,
         translationPath:
           this.translationPath,
         showOriginal: this.showOriginal,

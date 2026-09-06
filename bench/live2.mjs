@@ -1149,6 +1149,9 @@ try {
           ...(value?.linesTruncated !== undefined
             ? { linesTruncated: value.linesTruncated }
             : {}),
+          ...(value?.dropsTruncated !== undefined
+            ? { dropsTruncated: value.dropsTruncated }
+            : {}),
           closed: rows.length,
           dwellMsP10: at(dwell, 0.1),
           dwellMsP50: at(dwell, 0.5),
@@ -1320,6 +1323,9 @@ result.linesUnparsed = captionCut.linesUnparsed;
 result.dropsUnparsed = captionCut.dropsUnparsed;
 if (captionLog?.linesTruncated !== undefined) {
   result.linesTruncated = captionLog.linesTruncated;
+}
+if (captionLog?.dropsTruncated !== undefined) {
+  result.dropsTruncated = captionLog.dropsTruncated;
 }
 result.display = {
   ...(result.display ?? {}),

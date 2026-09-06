@@ -1,6 +1,7 @@
 import type {
   OffRecognitionMessage,
   RecognitionPayload,
+  TranslationRung,
 } from "../shared/messages";
 
 export type TerminalLedgerEntry =
@@ -14,10 +15,12 @@ export type TerminalLedgerEntry =
       kind: "translated";
       text: string;
       ja: string;
+      rung: TranslationRung;
     }
   | {
       kind: "fallback";
       text: string;
+      rung: "passthrough";
     };
 
 export class TerminalLedger {
@@ -53,7 +56,11 @@ export class TerminalLedger {
     this.atById.set(line.id, line.at);
   }
 
-  translated(id: number, ja: string): void {
+  translated(
+    id: number,
+    ja: string,
+    rung: TranslationRung,
+  ): void {
     const entry = this.entries.get(id);
 
     if (entry?.kind !== "pending") {
@@ -64,6 +71,7 @@ export class TerminalLedger {
       kind: "translated",
       text: entry.text,
       ja,
+      rung,
     });
     this.flush();
   }
@@ -82,6 +90,7 @@ export class TerminalLedger {
       this.entries.set(id, {
         kind: "fallback",
         text: entry.text,
+        rung: "passthrough",
       });
     }
 
@@ -128,6 +137,7 @@ export class TerminalLedger {
               final: true,
               at,
               ja: entry.ja,
+              rung: entry.rung,
             }
           : {
               t: "OFF_RECOG",
@@ -138,6 +148,7 @@ export class TerminalLedger {
               at,
               ja: entry.text,
               fallback: true,
+              rung: entry.rung,
             };
 
       this.entries.delete(id);
@@ -172,8 +183,13 @@ export function createTerminalLedgerGlue(
       onTranslated(
         line: RecognitionPayload,
         ja: string,
+        rung: TranslationRung,
       ): void {
-        ledger.translated(line.id, ja);
+        ledger.translated(
+          line.id,
+          ja,
+          rung,
+        );
       },
 
       onSettled(
