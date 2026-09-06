@@ -21,7 +21,9 @@ import {
   KEEP_LATIN_ALL_TERMS,
   allowKeepLatinMaskOccurrence,
   glossaryPromptBlocks,
+  hasJapaneseNameTerm,
   keepLatinEntriesForTerms,
+  renderNameTerm,
   selectGlossaryMatches,
 } from "./glossary";
 import {
@@ -822,6 +824,7 @@ export class TranslationEngine {
           hit,
           context.properNouns,
         ),
+      renderNameTerm,
     );
 
     while (
@@ -2193,7 +2196,9 @@ function createTranslationPrompt(
   );
   const promptProperNouns =
     context.properNouns.filter(
-      (term) => !maskedTerms.has(term),
+      (term) =>
+        !maskedTerms.has(term) &&
+        !hasJapaneseNameTerm(term),
     );
   const renderHistoryText = (
     value: string,
@@ -2216,27 +2221,25 @@ function createTranslationPrompt(
 
   const glossaryMatch =
     selectGlossaryMatches(text);
-  const visibleKeepLatin =
-    glossaryMatch.keepLatin.filter(
-      (entry) =>
-        !maskedTerms.has(entry.term),
-    );
-  const visibleKeepLatinTerms = new Set(
-    visibleKeepLatin.map(
-      (entry) => entry.term,
-    ),
-  );
   const revealedKeepLatin =
     maskPlan === null
       ? keepLatinEntriesForTerms(
           unmaskedTerms,
-        ).filter(
-          (entry) =>
-            !visibleKeepLatinTerms.has(
-              entry.term,
-            ),
         )
       : [];
+  const revealedKeepLatinTerms = new Set(
+    revealedKeepLatin.map(
+      (entry) => entry.term,
+    ),
+  );
+  const visibleKeepLatin =
+    glossaryMatch.keepLatin.filter(
+      (entry) =>
+        !maskedTerms.has(entry.term) &&
+        !revealedKeepLatinTerms.has(
+          entry.term,
+        ),
+    );
   blocks.push(
     ...glossaryPromptBlocks({
       keepLatin: [

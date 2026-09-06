@@ -17,6 +17,7 @@ import puppeteer from "puppeteer-core";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  copyFileSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -24,7 +25,10 @@ import {
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import {
+  fileURLToPath,
+  pathToFileURL,
+} from "node:url";
 import { startBenchServer } from "./serve.mjs";
 import {
   parseArgs,
@@ -99,32 +103,73 @@ const CASES = {
   },
 };
 
-function loadKeepLatinEntries() {
-  const source = readFileSync(
-    path.join(root, "src", "offscreen", "glossary.data.ts"),
-    "utf8",
+async function loadKeepLatinEntries() {
+  const sourcePath = path.join(
+    root,
+    "src",
+    "offscreen",
+    "glossary.data.ts",
   );
-  const start = source.indexOf("export const KEEP_LATIN_TERMS");
-  const end = source.indexOf("export const GLOSSARY_TERMS");
-  if (start < 0 || end <= start) {
-    throw new Error("KEEP_LATIN_TERMS block was not found");
-  }
-  const block = source.slice(start, end);
-  return [...block.matchAll(/term:\s*"([^"]+)"/gu)].map((match) => {
-    const lineEnd = block.indexOf("\n", match.index);
-    const line = block.slice(
-      match.index,
-      lineEnd < 0 ? block.length : lineEnd,
-    );
-    return {
-      term: match[1],
-      ambiguous: line.includes("ambiguous: true"),
-    };
+  const copyPath = path.join(
+    here,
+    "work",
+    "name-table.mts",
+  );
+  mkdirSync(path.dirname(copyPath), {
+    recursive: true,
   });
-}
+  copyFileSync(sourcePath, copyPath);
 
-function loadKeepLatinTerms() {
-  return loadKeepLatinEntries().map((entry) => entry.term);
+  const sourceBytes = readFileSync(sourcePath);
+  const copiedBytes = readFileSync(copyPath);
+  if (!sourceBytes.equals(copiedBytes)) {
+    throw new Error(
+      "name table copy check failed: copied bytes differ",
+    );
+  }
+
+  const nameTableHash = createHash("sha256")
+    .update(sourceBytes)
+    .digest("hex");
+  const [major, minor] =
+    process.versions.node.split(".").map(Number);
+  if (major < 22 || (major === 22 && minor < 18)) {
+    throw new Error(
+      `live2 needs Node 22.18 or newer to import the name table copy (running ${process.versions.node})`,
+    );
+  }
+
+  const tableModule = await import(
+    `${pathToFileURL(copyPath).href}?sha256=${nameTableHash}`,
+  );
+  const rows = tableModule.NAME_TERMS;
+  if (!Array.isArray(rows)) {
+    throw new Error(
+      "name table copy check failed: NAME_TERMS is required",
+    );
+  }
+
+  return rows.map((entry) => {
+    if (
+      typeof entry.term !== "string" ||
+      (
+        entry.render !== "latin" &&
+        entry.render !== "ja"
+      )
+    ) {
+      throw new Error(
+        "name table copy contains an invalid row",
+      );
+    }
+
+    return {
+      term: entry.term,
+      render: entry.render,
+      ambiguous: entry.ambiguous === true,
+    };
+  }).filter(
+    (entry) => entry.render === "latin",
+  );
 }
 
 function keepLatinPattern(term) {
@@ -1777,7 +1822,8 @@ const captionLineMeasure = captionLineMeasureSeen.has("font")
     ? "constant"
     : null;
 
-const keepLatinEntries = loadKeepLatinEntries();
+const keepLatinEntries =
+  await loadKeepLatinEntries();
 const keepLatinTerms = keepLatinEntries.map((entry) => entry.term);
 const glossaryScriptFile = path.join(
   here,

@@ -123,6 +123,31 @@ function findMatches(text, pattern) {
   return [...String(text).matchAll(pattern)].map((match) => match[0]);
 }
 
+function expectedFormPattern(name, expected) {
+  const source = escapeRegex(expected)
+    .replace(
+      /(\p{Script=Latin})\s*(?=[\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}])/gu,
+      "$1\\s*",
+    )
+    .replace(
+      /([\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}])\s*(?=\p{Script=Latin})/gu,
+      "$1\\s*",
+    );
+  return name.render === "latin"
+    ? new RegExp(
+        `(?<![A-Za-z0-9])${source}(?![A-Za-z0-9'])`,
+        "giu",
+      )
+    : new RegExp(source, "gu");
+}
+
+function matchesExpectedForm(form, name, expected) {
+  return findMatches(
+    form,
+    expectedFormPattern(name, expected),
+  ).includes(form);
+}
+
 function maskMatches(text, pattern) {
   return String(text).replace(
     pattern,
@@ -147,6 +172,10 @@ function cuePrefix(cueId, fallback) {
   return text.split(":", 1)[0];
 }
 
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+}
+
 function scriptMixedForms(text, term) {
   const forms = [];
   const termLower = term.toLowerCase();
@@ -166,7 +195,16 @@ function scriptMixedForms(text, term) {
       latinParts.some((part) =>
         termLower.includes(part.toLowerCase()),
       );
-    if (hasNonLatinForeign || hasNameLatin) {
+    // Japanese sets a Latin name flush against the next katakana word
+    // (NASAゴダード). When the Latin part is the whole name, the name
+    // itself is intact and the token is not a mixed form of it.
+    const latinIsWholeName =
+      latinParts.length === 1
+      && latinParts[0].toLowerCase() === termLower;
+    if (
+      hasNonLatinForeign
+      || (hasNameLatin && !latinIsWholeName)
+    ) {
       forms.push(token);
     }
   }
@@ -176,6 +214,17 @@ function scriptMixedForms(text, term) {
     return forms;
   }
 
+  // A partially Latin multi-word name: report the span from the Latin word
+  // through the Japanese run that follows it (ゴダード, 宇宙センター), not the
+  // whole clause, so the form can be compared with the expected one.
+  const wordAlternatives = words.map(escapeRegExp).join("|");
+  // Two shapes, tried in this order so that text before the name is never
+  // absorbed: Latin words followed by a Japanese run (NASA ゴダード), then,
+  // on what is left, a Japanese run with an optional の followed by the
+  // Latin words (ケネディの Space Center).
+  const wordsRun = `(?:${wordAlternatives})(?:[ \u3000]?(?:${wordAlternatives}))*`;
+  const trailingPattern = new RegExp(`${wordsRun}[ \u3000]?[\\p{Script=Katakana}\\p{Script=Han}ー々]+`, "giu");
+  const leadingPattern = new RegExp(`[\\p{Script=Katakana}\\p{Script=Han}ー々]+(?:の)?[ \u3000]?${wordsRun}`, "giu");
   for (const clause of String(text).split(/[。！？\n]/u)) {
     const wordsSeen = words.filter((word) =>
       latinPattern(word).test(clause),
@@ -184,9 +233,15 @@ function scriptMixedForms(text, term) {
       wordsSeen > 0
       && wordsSeen < words.length
       && JAPANESE.test(clause)
-      && clause.trim()
     ) {
-      forms.push(clause.trim());
+      let remainder = clause;
+      for (const match of clause.matchAll(trailingPattern)) {
+        forms.push(match[0].trim());
+        remainder = remainder.replace(match[0], " ");
+      }
+      for (const match of remainder.matchAll(leadingPattern)) {
+        forms.push(match[0].trim());
+      }
     }
   }
   return forms;
@@ -717,9 +772,7 @@ export function classifyName(
 
     const rung = occurrenceRung(occurrences);
     const termPattern = latinPattern(name.term);
-    const expectedPattern = name.render === "latin"
-      ? latinPattern(expected)
-      : exactPattern(expected);
+    const expectedPattern = expectedFormPattern(name, expected);
     let rejectedText = maskMatches(unit.output, termPattern);
     if (typeof name.ja === "string" && name.ja) {
       rejectedText = maskMatches(
@@ -738,7 +791,9 @@ export function classifyName(
     });
     const wrongForms = [
       ...rejectedForms,
-      ...scriptMixedForms(unit.output, name.term),
+      ...scriptMixedForms(unit.output, name.term).filter((form) =>
+        !matchesExpectedForm(form, name, expected),
+      ),
     ];
     const expectedForms =
       findMatches(unit.output, expectedPattern);
@@ -819,6 +874,7 @@ export function classifyName(
   return {
     term: name.term,
     expected,
+    ...(name.nestedJa ? { nestedJa: name.nestedJa } : {}),
     english,
     forms: sortedRecord(forms),
     formRungs,
@@ -1266,6 +1322,52 @@ export function assessChange({
   };
 }
 
+function nestedJaForPageTerm(term, tableRows) {
+  const spans = [];
+  const nestedJa = [];
+  const rows = tableRows
+    .filter((row) =>
+      row.render === "ja"
+      && typeof row.ja === "string"
+      && row.ja,
+    )
+    .sort((left, right) =>
+      right.term.length - left.term.length);
+
+  for (const row of rows) {
+    let matched = false;
+    for (const match of term.matchAll(latinPattern(row.term))) {
+      const start = match.index;
+      const end = start + match[0].length;
+      if (
+        spans.some((span) =>
+          start < span.end && end > span.start)
+      ) {
+        continue;
+      }
+      spans.push({
+        start,
+        end,
+        replacement: row.ja,
+      });
+      matched = true;
+    }
+    if (matched) {
+      nestedJa.push({ term: row.term, ja: row.ja });
+    }
+  }
+
+  let cursor = 0;
+  let expected = "";
+  for (const span of spans.sort((left, right) =>
+    left.start - right.start)) {
+    expected += term.slice(cursor, span.start) + span.replacement;
+    cursor = span.end;
+  }
+  expected += term.slice(cursor);
+  return { expected, nestedJa };
+}
+
 function contextTermsFor(run) {
   if (Array.isArray(run?.contextTerms)) {
     return run.contextTerms;
@@ -1306,10 +1408,13 @@ function definitionsForRun(run, tableRows) {
       ) {
         continue;
       }
+      const { expected, nestedJa } =
+        nestedJaForPageTerm(term, tableRows);
       definitions.set(term, {
         term,
         render: "latin",
-        expected: term,
+        expected,
+        ...(nestedJa.length > 0 ? { nestedJa } : {}),
         pageDerived: true,
         rejected: [],
       });

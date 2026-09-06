@@ -695,7 +695,7 @@ describe(
           harness.onTranslated,
         ).toHaveBeenCalledWith(
           expect.objectContaining({ id: 1 }),
-          "Romanです",
+          "ローマンです",
         );
 
         harness.engine.destroy();
@@ -872,14 +872,14 @@ describe(
         ).toHaveBeenNthCalledWith(
           1,
           expect.objectContaining({ id: 21 }),
-          "Romanです",
+          "ローマンです",
         );
         expect(
           harness.onTranslated,
         ).toHaveBeenNthCalledWith(
           2,
           expect.objectContaining({ id: 22 }),
-          "Romanです",
+          "ローマンです",
         );
 
         harness.engine.destroy();
@@ -2114,18 +2114,22 @@ describe("TranslationEngine glossary prompt", () => {
     return prompt;
   }
 
-  async function sentPrompt(
+  async function sentPrompts(
     text: string,
-  ): Promise<string> {
+    properNouns: string[] = [],
+  ): Promise<string[]> {
     const prompt = installPromptApi(
-      async () => "出た",
+      async (sent) =>
+        sent.includes("%%")
+          ? "ここです"
+          : "出た",
     );
     const engine =
       new TranslationEngine({
         backend: "prompt-api",
         getContext: () => ({
           recentPairs: [],
-          properNouns: [],
+          properNouns,
         }),
         requestContentTranslation:
           vi.fn(async () => ({
@@ -2148,9 +2152,17 @@ describe("TranslationEngine glossary prompt", () => {
     ).resolves.toBe(true);
     engine.destroy();
 
-    return String(
-      prompt.mock.calls[0]?.[0] ?? "",
+    return prompt.mock.calls.map(
+      (call) => String(call[0] ?? ""),
     );
+  }
+
+  async function sentPrompt(
+    text: string,
+  ): Promise<string> {
+    return (
+      await sentPrompts(text)
+    )[0] ?? "";
   }
 
   it("sends glossary instructions in the LanguageModel prompt", async () => {
@@ -2165,6 +2177,24 @@ describe("TranslationEngine glossary prompt", () => {
     );
     expect(sent).toContain(
       "[今訳す節]\n%%1%% released Cursor.",
+    );
+  });
+
+  it("uses the fixed block for names revealed on the unmasked retry", async () => {
+    const prompts = await sentPrompts(
+      "Kennedy Space Center and Roman arrived.",
+      ["Kennedy Space Center", "Roman"],
+    );
+
+    expect(prompts).toHaveLength(2);
+    expect(prompts[1]).toContain(
+      "[定訳]\nKennedy Space Center = ケネディ宇宙センター\nRoman = ローマン",
+    );
+    expect(prompts[1]).not.toContain(
+      "[固有名詞（原綴りのまま使う）]",
+    );
+    expect(prompts[1]).not.toContain(
+      "[原綴り]",
     );
   });
 

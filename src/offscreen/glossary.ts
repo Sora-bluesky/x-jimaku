@@ -1,33 +1,70 @@
 import {
   GLOSSARY_TERMS,
-  KEEP_LATIN_TERMS,
+  NAME_TERMS,
 } from "./glossary.data";
 import type {
   GlossaryTerm,
-  KeepLatinTerm,
+  NameTerm,
 } from "./glossary.data";
 
 export const KEEP_LATIN_MATCH_CAP = 6;
 export const GLOSSARY_MATCH_CAP = 4;
 export const KEEP_LATIN_MASK_TERMS =
-  KEEP_LATIN_TERMS.filter(
+  NAME_TERMS.filter(
     (entry) =>
       entry.ambiguous !== true,
   ).map((entry) => entry.term);
 export const KEEP_LATIN_ALL_TERMS =
-  KEEP_LATIN_TERMS.map(
+  NAME_TERMS.map(
     (entry) => entry.term,
   );
 
+const NAME_BY_TERM = new Map(
+  NAME_TERMS.map((entry) => [
+    entry.term.toLowerCase(),
+    entry,
+  ]),
+);
 const AMBIGUOUS_KEEP_LATIN = new Set(
-  KEEP_LATIN_TERMS.filter(
+  NAME_TERMS.filter(
     (entry) =>
       entry.ambiguous === true,
   ).map((entry) => entry.term),
 );
 
+function japaneseRendering(
+  entry: NameTerm,
+): string {
+  if (
+    entry.ja === undefined ||
+    entry.ja.trim() === ""
+  ) {
+    throw new Error(
+      `NAME_TERMS row ${entry.term} is missing ja`,
+    );
+  }
+
+  return entry.ja;
+}
+
+export function renderNameTerm(
+  term: string,
+): string {
+  const entry = NAME_BY_TERM.get(
+    term.toLowerCase(),
+  );
+
+  if (entry === undefined) {
+    return term;
+  }
+
+  return entry.render === "ja"
+    ? japaneseRendering(entry)
+    : entry.term;
+}
+
 export interface GlossarySelection {
-  readonly keepLatin: readonly KeepLatinTerm[];
+  readonly keepLatin: readonly NameTerm[];
   readonly glossary: readonly GlossaryTerm[];
 }
 
@@ -203,6 +240,18 @@ function locateTerms<
   return located;
 }
 
+export function hasJapaneseNameTerm(
+  text: string,
+): boolean {
+  return locateTerms(
+    text,
+    NAME_TERMS,
+    true,
+  ).some(
+    (hit) => hit.entry.render === "ja",
+  );
+}
+
 function capLocated<
   T extends { readonly term: string },
 >(
@@ -246,7 +295,7 @@ export function selectGlossaryMatches(
     keepLatin: capLocated(
       locateTerms(
         clause,
-        KEEP_LATIN_TERMS,
+        NAME_TERMS,
         true,
       ),
       KEEP_LATIN_MATCH_CAP,
@@ -264,15 +313,15 @@ export function selectGlossaryMatches(
 
 export function keepLatinEntriesForTerms(
   terms: readonly string[],
-): KeepLatinTerm[] {
+): NameTerm[] {
   const byTerm = new Map(
-    KEEP_LATIN_TERMS.map((entry) => [
+    NAME_TERMS.map((entry) => [
       entry.term.toLowerCase(),
       entry,
     ]),
   );
   const seen = new Set<string>();
-  const entries: KeepLatinTerm[] = [];
+  const entries: NameTerm[] = [];
 
   for (const term of terms) {
     const entry = byTerm.get(
@@ -294,7 +343,7 @@ export function keepLatinEntriesForTerms(
 }
 
 function formatKeepLatinBlock(
-  entries: readonly KeepLatinTerm[],
+  entries: readonly NameTerm[],
 ): string | null {
   if (entries.length === 0) {
     return null;
@@ -302,28 +351,53 @@ function formatKeepLatinBlock(
 
   const definite: string[] = [];
   const ambiguous: string[] = [];
+  const fixedJapanese: string[] = [];
 
   for (const entry of entries) {
-    if (entry.ambiguous === true) {
+    if (entry.render === "ja") {
+      fixedJapanese.push(
+        `${entry.term} = ${japaneseRendering(entry)}`,
+      );
+    } else if (entry.ambiguous === true) {
       ambiguous.push(entry.term);
     } else {
       definite.push(entry.term);
     }
   }
 
-  const lines = ["[原綴り]"];
+  const blocks: string[] = [];
 
-  if (definite.length > 0) {
-    lines.push(definite.join(", "));
+  if (
+    definite.length > 0 ||
+    ambiguous.length > 0
+  ) {
+    const lines = ["[原綴り]"];
+
+    if (definite.length > 0) {
+      lines.push(definite.join(", "));
+    }
+
+    if (ambiguous.length > 0) {
+      lines.push(
+        `モデル・製品・組織名のときだけ原綴り（一般語は訳す）: ${ambiguous.join(", ")}`,
+      );
+    }
+
+    blocks.push(lines.join("\n"));
   }
 
-  if (ambiguous.length > 0) {
-    lines.push(
-      `モデル・製品・組織名のときだけ原綴り（一般語は訳す）: ${ambiguous.join(", ")}`,
+  if (fixedJapanese.length > 0) {
+    blocks.push(
+      [
+        "[定訳]",
+        ...fixedJapanese,
+      ].join("\n"),
     );
   }
 
-  return lines.join("\n");
+  return blocks.length === 0
+    ? null
+    : blocks.join("\n");
 }
 
 function formatGlossaryBlock(
@@ -371,7 +445,10 @@ export interface KatakanaNameRendering {
 
 export function countKatakanaNameHits(
   text: string,
-  entries: readonly KeepLatinTerm[],
+  entries: readonly Pick<
+    NameTerm,
+    "term" | "ambiguous"
+  >[],
   renderings: readonly KatakanaNameRendering[],
 ): {
   readonly ambiguous: number;
