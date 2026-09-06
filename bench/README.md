@@ -51,7 +51,15 @@ result JSON 保存・機械ゲート出力までを 1 コマンドで行う。�
 
 `Extensions.loadUnpacked`の後で、workerのbuild stampを`dist/manifest.json`の`version_name`と照合する。不一致またはworker未起動なら、計測を始めず終了コード`1`で止まる。`--keep-profile-dir`を付けると、デバッグ用に`x-jimaku-bench`を残す。2026-09-05より前の結果は、古いworkerを測った可能性がある。
 
-字幕を1行も採取できなかった実行では、`gates`の識別情報（`displayConfig`・`showOriginal`・`displayCoverage`）を残し、それ以外の値をすべて`null`にして、結果のトップレベルに`gatesSuppressed: "no captured lines"`を記録する。未採取を問題件数`0`として扱わず、`0`だけで正常と判断しない。`score-ja.mjs prepare`と`assert-smoke.mjs`は、空でない文字列の`error`を持つ結果を拒否する。結果ファイルを集計する処理も、`error`がある結果を除外する。
+字幕を1行も採取できなかった実行では、`gates`の識別情報（`displayConfig`・`showOriginal`・`displayCoverage`）を残し、それ以外の値をすべて`null`にして、結果のトップレベルに`gatesSuppressed: "no captured lines"`を記録する。未採取を問題件数`0`として扱わず、`0`だけで正常と判断しない。`score-ja.mjs prepare`と`assert-smoke.mjs`は、空でない文字列の`error`を持つ結果を拒否する。
+
+## 名前表記コーパス
+
+`node bench/naming-corpus.mjs`は`bench/results/live2-*.json`をすべて読み、`naming-corpus.json`と`naming-candidates.md`を結果ディレクトリへ書く。`--results`、`--out`、`--case`で入出力とケースを絞れる。
+
+コーパスは状態ではない。走行JSONを正本として、実行のたびにゼロから作り直す。`recognition.jaClauses`または新形式の`display.lines`が空でない走行を取り込む。`error`がない走行と、`display gate `で始まるエラーだけを採用し、`gatesSuppressed`がある走行は除外理由を記録する。
+
+名前表は`src/offscreen/glossary.data.ts`を`bench/work/name-table.mts`へバイト単位で複写し、SHA-256を記録してから読み込む。新形式の`display.lines`と`display.pages[].sources`がある走行では出現率を計算する。旧形式の走行は生の表記件数だけを残し、率を`null`にする。
 
 翻訳経路の報告時刻と準備時間は次の3値で観測する。いずれも巻き戻した動画の再生開始を0とし、再生前なら負数になる。`gates` オブジェクトへ保存するが、合否には使わない。
 
