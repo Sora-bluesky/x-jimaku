@@ -18,6 +18,7 @@ import {
 } from "./glossary";
 import { NAME_TERMS } from "./glossary.data";
 import {
+  correctRejectedForms,
   countContentWords,
   countIntactPlaceholders,
   createMaskPlan,
@@ -245,6 +246,51 @@ function planKeepLatin(
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+});
+
+describe("correctRejectedForms", () => {
+  it("corrects eligible forms without touching accepted or disallowed text", () => {
+    const roman = NAME_TERMS.find((row) => row.term === "Roman")!;
+    const corrected = correctRejectedForms(
+      "ローマ宇宙望遠鏡、ロマン宇宙望遠鏡、ローマン宇宙望遠鏡",
+      "Roman will map wide regions of the sky.",
+      [roman],
+      () => true,
+    );
+
+    expect(corrected).toEqual({
+      ja: "ローマン宇宙望遠鏡、ローマン宇宙望遠鏡、ローマン宇宙望遠鏡",
+      corrections: [
+        { term: "Roman", before: "ローマ", after: "ローマン" },
+        { term: "Roman", before: "ロマン", after: "ローマン" },
+      ],
+    });
+    expect(
+      correctRejectedForms("ローマ", "Romance launched.", [roman], () => true),
+    ).toEqual({ ja: "ローマ", corrections: [] });
+    expect(
+      correctRejectedForms("ローマ", "Roman launched.", [roman], () => false),
+    ).toEqual({ ja: "ローマ", corrections: [] });
+
+    const nested = {
+      term: "Example",
+      render: "ja",
+      ja: "正名",
+      correct: true,
+      confidence: "verified",
+      source: "test",
+      rejected: [
+        { form: "誤", reason: "test" },
+        { form: "誤表記", reason: "test" },
+      ],
+    } as const;
+    expect(
+      correctRejectedForms("誤表記", "Example launched.", [nested], () => true),
+    ).toEqual({
+      ja: "正名",
+      corrections: [{ term: "Example", before: "誤表記", after: "正名" }],
+    });
+  });
 });
 
 describe("term masking", () => {
@@ -1073,7 +1119,7 @@ describe("TranslationEngine masking ladder", () => {
     expect(prompt).toHaveBeenCalledTimes(2);
     expect(onTranslated).toHaveBeenCalledWith(
       expect.objectContaining({ id: 2 }),
-      "ローマです",
+      "ローマンです",
     );
 
     engine.destroy();
@@ -1130,7 +1176,7 @@ describe("TranslationEngine masking ladder", () => {
     ]);
     expect(onTranslated).toHaveBeenCalledWith(
       expect.objectContaining({ id: 21 }),
-      "ローマです",
+      "ローマンです",
     );
 
     engine.destroy();
@@ -1246,7 +1292,7 @@ describe("TranslationEngine masking ladder", () => {
     expect(prompt).toHaveBeenCalledTimes(2);
     expect(onTranslated).toHaveBeenCalledWith(
       expect.objectContaining({ id: 24 }),
-      "ローマです",
+      "ローマンです",
     );
     expect(
       onTranslated,
@@ -1355,7 +1401,7 @@ describe("TranslationEngine masking ladder", () => {
     );
     expect(onTranslated).toHaveBeenCalledWith(
       expect.objectContaining({ id: 2 }),
-      "ローマです",
+      "ローマンです",
     );
 
     engine.destroy();

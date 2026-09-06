@@ -126,6 +126,7 @@ function createRescueHarness(
     _prompt: string,
   ) => Promise<string> = async () =>
     "ここです",
+  properNouns: string[] = ["Roman"],
 ) {
   const prompt = vi.fn(promptRespond);
   const translator = {
@@ -173,7 +174,7 @@ function createRescueHarness(
       requestId: "request-63",
       getContext: () => ({
         recentPairs: [],
-        properNouns: ["Roman"],
+        properNouns,
       }),
       requestContentTranslation,
       onTranslated(line, ja, rung) {
@@ -770,6 +771,65 @@ describe(
 
     it.each([
       {
+        label: "with page evidence",
+        text: "Roman will map wide regions of the sky.",
+        properNouns: ["Roman Space Telescope"],
+        expected: "ローマン宇宙望遠鏡は観測します。",
+        corrected: true,
+      },
+      {
+        label: "without page evidence",
+        text: "NASA engineers discussed Roman after final checks.",
+        properNouns: [],
+        expected: "ローマ宇宙望遠鏡は観測します。",
+        corrected: false,
+      },
+    ])(
+      "handles rejected Roman forms $label",
+      async ({ text, properNouns, expected, corrected }) => {
+        const harness = createRescueHarness(
+          async () => "",
+          async () => ({ available: false, ja: "" }),
+          async () => "ローマ宇宙望遠鏡は観測します。",
+          properNouns,
+        );
+
+        await harness.engine.initialize();
+        await translateRescueClause(harness.engine, 71, text);
+
+        expect(harness.prompt).toHaveBeenCalledTimes(2);
+        expect(harness.onTranslated).toHaveBeenCalledWith(
+          expect.objectContaining({ id: 71, rung: "lm-unmasked" }),
+          expected,
+        );
+        const logs = harness.onDevLog.mock.calls
+          .map(([message]) => message)
+          .filter(({ data }) => data?.kind === "rejected-form-corrected");
+        expect(logs).toHaveLength(corrected ? 1 : 0);
+
+        if (corrected) {
+          expect(logs[0]).toEqual(expect.objectContaining({
+            data: expect.objectContaining({
+              kind: "rejected-form-corrected",
+              lineId: 71,
+              term: "Roman",
+              before: "ローマ",
+              after: "ローマン",
+            }),
+          }));
+          expect(isM1Message(logs[0])).toBe(true);
+          expect(isM1Message({
+            ...logs[0],
+            data: { ...logs[0].data, before: 1 },
+          })).toBe(false);
+        }
+
+        harness.engine.destroy();
+      },
+    );
+
+    it.each([
+      {
         rung: "lm-unmasked",
         promptResponses: ["ここです", "ローマです", "%%1%%です"],
         nextPromptIndex: 2,
@@ -821,7 +881,7 @@ describe(
         expect(harness.onTranslated).toHaveBeenNthCalledWith(
           1,
           expect.objectContaining({ id: 41, rung }),
-          "ローマです",
+          "ローマンです",
         );
         expect(
           harness.onTranslated.mock.calls[0]?.[0],

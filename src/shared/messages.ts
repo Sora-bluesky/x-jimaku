@@ -269,7 +269,8 @@ export type OffDevLogKind =
   | "passthrough"
   | "queue-drop"
   | "clause-timing"
-  | "placeholder-survival";
+  | "placeholder-survival"
+  | "rejected-form-corrected";
 
 export type ClauseTimingOutcome =
   | "translated"
@@ -289,6 +290,9 @@ export interface OffDevLogData {
   returned?: number;
   response?: string;
   refusal?: string;
+  term?: string;
+  before?: string;
+  after?: string;
 }
 
 export interface OffDevLogMessage {
@@ -796,7 +800,9 @@ export function isM1Message(
               value.data.kind ===
                 "clause-timing" ||
               value.data.kind ===
-                "placeholder-survival"
+                "placeholder-survival" ||
+              value.data.kind ===
+                "rejected-form-corrected"
             ) &&
             typeof value.data.requestId ===
               "string" &&
@@ -815,6 +821,15 @@ export function isM1Message(
               value.data.path === undefined ||
               isTranslationPath(
                 value.data.path,
+              )
+            ) &&
+            (
+              value.data.kind !==
+                "rejected-form-corrected" ||
+              (
+                typeof value.data.term === "string" &&
+                typeof value.data.before === "string" &&
+                typeof value.data.after === "string"
               )
             ) &&
             (

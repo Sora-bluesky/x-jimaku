@@ -26,10 +26,13 @@ import {
   renderNameTerm,
   selectGlossaryMatches,
 } from "./glossary";
+import { NAME_TERMS } from "./glossary.data";
 import {
+  correctRejectedForms,
   countIntactPlaceholders,
   createMaskPlan,
   explainRestoreRefusal,
+  findNonOverlappingOccurrences,
   remaskPlannedTerms,
   restoreMaskedTranslation,
 } from "./term-masking";
@@ -1335,8 +1338,15 @@ export class TranslationEngine {
         );
 
       if (unmaskedRescued !== null) {
+        const corrected =
+          this.correctUnmaskedRetryResult(
+            unmaskedRescued,
+            request,
+            lineId,
+            attempt,
+          );
         return {
-          ...unmaskedRescued,
+          ...corrected,
           keepOutOfHistory: true,
         };
       }
@@ -1348,7 +1358,12 @@ export class TranslationEngine {
         );
 
       if (unmaskedLanguageModel !== null) {
-        return unmaskedLanguageModel;
+        return this.correctUnmaskedRetryResult(
+          unmaskedLanguageModel,
+          request,
+          lineId,
+          attempt,
+        );
       }
     }
 
@@ -1593,6 +1608,57 @@ export class TranslationEngine {
       this.assertAttemptCurrent(attempt);
       return null;
     }
+  }
+
+  private correctUnmaskedRetryResult(
+    result: TranslationAttemptResult,
+    request: MaskedTranslationLine,
+    lineId: number,
+    attempt: TranslationAttempt,
+  ): TranslationAttemptResult {
+    const context = this.readContext();
+    // Every opted-in row, not the prompt's selection: that one keeps only
+    // the longest match, so Roman disappears behind Roman Space Telescope
+    // and the retry's ローマ would go uncorrected. correctRejectedForms
+    // checks that the term occurs in the clause.
+    const rows = NAME_TERMS.filter(
+      (row) => row.correct === true,
+    );
+    const corrected = correctRejectedForms(
+      result.ja,
+      request.original,
+      rows,
+      (row) =>
+        row.ambiguous !== true ||
+        findNonOverlappingOccurrences(
+          request.original,
+          [row.term],
+        ).some((occurrence) =>
+          allowKeepLatinMaskOccurrence(
+            request.original,
+            occurrence,
+            context.properNouns,
+          )
+        ),
+    );
+
+    for (const correction of corrected.corrections) {
+      this.emitDevLog(
+        {
+          level: "info",
+          tag: "translate",
+          message: "rejected form corrected",
+          data: {
+            kind: "rejected-form-corrected",
+            lineId,
+            ...correction,
+          },
+        },
+        attempt,
+      );
+    }
+
+    return { ...result, ja: corrected.ja };
   }
 
   private recordPlaceholderSurvival(

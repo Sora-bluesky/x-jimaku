@@ -90,3 +90,34 @@ system prompt は `%%N%%` を一度も説明していない（`translate.ts:177-
   `render: "ja"` のまま**マスク対象外**の印（`maskable: false`）にする案へ切り替える。
 - 部分復元（`ローマン Space Telescope`）の頻度は未計測。after の走行で `response` から数え、
   目立てば復元検査に「復元後に ASCII の大文字語が残る」を足すかを別に決める。
+
+## 6. 再試行の出力の決定的補正（2026-09-06 sora 裁定・Codex astra DO-WITH-GUARD）
+
+§3 の規則（PR #105）と、占位子を失った訳を `[直前の文脈]` に入れない変更（PR #106）で、
+`ローマ` は 15/49 → 2/58 になった。残りは占位子を失った後の unmasked 再試行が書くもので、
+プロンプト側は打ち止め（system prompt に `%%N%%` の説明 = 効果なし 1 1 0 0 2 / `[定訳]` に
+「とは書かない」= 逆効果 2 0 0 2 4）。正本の閉じる条件（A-1 = 0）に届かせるため、
+再試行の出力に限って表の `rejected` 形を `ja` に置き換える。
+
+規則:
+
+- 対象は `rescueLanguageModelLine` の unmasked 再試行（Translator 再試行と LanguageModel 再試行）が
+  **成功して返す `ja`** だけ。masked 経路（占位子が `ja` に復元される）と、計画が無かった行、
+  passthrough には触れない。
+- 対象の行は `NAME_TERMS` で `render: "ja"` かつ **`correct: true`** を明示した行だけ。`rejected` は
+  検出用のまま（`glossary.data.ts` のコメントもそう直す）。`correct` は「この行の rejected 形は
+  文中でこの名前以外を指さない」という宣言で、行ごとに出典と一緒に決める。
+- 置換は、その行の `term` が原文の節に出ているときだけ。`rejected` の形を長い順に、全角・半角の
+  中点と長音を含めた完全一致で、出現ごとに `ja` へ。`ja` が既に含まれる範囲は先にマスクして
+  置換しない（`ローマン` の中の `ローマ` を二重に触らない）。
+- **曖昧行（`ambiguous: true`）は、同じ節で `allowKeepLatinMaskOccurrence` が真になる出現があるときだけ**
+  （ページがその名前を名指す / 直後に版番号 / 同族の隣接）。`Roman` は tts2 のページが
+  `Roman Space Telescope` を名指すので通る。「Roman from Rome」のような一般語との共存は、
+  この条件では守れない（Codex 指摘）。頻度は未計測なので、補正した行を `placeholder-survival` と
+  同じ devLog に `kind: "rejected-form-corrected"`（lineId・term・before・after）で残し、
+  走行で見えるようにする。
+- 補正は `terminal` の outcome・`fallback` フラグ・履歴（PR #106 の除外）に影響しない。
+
+計測: `cc3ec08`（H3 の 5 走行、`ローマ` 0 2 0 0 0）を before に 5 走行。受け入れは A-1 = 0（全走行）と
+A-2 / A-4 / A-5 に後退の証拠なし、devLog の補正件数が `ローマ` の減少分と一致すること
+（補正が無いのに減った、補正したのに残った、はどちらも別要因）。

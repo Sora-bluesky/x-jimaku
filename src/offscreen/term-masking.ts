@@ -1,3 +1,5 @@
+import type { NameTerm } from "./glossary.data";
+
 export const MAX_MASKED_OCCURRENCES = 4;
 export const MIN_REMAINING_CONTENT_WORDS = 3;
 
@@ -444,6 +446,54 @@ export function remaskPlannedTerms(
   );
 }
 
+export function correctRejectedForms(
+  ja: string,
+  original: string,
+  rows: readonly NameTerm[],
+  allow: (row: NameTerm) => boolean,
+): { ja: string; corrections: { term: string; before: string; after: string }[] } {
+  let corrected = ja;
+  const corrections: { term: string; before: string; after: string }[] = [];
+
+  for (const row of rows) {
+    if (
+      row.render !== "ja" ||
+      row.correct !== true ||
+      row.ja === undefined ||
+      row.rejected === undefined ||
+      row.rejected.length === 0 ||
+      findNonOverlappingOccurrences(original, [row.term]).length === 0 ||
+      !allow(row)
+    ) {
+      continue;
+    }
+
+    const accepted = row.ja;
+    const rejected = Array.from(
+      new Set(row.rejected.map(({ form }) => form).filter((form) => form !== "")),
+    ).sort((left, right) => right.length - left.length);
+
+    if (rejected.length === 0) {
+      continue;
+    }
+
+    const pattern = new RegExp(
+      [accepted, ...rejected].map(escapeRegExp).join("|"),
+      "gu",
+    );
+    corrected = corrected.replace(pattern, (before) => {
+      if (before === accepted) {
+        return before;
+      }
+
+      corrections.push({ term: row.term, before, after: accepted });
+      return accepted;
+    });
+  }
+
+  return { ja: corrected, corrections };
+}
+
 function normalizeTerms(
   terms: readonly string[],
 ): string[] {
@@ -466,7 +516,7 @@ function findAllOccurrences(
   return findOccurrences(text, terms, true);
 }
 
-function findNonOverlappingOccurrences(
+export function findNonOverlappingOccurrences(
   text: string,
   terms: readonly string[],
 ): LocatedTerm[] {
