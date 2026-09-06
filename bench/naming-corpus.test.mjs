@@ -28,6 +28,17 @@ const romanJa = {
   ja: "ローマン宇宙望遠鏡",
   rejected: [],
 };
+const goddardJaRow = {
+  term: "Goddard",
+  render: "ja",
+  ja: "ゴダード",
+  rejected: [],
+};
+const nasaLatinRow = {
+  term: "NASA",
+  render: "latin",
+  rejected: [],
+};
 
 function source(
   id,
@@ -103,6 +114,21 @@ function classifyFixture(
     ],
   });
   return classifyName(buildUnits(run), name);
+}
+
+function analyzeNestedNames(
+  output,
+  tableRows = [goddardJaRow],
+) {
+  const line = source(1, "NASA Goddard");
+  return analyzeCurrent({
+    ...newRun({
+      lines: [line],
+      pages: [page("1:0", [line], output)],
+    }),
+    contextTerms: ["NASA Goddard"],
+    termsMode: "with",
+  }, tableRows).naming.names;
 }
 
 describe("parseArgs", () => {
@@ -402,6 +428,46 @@ describe("classifyName", () => {
   });
 });
 
+describe("page-derived names", () => {
+  it("records nested Japanese substitutions in the expected form", () => {
+    const result =
+      analyzeNestedNames("NASA ゴダード")["NASA Goddard"];
+
+    expect(result.expected).toBe("NASA ゴダード");
+    expect(result.nestedJa).toEqual([
+      { term: "Goddard", ja: "ゴダード" },
+    ]);
+  });
+
+  it.each([
+    "NASAゴダード",
+    "NASA ゴダード",
+  ])("classifies %s as expected", (output) => {
+    const result = analyzeNestedNames(output)["NASA Goddard"];
+
+    expect(result.classes.expected.count).toBe(1);
+    expect(result.classes.wrongKnown.count).toBe(0);
+  });
+
+  it("keeps another mixed form as wrongKnown", () => {
+    const result =
+      analyzeNestedNames("NASA ゴッダード")["NASA Goddard"];
+
+    expect(result.classes.expected.count).toBe(0);
+    expect(result.classes.wrongKnown.count).toBe(1);
+  });
+
+  it("keeps NASA expected when the nested page name is present", () => {
+    const nasa = analyzeNestedNames(
+      "NASA ゴダード",
+      [goddardJaRow, nasaLatinRow],
+    ).NASA;
+
+    expect(nasa.classes.expected.count).toBe(1);
+    expect(nasa.classes.wrongKnown.count).toBe(0);
+  });
+});
+
 describe("set checks", () => {
   it("excludes only pages whose source ids are all pre-cut", () => {
     const eighth = source(8, "Roman");
@@ -582,6 +648,34 @@ describe("assessChange", () => {
   });
 });
 
+describe("script-mixed span", () => {
+  it("reports the name span, not the whole clause, and reads the expected form", () => {
+    const definition = {
+      term: "NASA Goddard",
+      render: "latin",
+      expected: "NASA ゴダード",
+      pageDerived: true,
+    };
+    const unit = (output) => [{
+      lines: [{ key: "1", text: "at NASA Goddard, Roman will map", rung: "masked" }],
+      output,
+    }];
+    const spaced = classifyName(
+      unit("数年のテストを経て、NASA ゴダード ローマンは広大な宇宙の領域を地図化します。"),
+      definition,
+    );
+    expect(spaced.forms).toEqual({ "NASA ゴダード": 1 });
+    expect(spaced.classes.expected.count).toBe(1);
+    expect(spaced.classes.wrongKnown.count).toBe(0);
+
+    const runOn = classifyName(
+      unit("NASA ゴダードローマンは"),
+      definition,
+    );
+    expect(Object.keys(runOn.forms)).toEqual(["NASA ゴダードローマン"]);
+    expect(runOn.classes.wrongKnown.count).toBe(1);
+  });
+});
 describe("takeRun", () => {
   it("takes a run whose only error is a display gate", () => {
     expect(takeRun({

@@ -167,7 +167,7 @@ export function restoreMaskedTranslation(
 
     if (previousRenderEndsInJapanese) {
       literal = literal.replace(
-        /^ +(?=[\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}ー々])/u,
+        /^ +(?=\p{Script=Hiragana})/u,
         "",
       );
     }
@@ -195,8 +195,10 @@ export function restoreMaskedTranslation(
         /^[\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}ー々]/u
           .test(entry.render)
       ) {
+        // Only a particle or verb ending (hiragana) closes the gap; a space
+        // between two names or before a kanji word stays.
         restored = restored.replace(
-          /(?<=[\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}ー々]) +$/u,
+          /(?<=\p{Script=Hiragana}) +$/u,
           "",
         );
       }
@@ -214,7 +216,7 @@ export function restoreMaskedTranslation(
 
   if (previousRenderEndsInJapanese) {
     tail = tail.replace(
-      /^ +(?=[\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}ー々])/u,
+      /^ +(?=\p{Script=Hiragana})/u,
       "",
     );
   }

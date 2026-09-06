@@ -544,6 +544,25 @@ describe("term masking", () => {
     ).toBe("Claude team");
   });
 
+  it("keeps the space between two restored names and drops it before a particle", () => {
+    const plan = createMaskPlan(
+      "at NASA Goddard, Roman will map the sky",
+      ["NASA Goddard", "Roman"],
+      KEEP_LATIN_ALL_TERMS,
+      undefined,
+      renderNameTerm,
+    );
+    const numbers = plan.maskPlan?.entries.map(
+      (entry) => `${entry.number}:${entry.render}`,
+    );
+    expect(numbers).toEqual(["1:NASA", "2:ゴダード", "3:ローマン"]);
+    expect(
+      restoreMaskedTranslation(
+        "%%1%% %%2%% %%3%%は空を地図化します",
+        plan.maskPlan,
+      ),
+    ).toBe("NASA ゴダード ローマンは空を地図化します");
+  });
   it("does not mask Roman history and masks the telescope as one term", () => {
     const history = "Roman history";
     const telescope =
