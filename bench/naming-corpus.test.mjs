@@ -648,6 +648,17 @@ describe("assessChange", () => {
   });
 });
 
+describe("glued katakana after a whole Latin name", () => {
+  it("reads NASAゴダード as NASA intact, not as a mixed form of NASA", () => {
+    const nasa = { term: "NASA", render: "latin", rejected: [] };
+    const result = classifyName([{
+      lines: [{ key: "1", text: "at NASA Goddard, Roman will map", rung: "masked" }],
+      output: "NASAゴダードでのテストを経て",
+    }], nasa);
+    expect(result.classes.expected.count).toBe(1);
+    expect(result.classes.wrongKnown.count).toBe(0);
+  });
+});
 describe("script-mixed span", () => {
   it("reports the name span, not the whole clause, and reads the expected form", () => {
     const definition = {

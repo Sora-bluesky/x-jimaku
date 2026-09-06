@@ -195,7 +195,16 @@ function scriptMixedForms(text, term) {
       latinParts.some((part) =>
         termLower.includes(part.toLowerCase()),
       );
-    if (hasNonLatinForeign || hasNameLatin) {
+    // Japanese sets a Latin name flush against the next katakana word
+    // (NASAゴダード). When the Latin part is the whole name, the name
+    // itself is intact and the token is not a mixed form of it.
+    const latinIsWholeName =
+      latinParts.length === 1
+      && latinParts[0].toLowerCase() === termLower;
+    if (
+      hasNonLatinForeign
+      || (hasNameLatin && !latinIsWholeName)
+    ) {
       forms.push(token);
     }
   }
