@@ -205,13 +205,24 @@ describe("OFF_DEV_LOG placeholder-survival", () => {
       path: "language-model",
       sent: 2,
       returned: 1,
+      response: "%%1%%です",
+      refusal: "missing",
     },
   };
 
-  it("accepts a survival record", () => {
+  it("accepts a survival record and rejects an unknown refusal", () => {
     expect(isM1Message(survival)).toBe(
       true,
     );
+    expect(
+      isM1Message({
+        ...survival,
+        data: {
+          ...survival.data,
+          refusal: "invalid",
+        },
+      }),
+    ).toBe(false);
   });
 
   it("rejects a survival record without counts", () => {

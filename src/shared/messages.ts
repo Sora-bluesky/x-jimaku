@@ -287,6 +287,8 @@ export interface OffDevLogData {
   deadlineExpired?: boolean;
   sent?: number;
   returned?: number;
+  response?: string;
+  refusal?: string;
 }
 
 export interface OffDevLogMessage {
@@ -879,7 +881,28 @@ export function isM1Message(
                 value.data.returned >=
                   0 &&
                 value.data.returned <=
-                  value.data.sent
+                  value.data.sent &&
+                (
+                  value.data.response ===
+                    undefined ||
+                  typeof value.data.response ===
+                    "string"
+                ) &&
+                (
+                  value.data.refusal ===
+                    undefined ||
+                  value.data.refusal === "none" ||
+                  value.data.refusal ===
+                    "unknown-number" ||
+                  value.data.refusal ===
+                    "missing" ||
+                  value.data.refusal ===
+                    "duplicate" ||
+                  value.data.refusal ===
+                    "stray-marker" ||
+                  value.data.refusal ===
+                    "bad-response"
+                )
               )
             )
           )

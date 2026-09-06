@@ -239,6 +239,57 @@ export function restoreMaskedTranslation(
   return restored;
 }
 
+export function explainRestoreRefusal(
+  output: string,
+  maskPlan: MaskPlan | null,
+): "none" | "unknown-number" | "missing" | "duplicate" | "stray-marker" {
+  if (maskPlan === null) {
+    return "none";
+  }
+
+  const plannedNumbers = maskPlan.entries.map(
+    (entry) => String(entry.number),
+  );
+  const returnedNumbers = Array.from(
+    output.matchAll(placeholderRegex()),
+    (match) =>
+      asciiPlaceholderNumber(
+        match[1] ?? "",
+      ),
+  );
+
+  if (returnedNumbers.some(
+    (number) => !plannedNumbers.includes(number),
+  )) {
+    return "unknown-number";
+  }
+
+  if (plannedNumbers.some(
+    (number) => !returnedNumbers.includes(number),
+  )) {
+    return "missing";
+  }
+
+  if (returnedNumbers.some(
+    (number, index) =>
+      returnedNumbers.indexOf(number) !== index,
+  )) {
+    return "duplicate";
+  }
+
+  const remaining =
+    output.replace(placeholderRegex(), "");
+
+  if (
+    remaining.includes("%%") ||
+    remaining.includes("％％")
+  ) {
+    return "stray-marker";
+  }
+
+  return "none";
+}
+
 export function countIntactPlaceholders(
   output: string,
   maskPlan: MaskPlan | null,

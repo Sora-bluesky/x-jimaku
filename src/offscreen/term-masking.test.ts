@@ -20,6 +20,7 @@ import { NAME_TERMS } from "./glossary.data";
 import {
   countIntactPlaceholders,
   createMaskPlan,
+  explainRestoreRefusal,
   MAX_MASKED_OCCURRENCES,
   remaskPlannedTerms,
   restoreMaskedTranslation,
@@ -816,6 +817,29 @@ describe("term masking", () => {
   });
 
   it.each([
+    ["unknown-number", "%%2%%"],
+    ["missing", "ここです"],
+    ["duplicate", "%%1%%%%1%%"],
+    ["stray-marker", "%%1%%%%x%%"],
+    ["none", "%%1%%"],
+  ])(
+    "explains a %s restore result",
+    (refusal, output) => {
+      const result = createMaskPlan(
+        "Roman is here",
+        ["Roman"],
+      );
+
+      expect(
+        explainRestoreRefusal(
+          output,
+          result.maskPlan,
+        ),
+      ).toBe(refusal);
+    },
+  );
+
+  it.each([
     ["unknown number", "%%2%%です"],
     ["duplicate number", "%%1%%%%1%%です"],
     ["missing number", "ここです"],
@@ -1011,6 +1035,8 @@ describe("TranslationEngine masking ladder", () => {
           path: "language-model",
           sent: 1,
           returned: 0,
+          response: "ここです",
+          refusal: "missing",
         },
       },
     ]);
@@ -1049,7 +1075,7 @@ describe("TranslationEngine masking ladder", () => {
           "placeholder-survival",
       );
 
-    expect(survival[0]?.data).toEqual({
+    expect(survival[0]?.data).toMatchObject({
       kind: "placeholder-survival",
       requestId: "request-mask",
       lineId: 22,
@@ -1063,7 +1089,7 @@ describe("TranslationEngine masking ladder", () => {
 
   it("restores a fullwidth placeholder without retrying", async () => {
     const prompt = installLanguageModel(
-      async () => "％％1％％です",
+      async () => "```\n％％1％％です\n```",
     );
     const onTranslated = vi.fn();
     const onDevLog = vi.fn();
@@ -1101,6 +1127,8 @@ describe("TranslationEngine masking ladder", () => {
       path: "language-model",
       sent: 1,
       returned: 1,
+      response: "％％1％％です",
+      refusal: "none",
     });
 
     engine.destroy();

@@ -29,6 +29,7 @@ import {
 import {
   countIntactPlaceholders,
   createMaskPlan,
+  explainRestoreRefusal,
   remaskPlannedTerms,
   restoreMaskedTranslation,
 } from "./term-masking";
@@ -1051,13 +1052,7 @@ export class TranslationEngine {
       normalizeLanguageModelResponse(
         rawResponse,
       );
-    this.recordPlaceholderSurvival(
-      normalized,
-      request,
-      lineId,
-      "language-model",
-      attempt,
-    );
+
     const restored =
       restoreMaskedTranslation(
         normalized,
@@ -1065,6 +1060,13 @@ export class TranslationEngine {
       );
 
     if (restored === null) {
+      this.recordPlaceholderSurvival(
+        normalized,
+        request,
+        lineId,
+        "language-model",
+        attempt,
+      );
       console.info(
         "[translate]",
         "LanguageModel placeholder verification failed; using line rescue",
@@ -1082,7 +1084,7 @@ export class TranslationEngine {
       );
     }
 
-    if (
+    const badResponse =
       isBadLanguageModelResponse(
         restored,
         request.original,
@@ -1094,8 +1096,17 @@ export class TranslationEngine {
             ) ?? []
           ),
         ],
-      )
-    ) {
+      );
+    this.recordPlaceholderSurvival(
+      normalized,
+      request,
+      lineId,
+      "language-model",
+      attempt,
+      badResponse ? "bad-response" : "none",
+    );
+
+    if (badResponse) {
       console.info(
         "[translate]",
         "LanguageModel returned an invalid translation; using line rescue",
@@ -1579,6 +1590,10 @@ export class TranslationEngine {
     lineId: number,
     path: TranslationPath,
     attempt: TranslationAttempt,
+    refusal: string = explainRestoreRefusal(
+      output,
+      request.maskPlan,
+    ),
   ): void {
     if (request.maskPlan === null) {
       return;
@@ -1602,6 +1617,9 @@ export class TranslationEngine {
           path,
           sent,
           returned,
+          response: Array.from(output)
+            .slice(0, 200).join(""),
+          refusal,
         },
       },
       attempt,
