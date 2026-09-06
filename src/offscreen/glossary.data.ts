@@ -1,14 +1,13 @@
 /**
  * Terminology for English-to-Japanese captions.
  *
- * Two rules, both from the project owner: names of models, products and
- * organisations stay in Latin script, and technical terms use the Japanese a
- * Japanese engineer would actually write.
+ * A Japanese source decides each name row. A sourced Japanese form is rendered
+ * in Japanese; keeping the Latin spelling is also a decision that needs a
+ * source. Legacy Latin rows carry an explicit migration marker until their
+ * per-row sources are verified.
  *
- * Every entry marked `verified` was checked against a page that was opened —
- * mostly Anthropic's own Japanese documentation at platform.claude.com/docs/ja.
- * Entries marked `conventional` are established practice in Japanese technical
- * writing but were not pinned to a specific page. Nothing here is a guess.
+ * Technical terms remain separate because they are context-dependent guidance,
+ * not deterministic name replacements.
  *
  * The failures this exists to stop were all measured in bench/results: Opus
  * came out as オプス, オパウス and even オпус (mixed Cyrillic); Hugging Face as
@@ -16,62 +15,111 @@
  * as ゴダード宇宙科学研究所, an institute that does not exist.
  */
 
-export interface KeepLatinTerm {
-  readonly term: string;
-  /**
-   * True when the word is also ordinary English and the everyday sense is
-   * plausible in what this extension captions.
-   *
-   * Anthropic's model names are all common nouns, and they were flagged here
-   * at first for that reason. Measurement changed the call: the model names
-   * are what a viewer actually reported seeing mangled, and the videos this
-   * runs on are about AI, where "opus" and "haiku" in their everyday senses
-   * effectively do not occur. They are now held in Latin unconditionally
-   * (project owner's decision, 2026-09-03). The cost is that a video about
-   * poetry would render "Haiku" in Latin.
-   *
-   * What is left flagged are the words whose everyday sense does turn up in
-   * this material: Roman as an adjective, Meta as a prefix, and Cursor as
-   * an on-screen cursor. Clerk is held in Latin unconditionally: the
-   * ordinary noun does not occur in this material.
-   */
-  readonly ambiguous?: true;
+export interface RejectedForm {
+  readonly form: string;
+  readonly reason: string;
 }
 
-export const KEEP_LATIN_TERMS: readonly KeepLatinTerm[] = [
-  { term: "Anthropic" },
-  { term: "Claude" },
-  { term: "Opus" },
-  { term: "Sonnet" },
-  { term: "Haiku" },
-  { term: "Fable" },
-  { term: "Mythos" },
-  { term: "OpenAI" },
-  { term: "ChatGPT" },
-  { term: "GPT" },
-  { term: "Codex", ambiguous: true },
-  { term: "Google" },
-  { term: "DeepMind" },
-  { term: "Gemini", ambiguous: true },
-  { term: "xAI" },
-  { term: "Grok" },
-  { term: "Meta", ambiguous: true },
-  { term: "Llama", ambiguous: true },
-  { term: "Mistral", ambiguous: true },
-  { term: "Cursor", ambiguous: true },
-  { term: "GitHub" },
-  { term: "Copilot", ambiguous: true },
-  { term: "Hugging Face" },
-  { term: "NVIDIA" },
-  { term: "Clerk" },
-  { term: "NASA" },
-  { term: "Goddard" },
-  { term: "Roman", ambiguous: true },
-  { term: "Kennedy Space Center" },
-  { term: "API" },
-  { term: "LLM" },
-  { term: "RAG", ambiguous: true },
-  { term: "GPU" },
+export interface NameTerm {
+  readonly term: string;
+  readonly render: "latin" | "ja";
+  readonly ja?: string;
+  readonly ambiguous?: true;
+  readonly confidence: "verified" | "conventional";
+  readonly source: string;
+  /**
+   * Known wrong forms used only for regression detection. The aggregator masks
+   * `ja` before matching these forms, so a rejected substring cannot count
+   * inside the accepted rendering.
+   */
+  readonly rejected?: readonly RejectedForm[];
+}
+
+export const LEGACY_SOURCE =
+  "unverified: carried over from KEEP_LATIN_TERMS (2026-09-03); the header pointed at platform.claude.com/docs/ja without per-row URLs";
+
+export const NAME_TERMS: readonly NameTerm[] = [
+  { term: "Anthropic", render: "latin", confidence: "verified", source: LEGACY_SOURCE },
+  { term: "Claude", render: "latin", confidence: "verified", source: LEGACY_SOURCE },
+  { term: "Opus", render: "latin", confidence: "verified", source: LEGACY_SOURCE },
+  { term: "Sonnet", render: "latin", confidence: "verified", source: LEGACY_SOURCE },
+  { term: "Haiku", render: "latin", confidence: "verified", source: LEGACY_SOURCE },
+  { term: "Fable", render: "latin", confidence: "verified", source: LEGACY_SOURCE },
+  { term: "Mythos", render: "latin", confidence: "verified", source: LEGACY_SOURCE },
+  { term: "OpenAI", render: "latin", confidence: "verified", source: LEGACY_SOURCE },
+  { term: "ChatGPT", render: "latin", confidence: "verified", source: LEGACY_SOURCE },
+  { term: "GPT", render: "latin", confidence: "verified", source: LEGACY_SOURCE },
+  { term: "Codex", render: "latin", ambiguous: true, confidence: "verified", source: LEGACY_SOURCE },
+  { term: "Google", render: "latin", confidence: "verified", source: LEGACY_SOURCE },
+  { term: "DeepMind", render: "latin", confidence: "verified", source: LEGACY_SOURCE },
+  { term: "Gemini", render: "latin", ambiguous: true, confidence: "verified", source: LEGACY_SOURCE },
+  { term: "xAI", render: "latin", confidence: "verified", source: LEGACY_SOURCE },
+  { term: "Grok", render: "latin", confidence: "verified", source: LEGACY_SOURCE },
+  { term: "Meta", render: "latin", ambiguous: true, confidence: "verified", source: LEGACY_SOURCE },
+  { term: "Llama", render: "latin", ambiguous: true, confidence: "verified", source: LEGACY_SOURCE },
+  { term: "Mistral", render: "latin", ambiguous: true, confidence: "verified", source: LEGACY_SOURCE },
+  { term: "Cursor", render: "latin", ambiguous: true, confidence: "verified", source: LEGACY_SOURCE },
+  { term: "GitHub", render: "latin", confidence: "verified", source: LEGACY_SOURCE },
+  { term: "Copilot", render: "latin", ambiguous: true, confidence: "verified", source: LEGACY_SOURCE },
+  { term: "Hugging Face", render: "latin", confidence: "verified", source: LEGACY_SOURCE },
+  { term: "NVIDIA", render: "latin", confidence: "verified", source: LEGACY_SOURCE },
+  { term: "Clerk", render: "latin", confidence: "verified", source: LEGACY_SOURCE },
+  { term: "NASA", render: "latin", confidence: "verified", source: LEGACY_SOURCE },
+  {
+    term: "Nancy Grace Roman Space Telescope",
+    render: "ja",
+    ja: "ナンシー・グレイス・ローマン宇宙望遠鏡",
+    confidence: "conventional",
+    source: "https://www.isas.jaxa.jp/topics/003741.html",
+  },
+  {
+    term: "Roman Space Telescope",
+    render: "ja",
+    ja: "ローマン宇宙望遠鏡",
+    confidence: "conventional",
+    source: "https://www.isas.jaxa.jp/topics/003741.html",
+  },
+  {
+    term: "Roman",
+    render: "ja",
+    ja: "ローマン",
+    ambiguous: true,
+    confidence: "conventional",
+    source: "https://www.isas.jaxa.jp/topics/003741.html",
+    rejected: [
+      { form: "ローマ", reason: "誤義: 都市のローマ" },
+      { form: "ロマン", reason: "出典に無い綴り" },
+    ],
+  },
+  {
+    term: "Kennedy Space Center",
+    render: "ja",
+    ja: "ケネディ宇宙センター",
+    confidence: "conventional",
+    source: "https://spaceinfo.jaxa.jp/ja/ksc.html",
+  },
+  {
+    term: "Goddard Space Flight Center",
+    render: "ja",
+    ja: "ゴダード宇宙飛行センター",
+    confidence: "conventional",
+    source: "https://satnavi.jaxa.jp/gpmdpr_special/column/2013/post1118.html",
+  },
+  {
+    term: "Goddard",
+    render: "ja",
+    ja: "ゴダード",
+    confidence: "conventional",
+    source: "https://satnavi.jaxa.jp/gpmdpr_special/column/2013/post1118.html",
+    rejected: [
+      { form: "ゴッダード", reason: "出典に無い綴り" },
+      { form: "ゴッドダード", reason: "出典に無い綴り" },
+    ],
+  },
+  { term: "API", render: "latin", confidence: "verified", source: LEGACY_SOURCE },
+  { term: "LLM", render: "latin", confidence: "verified", source: LEGACY_SOURCE },
+  { term: "RAG", render: "latin", ambiguous: true, confidence: "verified", source: LEGACY_SOURCE },
+  { term: "GPU", render: "latin", confidence: "verified", source: LEGACY_SOURCE },
 ];
 
 export interface GlossaryTerm {

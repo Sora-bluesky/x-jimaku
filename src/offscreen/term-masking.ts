@@ -3,6 +3,7 @@ export const MAX_MASKED_OCCURRENCES = 4;
 export interface MaskPlanEntry {
   number: number;
   term: string;
+  render: string;
 }
 
 export interface MaskPlan {
@@ -28,12 +29,38 @@ export function createMaskPlan(
   allowGlossaryOccurrence?: (
     occurrence: LocatedTerm,
   ) => boolean,
+  renderGlossaryTerm: (
+    term: string,
+  ) => string = (term) => term,
 ): MaskedTranslationLine {
+  const glossaryOccurrences =
+    findNonOverlappingOccurrences(
+      original,
+      glossaryTerms,
+    ).filter(
+      (hit) =>
+        allowGlossaryOccurrence ===
+          undefined ||
+        allowGlossaryOccurrence(hit),
+    ).map((hit) => ({
+      ...hit,
+      render: renderGlossaryTerm(hit.term),
+    }));
   const pageOccurrences =
     findNonOverlappingOccurrences(
       original,
       properNouns,
-    );
+    ).filter(
+      (hit) =>
+        !glossaryOccurrences.some(
+          (table) =>
+            hit.start < table.end &&
+            hit.end > table.start,
+        ),
+    ).map((hit) => ({
+      ...hit,
+      render: hit.term,
+    }));
 
   if (
     pageOccurrences.length >
@@ -45,24 +72,6 @@ export function createMaskPlan(
       maskPlan: null,
     };
   }
-
-  const glossaryOccurrences =
-    findNonOverlappingOccurrences(
-      original,
-      glossaryTerms,
-    ).filter(
-      (hit) =>
-        !pageOccurrences.some(
-          (page) =>
-            hit.start < page.end &&
-            hit.end > page.start,
-        ) &&
-        (allowGlossaryOccurrence ===
-          undefined ||
-          allowGlossaryOccurrence(
-            hit,
-          )),
-    );
   const takenGlossary = [
     ...glossaryOccurrences,
   ]
@@ -98,6 +107,7 @@ export function createMaskPlan(
       (occurrence, index) => ({
         number: index + 1,
         term: occurrence.term,
+        render: occurrence.render,
       }),
     );
   const masked = replaceOccurrences(
@@ -140,31 +150,76 @@ export function restoreMaskedTranslation(
   );
   let unknownNumber = false;
 
-  const restored = output.replace(
+  let restored = "";
+  let cursor = 0;
+  let previousRenderEndsInJapanese = false;
+
+  for (const match of output.matchAll(
     placeholderRegex(),
-    (
-      placeholder: string,
-      numberText: string,
-    ) => {
-      const numberKey =
-        asciiPlaceholderNumber(
-          numberText,
-        );
-      const entry =
-        entriesByNumber.get(numberKey);
+  )) {
+    const start = match.index;
 
-      if (entry === undefined) {
-        unknownNumber = true;
-        return placeholder;
-      }
+    if (start === undefined) {
+      continue;
+    }
 
+    let literal = output.slice(cursor, start);
+
+    if (previousRenderEndsInJapanese) {
+      literal = literal.replace(
+        /^ +(?=[\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}ー々])/u,
+        "",
+      );
+    }
+
+    restored += literal;
+
+    const numberKey =
+      asciiPlaceholderNumber(
+        match[1] ?? "",
+      );
+    const entry =
+      entriesByNumber.get(numberKey);
+
+    if (entry === undefined) {
+      unknownNumber = true;
+      restored += match[0];
+      previousRenderEndsInJapanese = false;
+    } else {
       counts.set(
         numberKey,
         (counts.get(numberKey) ?? 0) + 1,
       );
-      return entry.term;
-    },
-  );
+
+      if (
+        /^[\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}ー々]/u
+          .test(entry.render)
+      ) {
+        restored = restored.replace(
+          /(?<=[\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}ー々]) +$/u,
+          "",
+        );
+      }
+
+      restored += entry.render;
+      previousRenderEndsInJapanese =
+        /[\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}ー々]$/u
+          .test(entry.render);
+    }
+
+    cursor = start + match[0].length;
+  }
+
+  let tail = output.slice(cursor);
+
+  if (previousRenderEndsInJapanese) {
+    tail = tail.replace(
+      /^ +(?=[\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}ー々])/u,
+      "",
+    );
+  }
+
+  restored += tail;
 
   if (
     unknownNumber ||
@@ -246,10 +301,17 @@ export function remaskPlannedTerms(
     new Map<string, number[]>();
 
   for (const entry of maskPlan.entries) {
-    const numbers =
-      numbersByTerm.get(entry.term) ?? [];
-    numbers.push(entry.number);
-    numbersByTerm.set(entry.term, numbers);
+    const searchable =
+      entry.render === entry.term
+        ? [entry.term]
+        : [entry.term, entry.render];
+
+    for (const term of searchable) {
+      const numbers =
+        numbersByTerm.get(term) ?? [];
+      numbers.push(entry.number);
+      numbersByTerm.set(term, numbers);
+    }
   }
 
   const occurrences =

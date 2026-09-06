@@ -41,9 +41,10 @@ describe("selectGlossaryMatches", () => {
     expect(keepLatinTerms(
       "GitHub released Cursor",
     )).toEqual(["GitHub", "Cursor"]);
-    expect(ordinary.keepLatin).toEqual([
+    expect(ordinary.keepLatin).toHaveLength(1);
+    expect(ordinary.keepLatin[0]).toMatchObject(
       { term: "Cursor", ambiguous: true },
-    ]);
+    );
 
     const productPrompt =
       glossaryPromptBlocks(product).join("\n");
@@ -60,12 +61,14 @@ describe("selectGlossaryMatches", () => {
   });
 
   it("selects lowercase meta as the company entry without masking it", () => {
-    expect(
-      selectGlossaryMatches("meta learning")
-        .keepLatin,
-    ).toEqual([
+    const selected = selectGlossaryMatches(
+      "meta learning",
+    ).keepLatin;
+
+    expect(selected).toHaveLength(1);
+    expect(selected[0]).toMatchObject(
       { term: "Meta", ambiguous: true },
-    ]);
+    );
     expect(
       keepLatinTerms("Meta released Llama"),
     ).toEqual(["Meta", "Llama"]);
@@ -141,6 +144,22 @@ describe("selectGlossaryMatches", () => {
     ]);
   });
 
+  it("routes fixed Japanese names only to the fixed block", () => {
+    const prompt = glossaryPromptBlocks(
+      selectGlossaryMatches(
+        "Kennedy Space Center and Roman arrived.",
+      ),
+    ).join("\n");
+
+    expect(prompt).toContain(
+      "[定訳]\nKennedy Space Center = ケネディ宇宙センター\nRoman = ローマン",
+    );
+    expect(prompt).not.toContain("[原綴り]");
+    expect(prompt).not.toContain(
+      "モデル・製品・組織名のときだけ原綴り",
+    );
+  });
+
   it("adds no prompt section when the clause has no glossary term", () => {
     expect(
       selectGlossaryMatches("Hello everyone."),
@@ -159,17 +178,18 @@ describe("selectGlossaryMatches", () => {
 
 describe("keepLatinEntriesForTerms", () => {
   it("keeps conditional metadata and skips unknown terms", () => {
-    expect(
-      keepLatinEntriesForTerms([
-        "Claude",
-        "Roman",
-        "roman",
-        "U.S.",
-      ]),
-    ).toEqual([
-      { term: "Claude" },
-      { term: "Roman", ambiguous: true },
+    const entries = keepLatinEntriesForTerms([
+      "Claude",
+      "Roman",
+      "roman",
+      "U.S.",
     ]);
+
+    expect(
+      entries.map((entry) => entry.term),
+    ).toEqual(["Claude", "Roman"]);
+    expect(entries[1]?.ambiguous).toBe(true);
+    expect(entries[1]?.render).toBe("ja");
     expect(
       keepLatinEntriesForTerms([]),
     ).toEqual([]);
@@ -210,13 +230,11 @@ describe("KEEP_LATIN_MASK_TERMS", () => {
         term,
       );
       expect(
-        selectGlossaryMatches(term).keepLatin,
-      ).toEqual([{ term }]);
+        keepLatinTerms(term),
+      ).toEqual([term]);
       expect(
-        selectGlossaryMatches(
-          term.toLowerCase(),
-        ).keepLatin,
-      ).toEqual([{ term }]);
+        keepLatinTerms(term.toLowerCase()),
+      ).toEqual([term]);
     }
   });
 
@@ -225,11 +243,11 @@ describe("KEEP_LATIN_MASK_TERMS", () => {
       "Clerk",
     );
     expect(
-      selectGlossaryMatches("Clerk").keepLatin,
-    ).toEqual([{ term: "Clerk" }]);
+      keepLatinTerms("Clerk"),
+    ).toEqual(["Clerk"]);
     expect(
-      selectGlossaryMatches("clerk").keepLatin,
-    ).toEqual([{ term: "Clerk" }]);
+      keepLatinTerms("clerk"),
+    ).toEqual(["Clerk"]);
   });
 });
 

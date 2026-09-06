@@ -14,7 +14,9 @@ import {
   KEEP_LATIN_MASK_TERMS,
   KEEP_LATIN_MATCH_CAP,
   allowKeepLatinMaskOccurrence,
+  renderNameTerm,
 } from "./glossary";
+import { NAME_TERMS } from "./glossary.data";
 import {
   countIntactPlaceholders,
   createMaskPlan,
@@ -129,10 +131,15 @@ function keepLatinBlock(
     return "";
   }
 
-  const end = prompt.indexOf(
-    "[今訳す節]",
-    start,
+  // The block ends at the next header, whichever it is ([定訳], [用語],
+  // [直前の文脈] or [今訳す節]).
+  const nextHeader = prompt.indexOf(
+    "\n[",
+    start + 1,
   );
+  const end = nextHeader === -1
+    ? prompt.indexOf("[今訳す節]", start)
+    : nextHeader + 1;
 
   return prompt.slice(
     start,
@@ -143,8 +150,16 @@ function keepLatinBlock(
 function keepLatinCrowding(
   longerThan: string,
 ): string[] {
+  // Latin rows only: a fixed-Japanese row would land in [定訳], not [原綴り],
+  // and the crowding exists to fill the [原綴り] cap.
+  const latinTerms = new Set(
+    NAME_TERMS.filter(
+      (entry) => entry.render === "latin",
+    ).map((entry) => entry.term),
+  );
   return KEEP_LATIN_MASK_TERMS.filter(
     (term) =>
+      latinTerms.has(term) &&
       term.length > longerThan.length,
   )
     .sort(
@@ -207,6 +222,7 @@ function planKeepLatin(
         hit,
         properNouns,
       ),
+    renderNameTerm,
   );
 }
 
@@ -226,8 +242,8 @@ describe("term masking", () => {
       "%%1%% met %%2%%.",
     );
     expect(result.maskPlan?.entries).toEqual([
-      { number: 1, term: "Roman" },
-      { number: 2, term: "Roman" },
+      { number: 1, term: "Roman", render: "Roman" },
+      { number: 2, term: "Roman", render: "Roman" },
     ]);
   });
 
@@ -248,9 +264,10 @@ describe("term masking", () => {
       {
         number: 1,
         term: "Kennedy Space Center",
+        render: "Kennedy Space Center",
       },
-      { number: 2, term: "Kennedy" },
-      { number: 3, term: "U.S." },
+      { number: 2, term: "Kennedy", render: "Kennedy" },
+      { number: 3, term: "U.S.", render: "U.S." },
     ]);
   });
 
@@ -291,7 +308,7 @@ describe("term masking", () => {
       "%%1%% is here",
     );
     expect(result.maskPlan?.entries).toEqual([
-      { number: 1, term: "Claude" },
+      { number: 1, term: "Claude", render: "Claude" },
     ]);
     expect(
       restoreMaskedTranslation(
@@ -310,7 +327,7 @@ describe("term masking", () => {
       "The %%1%% premiered",
     );
     expect(result.maskPlan?.entries).toEqual([
-      { number: 1, term: "Opus" },
+      { number: 1, term: "Opus", render: "Opus" },
     ]);
   });
 
@@ -323,7 +340,7 @@ describe("term masking", () => {
       "the %%1%% opened",
     );
     expect(result.maskPlan?.entries).toEqual([
-      { number: 1, term: "Clerk" },
+      { number: 1, term: "Clerk", render: "Clerk" },
     ]);
   });
 
@@ -336,7 +353,7 @@ describe("term masking", () => {
       "a new version of %%1%%",
     );
     expect(result.maskPlan?.entries).toEqual([
-      { number: 1, term: "Opus" },
+      { number: 1, term: "Opus", render: "Opus" },
     ]);
     expect(
       restoreMaskedTranslation(
@@ -350,13 +367,13 @@ describe("term masking", () => {
     const opus = planKeepLatin("opus 4.5");
     expect(opus.masked).toBe("%%1%% 4.5");
     expect(opus.maskPlan?.entries).toEqual([
-      { number: 1, term: "Opus" },
+      { number: 1, term: "Opus", render: "Opus" },
     ]);
 
     const fable = planKeepLatin("fable 5.1");
     expect(fable.masked).toBe("%%1%% 5.1");
     expect(fable.maskPlan?.entries).toEqual([
-      { number: 1, term: "Fable" },
+      { number: 1, term: "Fable", render: "Fable" },
     ]);
 
     expect(
@@ -366,7 +383,7 @@ describe("term masking", () => {
       planKeepLatin("cursor 4.5").maskPlan
         ?.entries,
     ).toEqual([
-      { number: 1, term: "Cursor" },
+      { number: 1, term: "Cursor", render: "Cursor" },
     ]);
   });
 
@@ -387,7 +404,7 @@ describe("term masking", () => {
     expect(
       evidenced.maskPlan?.entries,
     ).toEqual([
-      { number: 1, term: "Meta" },
+      { number: 1, term: "Meta", render: "Meta" },
     ]);
     expect(
       restoreMaskedTranslation(
@@ -451,8 +468,8 @@ describe("term masking", () => {
     expect(
       result.maskPlan?.entries,
     ).toEqual([
-      { number: 1, term: "NASA" },
-      { number: 2, term: "Roman" },
+      { number: 1, term: "NASA", render: "NASA" },
+      { number: 2, term: "Roman", render: "ローマン" },
     ]);
     expect(
       planKeepLatin("NASA's Roman")
@@ -476,11 +493,58 @@ describe("term masking", () => {
     expect(
       result.maskPlan?.entries,
     ).toEqual([
-      { number: 1, term: "Cursor" },
+      { number: 1, term: "Cursor", render: "Cursor" },
     ]);
   });
 
-  it("does not mask Roman history or the Roman Space Telescope", () => {
+  it("lets the table override the same page-derived name", () => {
+    const result = createMaskPlan(
+      "Kennedy Space Center のチーム",
+      ["Kennedy Space Center"],
+      KEEP_LATIN_ALL_TERMS,
+      undefined,
+      renderNameTerm,
+    );
+
+    expect(result.masked).toBe(
+      "%%1%% のチーム",
+    );
+    expect(result.maskPlan?.entries).toEqual([
+      {
+        number: 1,
+        term: "Kennedy Space Center",
+        render: "ケネディ宇宙センター",
+      },
+    ]);
+    expect(
+      restoreMaskedTranslation(
+        "%%1%% のチーム",
+        result.maskPlan,
+      ),
+    ).toBe("ケネディ宇宙センターのチーム");
+    expect(
+      remaskPlannedTerms(
+        "ケネディ宇宙センターのチーム",
+        result.maskPlan!,
+      ),
+    ).toBe("%%1%%のチーム");
+
+    const latin = createMaskPlan(
+      "Claude team",
+      [],
+      KEEP_LATIN_ALL_TERMS,
+      undefined,
+      renderNameTerm,
+    );
+    expect(
+      restoreMaskedTranslation(
+        "%%1%% team",
+        latin.maskPlan,
+      ),
+    ).toBe("Claude team");
+  });
+
+  it("does not mask Roman history and masks the telescope as one term", () => {
     const history = "Roman history";
     const telescope =
       "the Roman Space Telescope";
@@ -492,13 +556,21 @@ describe("term masking", () => {
       masked: history,
       maskPlan: null,
     });
+    const telescopePlan =
+      planKeepLatin(telescope);
+
+    expect(telescopePlan.masked).toBe(
+      "the %%1%%",
+    );
     expect(
-      planKeepLatin(telescope),
-    ).toEqual({
-      original: telescope,
-      masked: telescope,
-      maskPlan: null,
-    });
+      telescopePlan.maskPlan?.entries,
+    ).toEqual([
+      {
+        number: 1,
+        term: "Roman Space Telescope",
+        render: "ローマン宇宙望遠鏡",
+      },
+    ]);
   });
 
   it("does not drop page nouns to make room for evidenced Cursor", () => {
@@ -786,8 +858,8 @@ describe("term masking", () => {
     );
 
     expect(result.maskPlan?.entries).toEqual([
-      { number: 1, term: "Opus" },
-      { number: 2, term: "Opus" },
+      { number: 1, term: "Opus", render: "Opus" },
+      { number: 2, term: "Opus", render: "Opus" },
     ]);
     expect(
       remaskPlannedTerms(
@@ -839,7 +911,7 @@ describe("TranslationEngine masking ladder", () => {
       );
       expect(onTranslated).toHaveBeenCalledWith(
         expect.objectContaining({ id: 1 }),
-        "Romanです",
+        "ローマンです",
       );
 
       engine.destroy();
@@ -993,7 +1065,7 @@ describe("TranslationEngine masking ladder", () => {
     expect(prompt).toHaveBeenCalledTimes(1);
     expect(onTranslated).toHaveBeenCalledWith(
       expect.objectContaining({ id: 23 }),
-      "Romanです",
+      "ローマンです",
     );
     expect(
       onDevLog.mock.calls
@@ -1045,13 +1117,13 @@ describe("TranslationEngine masking ladder", () => {
       onTranslated,
     ).not.toHaveBeenCalledWith(
       expect.objectContaining({ id: 24 }),
-      "コストはRomanです",
+      "コストはローマンです",
     );
 
     engine.destroy();
   });
 
-  it("names unmasked keep-Latin terms on LanguageModel retry", async () => {
+  it("puts a visible fixed Japanese name in the fixed block", async () => {
     const crowding = keepLatinCrowding(
       "Roman",
     );
@@ -1059,17 +1131,16 @@ describe("TranslationEngine masking ladder", () => {
       KEEP_LATIN_MATCH_CAP,
     );
 
-    const { first, retry } =
+    const { first } =
       await languageModelRetryPrompts(
         `${crowding.join(" ")} Roman arrived.`,
         ["Roman"],
       );
 
-    expect(first).not.toContain("Roman");
-    expect(keepLatinBlock(first)).not.toContain(
-      "Roman",
+    expect(first).toContain(
+      "[定訳]\nRoman = ローマン",
     );
-    expect(keepLatinBlock(retry)).toContain(
+    expect(keepLatinBlock(first)).not.toContain(
       "Roman",
     );
   });
@@ -1086,22 +1157,20 @@ describe("TranslationEngine masking ladder", () => {
     expect(first).not.toContain("Claude");
   });
 
-  it("keeps conditional phrasing for unmasked retry terms", async () => {
-    const crowding = keepLatinCrowding(
-      "Roman",
-    );
-    expect(crowding).toHaveLength(
-      KEEP_LATIN_MATCH_CAP,
-    );
-
+  it("keeps fixed Japanese retry terms out of Latin wording", async () => {
+    // The table now wins the mask slots, so a clause crowded with table
+    // terms would never mask the page-derived Roman. A plain clause does.
     const { retry } =
       await languageModelRetryPrompts(
-        `${crowding.join(" ")} Roman arrived.`,
+        "Roman arrived.",
         ["Roman"],
       );
 
-    expect(keepLatinBlock(retry)).toContain(
-      "モデル・製品・組織名のときだけ原綴り（一般語は訳す）: Roman",
+    expect(retry).toContain(
+      "[定訳]\nRoman = ローマン",
+    );
+    expect(keepLatinBlock(retry)).not.toContain(
+      "Roman",
     );
   });
 
@@ -1206,7 +1275,7 @@ describe("TranslationEngine masking ladder", () => {
     );
     expect(onTranslated).toHaveBeenCalledWith(
       expect.objectContaining({ id: 3 }),
-      "Romanです",
+      "ローマンです",
     );
 
     engine.destroy();
@@ -1258,12 +1327,12 @@ describe("TranslationEngine masking ladder", () => {
     expect(onTranslated).toHaveBeenNthCalledWith(
       1,
       expect.objectContaining({ id: 4 }),
-      "Roman NASA",
+      "ローマン NASA",
     );
     expect(onTranslated).toHaveBeenNthCalledWith(
       2,
       expect.objectContaining({ id: 5 }),
-      "Romanが去った",
+      "ローマンが去った",
     );
 
     engine.destroy();
