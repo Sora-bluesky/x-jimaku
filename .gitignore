@@ -1,0 +1,25 @@
+node_modules/
+dist/
+dist-zip/
+*.log
+.DS_Store
+
+# Internal dev docs (kept local, not published)
+HANDOFF.md
+docs/plan.md
+docs/plan-approved.md
+
+# Internal notes and machine-specific launch settings
+docs/internal/
+.claude/archive/
+.claude/launch.json
+
+# bench artifacts (local only)
+bench/work/
+bench/results/
+
+# Cloned upstream sources read for prior art. Never committed.
+.references/
+
+# Per-machine boards and notes for the operator session. Never committed.
+.claude/local/

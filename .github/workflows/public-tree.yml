@@ -1,0 +1,36 @@
+# This repository is public. Internal development notes and a local user name
+# previously leaked into tracked files. Check every push and pull request
+# to prevent those files and paths from being published again.
+name: Public tree
+
+on:
+  push:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node scripts/check-public-tree.mjs
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Scan full history for secrets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download v8.30.1 --repo gitleaks/gitleaks --pattern 'gitleaks_8.30.1_linux_x64.tar.gz' --pattern 'gitleaks_8.30.1_checksums.txt'
+          sha256sum --check --ignore-missing gitleaks_8.30.1_checksums.txt
+          tar -xzf gitleaks_8.30.1_linux_x64.tar.gz gitleaks
+          ./gitleaks git --redact --no-banner --log-opts="--all" .
