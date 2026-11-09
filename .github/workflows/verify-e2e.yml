@@ -1,0 +1,205 @@
+name: verify-e2e
+
+on:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify-e2e:
+    name: verify-e2e
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run build
+
+      - name: Allow Chrome user namespaces
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      - name: Install Chrome
+        run: |
+          npx --yes @puppeteer/browsers install chrome@stable \
+            --path "$HOME/.cache/puppeteer"
+          chrome_path="$(
+            find "$HOME/.cache/puppeteer/chrome" \
+              -type f -name chrome -perm -111 -print -quit
+          )"
+          if [[ -z "$chrome_path" ]]; then
+            echo "Installed Chrome executable was not found." >&2
+            exit 1
+          fi
+          echo "BENCH_CHROME=$chrome_path" >> "$GITHUB_ENV"
+
+      - name: Run bench smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          run_bench() {
+            local attempt="$1"
+            # xvfb-run merges the child's stderr into stdout on this runner,
+            # so capture one combined log and grep that.
+            local combined_log="$RUNNER_TEMP/bench-${attempt}.log"
+
+            set +e
+            xvfb-run --auto-servernum npm run bench:smoke \
+              > "$combined_log" 2>&1
+            BENCH_STATUS=$?
+            set -e
+            cat "$combined_log"
+            BENCH_LOG="$combined_log"
+          }
+
+          require_result_line() {
+            if ! grep -Fq '[bench] result:' "$BENCH_LOG"; then
+              echo "Bench exited successfully without a result line." >&2
+              exit 1
+            fi
+          }
+
+          run_bench 1
+
+          if [[ "$BENCH_STATUS" -eq 0 ]]; then
+            require_result_line
+          elif grep -Fq \
+            'Execution context is not available in detached frame or worker' \
+            "$BENCH_LOG"; then
+            echo "Known detached-frame transient detected; retrying once." >&2
+            run_bench 2
+            if [[ "$BENCH_STATUS" -ne 0 ]]; then
+              exit "$BENCH_STATUS"
+            fi
+            require_result_line
+          else
+            exit "$BENCH_STATUS"
+          fi
+
+      - name: Assert smoke result
+        run: node bench/assert-smoke.mjs
+
+  verify-fail-detection:
+    name: verify-fail-detection
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run build
+
+      - name: Allow Chrome user namespaces
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      - name: Install Chrome
+        run: |
+          npx --yes @puppeteer/browsers install chrome@stable \
+            --path "$HOME/.cache/puppeteer"
+          chrome_path="$(
+            find "$HOME/.cache/puppeteer/chrome" \
+              -type f -name chrome -perm -111 -print -quit
+          )"
+          if [[ -z "$chrome_path" ]]; then
+            echo "Installed Chrome executable was not found." >&2
+            exit 1
+          fi
+          echo "BENCH_CHROME=$chrome_path" >> "$GITHUB_ENV"
+
+      - name: Intentionally break built extension
+        run: echo "// intentionally broken by verify-fail-detection" > dist/content.js
+
+      - name: Verify fail detection
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          before_results="$RUNNER_TEMP/verify-fail-detection-before.txt"
+          after_results="$RUNNER_TEMP/verify-fail-detection-after.txt"
+          new_results="$RUNNER_TEMP/verify-fail-detection-new.txt"
+          list_results() {
+            if [[ -d bench/results ]]; then
+              find bench/results -type f -name '*.json' -printf '%P\n' |
+                LC_ALL=C sort
+            fi
+          }
+
+          run_negative_bench() {
+            local attempt="$1"
+            combined_log="$RUNNER_TEMP/verify-fail-detection-${attempt}.log"
+            set +e
+            xvfb-run --auto-servernum npm run bench:smoke \
+              > "$combined_log" 2>&1
+            bench_status=$?
+            set -e
+            cat "$combined_log"
+          }
+
+          list_results > "$before_results"
+
+          run_negative_bench 1
+
+          # The negative test gets the same one-shot retry on the known
+          # SW-detach transient as the positive job, so an infra flake
+          # cannot masquerade as a successful fail-detection.
+          if [[ "$bench_status" -ne 0 ]] \
+            && grep -Fq \
+              'Execution context is not available in detached frame or worker' \
+              "$combined_log"; then
+            echo "Known detached-frame transient detected; retrying once." >&2
+            run_negative_bench 2
+          fi
+
+          list_results > "$after_results"
+          comm -13 "$before_results" "$after_results" > "$new_results"
+
+          fail_open_detected=false
+          if [[ "$bench_status" -eq 0 ]]; then
+            fail_open_detected=true
+          fi
+          if grep -Fq '[bench] result:' "$combined_log"; then
+            fail_open_detected=true
+          fi
+          if [[ -s "$new_results" ]]; then
+            fail_open_detected=true
+          fi
+
+          if [[ "$fail_open_detected" == true ]]; then
+            echo "verify-fail-detection: fail-open detected" >> "$GITHUB_STEP_SUMMARY"
+            echo "FAIL-OPEN DETECTED: broken extension passed verification" >&2
+            exit 1
+          fi
+
+          # The failure must be the one this test provokes. A generic infra
+          # failure (Chrome launch, npm, model download) also exits non-zero
+          # but proves nothing about fail detection, so require the signature
+          # specific to a missing content script (observed live in run
+          # 33138458295): the capture stage was reached and Chrome reported
+          # the extension could not access the page.
+          if ! grep -Fq 'Capture did not reach' "$combined_log" \
+            || ! grep -Fq 'Cannot access contents of the page' "$combined_log"; then
+            echo "verify-fail-detection: path not exercised" >> "$GITHUB_STEP_SUMMARY"
+            echo "FAIL-DETECTION PATH NOT EXERCISED: bench failed without the broken-content-script signature." >&2
+            exit 1
+          fi
+
+          echo "verify-fail-detection: fail-open not detected" >> "$GITHUB_STEP_SUMMARY"

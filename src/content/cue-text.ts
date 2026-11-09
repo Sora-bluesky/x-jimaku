@@ -1,0 +1,1108 @@
+import { findJapanesePhraseBoundaries } from "./phrase-boundaries";
+
+export const MAX_CUE_UNITS = 28;
+export const MAX_LINE_UNITS = 14;
+export const MIN_FITTING_LINE_UNITS = 1;
+
+export function deriveLineUnitBudget(
+  innerWidth: number,
+  fontSize: number,
+): number {
+  if (
+    !Number.isFinite(fontSize) ||
+    fontSize <= 0 ||
+    !Number.isFinite(innerWidth)
+  ) {
+    return MAX_LINE_UNITS;
+  }
+
+  return Math.max(
+    MIN_FITTING_LINE_UNITS,
+    Math.floor(innerWidth / fontSize),
+  );
+}
+
+export interface CaptionWrapLayout {
+  readonly availableWidth: number;
+  measure(text: string): number | null;
+}
+
+export function isCaptionLayoutMeasured(
+  layout: CaptionWrapLayout | undefined,
+): layout is CaptionWrapLayout {
+  return (
+    layout !== undefined &&
+    Number.isFinite(layout.availableWidth) &&
+    layout.availableWidth > 0 &&
+    layout.measure("M") !== null
+  );
+}
+
+export function createCaptionTextMeasurer(): {
+  setFont(font: string): void;
+  measure(text: string): number | null;
+  measureLineBox(): number | null;
+  isMeasured(): boolean;
+} {
+  let context:
+    | CanvasRenderingContext2D
+    | null
+    | undefined;
+  let measured = false;
+
+  function getContext():
+    CanvasRenderingContext2D | null {
+    if (context !== undefined) {
+      return context;
+    }
+
+    if (typeof document === "undefined") {
+      context = null;
+      return null;
+    }
+
+    const canvas =
+      document.createElement("canvas");
+    context = canvas.getContext("2d");
+    return context;
+  }
+
+  return {
+    setFont(font: string): void {
+      const canvasContext = getContext();
+
+      if (
+        canvasContext === null ||
+        font.trim() === ""
+      ) {
+        measured = false;
+        return;
+      }
+
+      canvasContext.font = font;
+      const probe =
+        canvasContext.measureText("M").width;
+      measured =
+        Number.isFinite(probe) &&
+        probe > 0;
+    },
+    measure(text: string): number | null {
+      if (!measured) {
+        return null;
+      }
+
+      const canvasContext = getContext();
+
+      if (canvasContext === null) {
+        return null;
+      }
+
+      if (text === "") {
+        return 0;
+      }
+
+      const width =
+        canvasContext.measureText(text).width;
+
+      if (!Number.isFinite(width)) {
+        return null;
+      }
+
+      return width;
+    },
+    measureLineBox(): number | null {
+      if (!measured) {
+        return null;
+      }
+
+      const canvasContext = getContext();
+
+      if (canvasContext === null) {
+        return null;
+      }
+
+      let lineBox: number | null = null;
+
+      for (const probe of ["M", "あ"]) {
+        const metrics =
+          canvasContext.measureText(probe);
+        const ascent =
+          metrics.fontBoundingBoxAscent;
+        const descent =
+          metrics.fontBoundingBoxDescent;
+
+        if (
+          !Number.isFinite(ascent) ||
+          !Number.isFinite(descent)
+        ) {
+          continue;
+        }
+
+        const size = ascent + descent;
+
+        if (!(size > 0)) {
+          continue;
+        }
+
+        if (
+          lineBox === null ||
+          size > lineBox
+        ) {
+          lineBox = size;
+        }
+      }
+
+      return lineBox;
+    },
+    isMeasured(): boolean {
+      return measured;
+    },
+  };
+}
+
+function createTextFit(
+  maxUnits: number,
+  layout: CaptionWrapLayout | undefined,
+  widthScale: number,
+): (text: string) => boolean {
+  if (isCaptionLayoutMeasured(layout)) {
+    const limit =
+      layout.availableWidth * widthScale;
+
+    return (text: string) => {
+      const width = layout.measure(text);
+      return (
+        width !== null &&
+        width <= limit
+      );
+    };
+  }
+
+  return (text: string) =>
+    displayUnits(text) <= maxUnits;
+}
+
+const MIN_CUE_SEGMENT_CHARACTERS = 5;
+const MIN_LINE_SEGMENT_CHARACTERS = 2;
+const MAX_ORPHAN_CUE_CHARACTERS = 4;
+const JAPANESE_PARTICLES:
+  readonly string[] = [
+    "から",
+    "まで",
+    "より",
+    "は",
+    "が",
+    "を",
+    "に",
+    "で",
+    "と",
+    "へ",
+    "の",
+    "も",
+    "て",
+  ];
+const SENTENCE_BOUNDARY_CHARACTER =
+  /[。！？!?]/u;
+const CLAUSE_BOUNDARY_CHARACTER =
+  /[、,\s]/u;
+const JAPANESE_PUNCTUATION_CHARACTER =
+  /[。！？!?、,]/u;
+const JAPANESE_PARTICLE_START_CHARACTER =
+  /[はがをにでとへのもかまよて]/u;
+const KATAKANA_CHARACTER =
+  /[\p{Script=Katakana}ー]/u;
+const HIRAGANA_CHARACTER =
+  /\p{Script=Hiragana}/u;
+
+// Only で doubles as a word-internal character of common
+// copula forms after hiragana; other one-character particles
+// after hiragana (きょうは… / ことが…) are usually genuine
+// boundaries. The word-internal が (ながら) has its own
+// forbidden-suffix entry below.
+const AMBIGUOUS_SINGLE_PARTICLES: ReadonlySet<string> =
+  new Set(["で"]);
+
+// A copula veto still applies when a sentence-final particle
+// (素敵ですか / そうですよ) follows the completed copula.
+const SENTENCE_FINAL_PARTICLES: ReadonlySet<string> =
+  new Set(["か", "よ", "ね", "な", "わ"]);
+
+// Connectives after a copula (ですので / ですけど) must match
+// in full so that word starts like すのこ are not mistaken for
+// ので. ですし is a clause edge only before punctuation.
+const COPULA_CONNECTIVES: readonly string[] = [
+  "ので",
+  "のに",
+  "けれど",
+  "けど",
+];
+
+interface ForbiddenSuffix {
+  readonly suffix: string;
+  readonly continuation: string;
+  readonly particle: string;
+  readonly requiresEdge: boolean;
+}
+
+// A one-character suffix such as で is ambiguous with a real particle.
+// Veto it only when the continuation completes at a clause edge,
+// except entries that complete a word on their own (ながら).
+const FORBIDDEN_SUFFIXES:
+  readonly ForbiddenSuffix[] = [
+    {
+      suffix: "で",
+      continuation: "す",
+      particle: "で",
+      requiresEdge: true,
+    },
+    {
+      suffix: "で",
+      continuation: "した",
+      particle: "で",
+      requiresEdge: true,
+    },
+    {
+      suffix: "で",
+      continuation: "も",
+      particle: "で",
+      requiresEdge: true,
+    },
+    {
+      suffix: "で",
+      continuation: "しょう",
+      particle: "で",
+      requiresEdge: true,
+    },
+    {
+      suffix: "なが",
+      continuation: "ら",
+      particle: "が",
+      requiresEdge: false,
+    },
+  ];
+
+export function splitCueText(
+  text: string,
+  maxUnits: number = MAX_CUE_UNITS,
+  layout?: CaptionWrapLayout,
+): string[] {
+  const normalized = text
+    .replace(/\s+/gu, " ")
+    .trim();
+
+  if (normalized === "") {
+    return [];
+  }
+
+  const fitsCue = createTextFit(
+    maxUnits,
+    layout,
+    2,
+  );
+  const characters = Array.from(normalized);
+  const protectedRanges =
+    findProtectedUrlRanges(normalized);
+  const phraseBoundaries =
+    findJapanesePhraseBoundaries(normalized);
+  const parts: string[] = [];
+  let start = 0;
+
+  while (start < characters.length) {
+    const end =
+      findMaximumFitBoundary(
+        characters,
+        start,
+        fitsCue,
+      );
+
+    if (end >= characters.length) {
+      const tail =
+        characters.slice(start).join("").trim();
+
+      if (tail !== "") {
+        parts.push(tail);
+      }
+      break;
+    }
+
+    let target = end;
+
+    if (
+      segmentCharacterCount(
+        characters,
+        end,
+        characters.length,
+      ) <= MAX_ORPHAN_CUE_CHARACTERS
+    ) {
+      target = findOrphanSafeTarget(
+        characters,
+        start,
+        end,
+      );
+    }
+
+    const boundary = Math.min(
+      end,
+      findNaturalTextBoundary(
+        normalized,
+        characters,
+        start,
+        target,
+        MIN_CUE_SEGMENT_CHARACTERS,
+        protectedRanges,
+        phraseBoundaries,
+      ),
+    );
+    const part = characters
+      .slice(start, boundary)
+      .join("")
+      .trim();
+
+    if (part !== "") {
+      parts.push(part);
+    }
+
+    start = boundary;
+
+    while (
+      characters[start] !== undefined &&
+      /\s/u.test(characters[start] ?? "")
+    ) {
+      start += 1;
+    }
+  }
+
+  return parts;
+}
+
+export function wrapCueText(
+  text: string,
+  maxLineUnits: number =
+    MAX_LINE_UNITS,
+  layout?: CaptionWrapLayout,
+): string {
+  const normalized = text
+    .replace(/\s+/gu, " ")
+    .trim();
+  const fitsLine = createTextFit(
+    maxLineUnits,
+    layout,
+    1,
+  );
+  const fitsTwoLines = createTextFit(
+    maxLineUnits * 2,
+    layout,
+    2,
+  );
+
+  if (
+    normalized === "" ||
+    fitsLine(normalized)
+  ) {
+    return normalized;
+  }
+
+  const characters = Array.from(normalized);
+  const protectedRanges =
+    findProtectedUrlRanges(normalized);
+  const phraseBoundaries =
+    findJapanesePhraseBoundaries(normalized);
+  const lines: string[] = [];
+  let start = 0;
+
+  while (start < characters.length) {
+    const remainingText = characters
+      .slice(start)
+      .join("");
+    const remainingUnits =
+      displayUnits(remainingText);
+
+    if (fitsLine(remainingText)) {
+      lines.push(remainingText);
+      break;
+    }
+
+    const maximumLineBoundary =
+      findMaximumFitBoundary(
+        characters,
+        start,
+        fitsLine,
+      );
+    const fitsInTwoLines = fitsTwoLines(
+      remainingText,
+    );
+    const target = fitsInTwoLines
+      ? findMaximumFitBoundary(
+          characters,
+          start,
+          (candidate) => {
+            if (
+              isCaptionLayoutMeasured(
+                layout,
+              )
+            ) {
+              const remainingWidth =
+                layout.measure(
+                  remainingText,
+                );
+              const width =
+                layout.measure(
+                  candidate,
+                );
+              return (
+                remainingWidth !==
+                  null &&
+                width !== null &&
+                width <=
+                  remainingWidth / 2
+              );
+            }
+
+            return (
+              displayUnits(candidate) <=
+              remainingUnits / 2
+            );
+          },
+        )
+      : maximumLineBoundary;
+    const minimumLineBoundary =
+      fitsInTwoLines
+        ? findMinimumRemainderBoundary(
+            characters,
+            start,
+            fitsLine,
+          )
+        : start + 1;
+    const suggestedBoundary =
+      findNaturalTextBoundary(
+        normalized,
+        characters,
+        start,
+        target,
+        MIN_LINE_SEGMENT_CHARACTERS,
+        protectedRanges,
+        phraseBoundaries,
+        minimumLineBoundary,
+        maximumLineBoundary,
+      );
+    const boundary = Math.min(
+      maximumLineBoundary,
+      Math.max(
+        minimumLineBoundary,
+        suggestedBoundary,
+      ),
+    );
+
+    lines.push(
+      characters
+        .slice(start, boundary)
+        .join(""),
+    );
+    start = boundary;
+  }
+
+  return lines.join("\n");
+}
+
+function findMinimumRemainderBoundary(
+  characters: readonly string[],
+  start: number,
+  remainderFits: (text: string) => boolean,
+): number {
+  let boundary = characters.length;
+
+  while (boundary > start) {
+    const remainder = characters
+      .slice(boundary - 1)
+      .join("");
+
+    if (!remainderFits(remainder)) {
+      break;
+    }
+
+    boundary -= 1;
+  }
+
+  return Math.max(
+    start + 1,
+    boundary,
+  );
+}
+
+function findMaximumFitBoundary(
+  characters: readonly string[],
+  start: number,
+  fits: (text: string) => boolean,
+): number {
+  let end = start;
+
+  while (end < characters.length) {
+    const candidate = characters
+      .slice(start, end + 1)
+      .join("");
+
+    if (!fits(candidate)) {
+      break;
+    }
+
+    end += 1;
+  }
+
+  if (
+    end === start &&
+    start < characters.length
+  ) {
+    return start + 1;
+  }
+
+  return end;
+}
+
+function findOrphanSafeTarget(
+  characters: readonly string[],
+  start: number,
+  target: number,
+): number {
+  let redistributed = target;
+
+  while (
+    redistributed > start + 1 &&
+    segmentCharacterCount(
+      characters,
+      redistributed,
+      characters.length,
+    ) <= MAX_ORPHAN_CUE_CHARACTERS
+  ) {
+    redistributed -= 1;
+  }
+
+  return redistributed;
+}
+
+function segmentCharacterCount(
+  characters: readonly string[],
+  start: number,
+  end: number,
+): number {
+  return Array.from(
+    characters
+      .slice(start, end)
+      .join("")
+      .trim(),
+  ).length;
+}
+
+function findNaturalTextBoundary(
+  text: string,
+  characters: readonly string[],
+  start: number,
+  target: number,
+  minimumSegmentCharacters: number,
+  ranges: ReadonlyArray<
+    readonly [start: number, end: number]
+  >,
+  phraseBoundaries: ReadonlySet<number>,
+  minimumBoundary: number = start + 1,
+  maximumBoundaryLimit: number = target,
+): number {
+  let bestBoundary: number | null = null;
+  let bestEffectiveDistance =
+    Number.POSITIVE_INFINITY;
+  let bestDistance =
+    Number.POSITIVE_INFINITY;
+
+  const maximumBoundary = Math.min(
+    maximumBoundaryLimit,
+    characters.length - 1,
+  );
+
+  for (
+    let boundary = Math.max(
+      start + 1,
+      minimumBoundary,
+    );
+    boundary <= maximumBoundary;
+    boundary += 1
+  ) {
+    if (
+      !isSegmentBoundaryAllowed(
+        text,
+        characters,
+        start,
+        boundary,
+        minimumSegmentCharacters,
+        ranges,
+      )
+    ) {
+      continue;
+    }
+
+    const bonus =
+      naturalBoundaryBonus(
+        characters,
+        start,
+        boundary,
+        phraseBoundaries,
+      );
+
+    if (bonus === null) {
+      continue;
+    }
+
+    const distance =
+      Math.abs(boundary - target);
+    const effectiveDistance =
+      distance - bonus;
+
+    if (
+      effectiveDistance <
+        bestEffectiveDistance ||
+      (
+        effectiveDistance ===
+          bestEffectiveDistance &&
+        (
+          distance < bestDistance ||
+          (
+            distance === bestDistance &&
+            (
+              bestBoundary === null ||
+              boundary < bestBoundary
+            )
+          )
+        )
+      )
+    ) {
+      bestBoundary = boundary;
+      bestEffectiveDistance =
+        effectiveDistance;
+      bestDistance = distance;
+    }
+  }
+
+  return (
+    bestBoundary ??
+    findFallbackCueBoundary(
+      text,
+      characters,
+      start,
+      target,
+      minimumSegmentCharacters,
+      ranges,
+      minimumBoundary,
+      maximumBoundaryLimit,
+    )
+  );
+}
+
+function naturalBoundaryBonus(
+  characters: readonly string[],
+  start: number,
+  boundary: number,
+  phraseBoundaries: ReadonlySet<number>,
+): number | null {
+  const previous =
+    characters[boundary - 1] ?? "";
+
+  if (
+    SENTENCE_BOUNDARY_CHARACTER.test(
+      previous,
+    )
+  ) {
+    return 6;
+  }
+
+  if (
+    CLAUSE_BOUNDARY_CHARACTER.test(
+      previous,
+    )
+  ) {
+    return 3;
+  }
+
+  if (phraseBoundaries.has(boundary)) {
+    return 2;
+  }
+
+  if (
+    !endsWithJapaneseParticle(
+      characters,
+      start,
+      boundary,
+    )
+  ) {
+    return null;
+  }
+
+  const next = characters[boundary] ?? "";
+
+  if (
+    JAPANESE_PARTICLE_START_CHARACTER.test(
+      next,
+    ) ||
+    JAPANESE_PUNCTUATION_CHARACTER.test(
+      next,
+    )
+  ) {
+    return null;
+  }
+
+  return 1;
+}
+
+export function endsWithJapaneseParticle(
+  characters: readonly string[],
+  start: number,
+  boundary: number,
+): boolean {
+  return JAPANESE_PARTICLES.some(
+    (particle) => {
+      const particleCharacters =
+        Array.from(particle);
+      const particleStart =
+        boundary -
+        particleCharacters.length;
+
+      if (
+        particleStart < start ||
+        !particleCharacters.every(
+          (character, index) =>
+            characters[
+              particleStart + index
+            ] === character,
+        )
+      ) {
+        return false;
+      }
+
+      if (
+        isForbiddenParticleBoundary(
+          characters,
+          start,
+          boundary,
+          particle,
+        )
+      ) {
+        return false;
+      }
+
+      return !(
+        particleCharacters.length === 1 &&
+        AMBIGUOUS_SINGLE_PARTICLES.has(
+          particle,
+        ) &&
+        HIRAGANA_CHARACTER.test(
+          characters[particleStart - 1] ?? "",
+        )
+      );
+    },
+  );
+}
+
+function isForbiddenParticleBoundary(
+  characters: readonly string[],
+  start: number,
+  boundary: number,
+  particle: string,
+): boolean {
+  const before = characters
+    .slice(start, boundary)
+    .join("");
+  const after = characters
+    .slice(boundary)
+    .join("");
+
+  return FORBIDDEN_SUFFIXES.some(
+    ({
+      suffix,
+      continuation,
+      particle: shadowedParticle,
+      requiresEdge,
+    }) => {
+      if (
+        shadowedParticle !== particle ||
+        !before.endsWith(suffix) ||
+        !after.startsWith(continuation)
+      ) {
+        return false;
+      }
+
+      if (!requiresEdge) {
+        return true;
+      }
+
+      const continuationLength =
+        Array.from(continuation).length;
+      const rest = characters
+        .slice(
+          boundary + continuationLength,
+        )
+        .join("");
+      const next =
+        Array.from(rest)[0] ?? "";
+      const afterNext =
+        Array.from(rest)[1] ?? "";
+
+      return (
+        next === "" ||
+        next === "が" ||
+        SENTENCE_FINAL_PARTICLES.has(
+          next,
+        ) ||
+        JAPANESE_PUNCTUATION_CHARACTER.test(
+          next,
+        ) ||
+        COPULA_CONNECTIVES.some(
+          (connective) =>
+            rest.startsWith(connective),
+        ) ||
+        (next === "し" &&
+          (afterNext === "" ||
+            JAPANESE_PUNCTUATION_CHARACTER.test(
+              afterNext,
+            )))
+      );
+    },
+  );
+}
+
+function isSegmentBoundaryAllowed(
+  text: string,
+  characters: readonly string[],
+  start: number,
+  boundary: number,
+  minimumSegmentCharacters: number,
+  ranges: ReadonlyArray<
+    readonly [start: number, end: number]
+  >,
+): boolean {
+  return (
+    segmentCharacterCount(
+      characters,
+      start,
+      boundary,
+    ) >= minimumSegmentCharacters &&
+    segmentCharacterCount(
+      characters,
+      boundary,
+      characters.length,
+    ) >= minimumSegmentCharacters &&
+    !isCharacterBoundaryProtected(
+      text,
+      characters,
+      boundary,
+      ranges,
+    ) &&
+    !isInsideKatakanaRun(
+      characters,
+      boundary,
+    )
+  );
+}
+
+function isInsideKatakanaRun(
+  characters: readonly string[],
+  boundary: number,
+): boolean {
+  return (
+    KATAKANA_CHARACTER.test(
+      characters[boundary - 1] ?? "",
+    ) &&
+    KATAKANA_CHARACTER.test(
+      characters[boundary] ?? "",
+    )
+  );
+}
+
+function findFallbackCueBoundary(
+  text: string,
+  characters: readonly string[],
+  start: number,
+  target: number,
+  minimumSegmentCharacters: number,
+  ranges: ReadonlyArray<
+    readonly [start: number, end: number]
+  >,
+  minimumBoundary: number = start + 1,
+  maximumBoundaryLimit: number = target,
+): number {
+  let nearestBoundary: number | null = null;
+  let nearestDistance =
+    Number.POSITIVE_INFINITY;
+  const maximumBoundary = Math.min(
+    maximumBoundaryLimit,
+    characters.length - 1,
+  );
+
+  for (
+    let boundary = Math.max(
+      start + 1,
+      minimumBoundary,
+    );
+    boundary <= maximumBoundary;
+    boundary += 1
+  ) {
+    if (
+      !isSegmentBoundaryAllowed(
+        text,
+        characters,
+        start,
+        boundary,
+        minimumSegmentCharacters,
+        ranges,
+      )
+    ) {
+      continue;
+    }
+
+    const distance =
+      Math.abs(boundary - target);
+
+    if (
+      distance < nearestDistance ||
+      (
+        distance === nearestDistance &&
+        (
+          nearestBoundary === null ||
+          boundary < nearestBoundary
+        )
+      )
+    ) {
+      nearestBoundary = boundary;
+      nearestDistance = distance;
+    }
+  }
+
+  if (nearestBoundary !== null) {
+    return nearestBoundary;
+  }
+
+  return findConventionalCueBoundary(
+    text,
+    characters,
+    start,
+    maximumBoundaryLimit,
+    ranges,
+  );
+}
+
+function findConventionalCueBoundary(
+  text: string,
+  characters: readonly string[],
+  start: number,
+  target: number,
+  ranges: ReadonlyArray<
+    readonly [start: number, end: number]
+  >,
+): number {
+  const minimum = start + 1;
+  const maximum = characters.length - 1;
+
+  for (
+    let boundary = Math.min(target, maximum);
+    boundary >= minimum;
+    boundary -= 1
+  ) {
+    if (
+      !isCharacterBoundaryProtected(
+        text,
+        characters,
+        boundary,
+        ranges,
+      )
+    ) {
+      return boundary;
+    }
+  }
+
+  for (
+    let boundary =
+      Math.max(minimum, target + 1);
+    boundary <= maximum;
+    boundary += 1
+  ) {
+    if (
+      !isCharacterBoundaryProtected(
+        text,
+        characters,
+        boundary,
+        ranges,
+      )
+    ) {
+      return boundary;
+    }
+  }
+
+  return Math.min(
+    characters.length,
+    Math.max(start + 1, target),
+  );
+}
+
+export function displayUnits(
+  text: string,
+): number {
+  let units = 0;
+
+  for (const character of text) {
+    units += characterUnits(character);
+  }
+
+  return units;
+}
+
+function characterUnits(
+  character: string,
+): number {
+  return /[\u0000-\u00ff]/u.test(
+    character,
+  )
+    ? 0.5
+    : 1;
+}
+
+function findProtectedUrlRanges(
+  text: string,
+): ReadonlyArray<
+  readonly [start: number, end: number]
+> {
+  const ranges:
+    Array<readonly [number, number]> = [];
+  const expression =
+    /(?:https?:\/\/|www\.)\S+/giu;
+
+  for (
+    let match = expression.exec(text);
+    match !== null;
+    match = expression.exec(text)
+  ) {
+    ranges.push([
+      match.index,
+      match.index + match[0].length,
+    ]);
+  }
+
+  return ranges;
+}
+
+function isCharacterBoundaryProtected(
+  text: string,
+  characters: readonly string[],
+  boundary: number,
+  ranges: ReadonlyArray<
+    readonly [start: number, end: number]
+  >,
+): boolean {
+  const prefix = characters
+    .slice(0, boundary)
+    .join("");
+  const codeUnitBoundary =
+    prefix.length;
+
+  return ranges.some(
+    ([start, end]) =>
+      codeUnitBoundary > start &&
+      codeUnitBoundary < end &&
+      end <= text.length,
+  );
+}
+

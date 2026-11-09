@@ -1,0 +1,3 @@
+# SOURCE.json pins these bytes; never convert line endings.
+vendor/wllama/** -text
+scripts/wllama/*.sh text eol=lf

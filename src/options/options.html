@@ -1,0 +1,580 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1"
+    />
+    <title>x-jimaku Capture &amp; Diagnostics</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        font-family:
+          system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+          sans-serif;
+      }
+
+      body {
+        max-width: 960px;
+        margin: 0 auto;
+        padding: 24px;
+        line-height: 1.5;
+      }
+
+      h1,
+      h2 {
+        line-height: 1.25;
+      }
+
+      section {
+        margin-block: 28px;
+      }
+
+      .capture-card,
+      .recognition-card,
+      .caption-log-card {
+        padding: 18px;
+        border: 1px solid
+          color-mix(in srgb, currentColor 25%, transparent);
+        border-radius: 10px;
+      }
+
+      .capture-state {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-block: 0 16px;
+        font-weight: 700;
+      }
+
+      .capture-dot {
+        width: 12px;
+        height: 12px;
+        flex: 0 0 auto;
+        border-radius: 50%;
+        background: #9ca3af;
+        box-shadow: 0 0 0 3px
+          color-mix(in srgb, #9ca3af 20%, transparent);
+      }
+
+      .capture-dot[data-state="starting"],
+      .capture-dot[data-state="loadingModel"],
+      .capture-dot[data-state="stopping"] {
+        background: #eab308;
+        box-shadow: 0 0 0 3px
+          color-mix(in srgb, #eab308 20%, transparent);
+      }
+
+      .capture-dot[data-state="running"] {
+        background: #16a34a;
+        box-shadow: 0 0 0 3px
+          color-mix(in srgb, #16a34a 20%, transparent);
+      }
+
+      .capture-dot[data-state="error"] {
+        background: #dc2626;
+        box-shadow: 0 0 0 3px
+          color-mix(in srgb, #dc2626 20%, transparent);
+      }
+
+      .meter-label,
+      .recognition-runtime,
+      .settings-row,
+
+      .meter-label {
+        margin-block-end: 6px;
+      }
+
+      .level-meter {
+        height: 18px;
+        overflow: hidden;
+        border-radius: 999px;
+        background:
+          color-mix(in srgb, currentColor 14%, transparent);
+      }
+
+      .level-fill {
+        width: 0%;
+        height: 100%;
+        border-radius: inherit;
+        background:
+          linear-gradient(
+            90deg,
+            #16a34a 0%,
+            #eab308 72%,
+            #dc2626 100%
+          );
+        transition: width 40ms linear;
+      }
+
+      .model-progress {
+        margin-block-start: 14px;
+      }
+
+      .model-progress progress {
+        width: 100%;
+        height: 16px;
+      }
+
+      .capture-help,
+      .settings-help,
+      #settings-status,
+      #caption-log-status {
+        color:
+          color-mix(in srgb, currentColor 72%, transparent);
+      }
+
+      .capture-help {
+        margin-block: 14px 0;
+      }
+
+      .recognition-runtime {
+        justify-content: flex-start;
+        flex-wrap: wrap;
+        margin-block-end: 12px;
+      }
+
+      .recognition-runtime span {
+        display: inline-flex;
+        gap: 5px;
+      }
+
+      .recognition-log {
+        min-height: 96px;
+        max-height: 320px;
+        margin: 0;
+        padding: 12px 12px 12px 38px;
+        overflow-y: auto;
+        border-radius: 8px;
+        background:
+          color-mix(in srgb, currentColor 7%, transparent);
+      }
+
+      .recognition-log:empty::before {
+        display: list-item;
+        color:
+          color-mix(in srgb, currentColor 58%, transparent);
+        content: "認識結果はまだありません。";
+      }
+
+      .recognition-line {
+        padding-block: 4px;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
+
+      .recognition-line time {
+        margin-inline-end: 8px;
+        color:
+          color-mix(in srgb, currentColor 55%, transparent);
+        font-size: 0.82em;
+      }
+
+      .recognition-body {
+        display: inline-flex;
+        flex-direction: column;
+        vertical-align: top;
+      }
+
+      .recognition-ja {
+        font-weight: 650;
+      }
+
+      .recognition-original {
+        color:
+          color-mix(in srgb, currentColor 62%, transparent);
+        font-size: 0.84em;
+      }
+
+      .recognition-line[data-final="false"] {
+        color:
+          color-mix(in srgb, currentColor 58%, transparent);
+        font-style: normal;
+        opacity: 0.72;
+      }
+
+      .recognition-line[data-final="false"]
+      .recognition-body::before {
+        color:
+          color-mix(in srgb, currentColor 55%, transparent);
+        font-size: 0.76em;
+        content: "暫定";
+      }
+
+      .settings-row {
+        justify-content: flex-start;
+        flex-wrap: wrap;
+        margin-block-start: 18px;
+      }
+
+      .settings-control {
+        display: flex;
+        flex-direction: column;
+        align-items: flex-start;
+      }
+
+      .checkbox-label {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      select {
+        min-width: 150px;
+        padding: 7px 10px;
+        border: 1px solid currentColor;
+        border-radius: 6px;
+        font: inherit;
+      }
+
+      input[type="checkbox"] {
+        width: 18px;
+        height: 18px;
+        margin: 0;
+      }
+
+      .settings-help,
+      #settings-status,
+      #caption-log-status {
+        margin-block: 6px 0;
+        font-size: 0.92em;
+      }
+
+
+
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+      }
+
+      button {
+        padding: 10px 14px;
+        border: 1px solid currentColor;
+        border-radius: 6px;
+        font: inherit;
+        cursor: pointer;
+      }
+
+      button:disabled,
+      select:disabled,
+      input:disabled {
+        cursor: wait;
+        opacity: 0.65;
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+
+      th,
+      td {
+        padding: 8px 10px;
+        border: 1px solid
+          color-mix(in srgb, currentColor 25%, transparent);
+        text-align: left;
+        vertical-align: top;
+      }
+
+      th {
+        width: 240px;
+      }
+
+      td {
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
+
+      #probe-status {
+        min-height: 1.5em;
+        font-weight: 600;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>x-jimaku</h1>
+
+      <section
+        class="capture-card"
+        aria-labelledby="capture-heading"
+      >
+        <h2 id="capture-heading">音声キャプチャ</h2>
+
+        <p class="capture-state">
+          <span
+            id="capture-state-dot"
+            class="capture-dot"
+            data-state="idle"
+            aria-hidden="true"
+          ></span>
+          <span>状態:</span>
+          <span id="capture-state-name">停止中</span>
+        </p>
+
+        <div class="meter-label">
+          <span>入力レベル（RMS）</span>
+          <output id="level-value">0.0000</output>
+        </div>
+
+        <div
+          id="level-meter"
+          class="level-meter"
+          role="progressbar"
+          aria-label="音声入力レベル"
+          aria-valuemin="0"
+          aria-valuemax="100"
+          aria-valuenow="0"
+        >
+          <div
+            id="level-fill"
+            class="level-fill"
+          ></div>
+        </div>
+
+        <div
+          id="model-progress-container"
+          class="model-progress"
+          hidden
+        >
+          <div class="meter-label">
+            <span>モデル読込</span>
+            <output id="model-progress-value">0%</output>
+          </div>
+          <progress
+            id="model-progress"
+            max="100"
+            value="0"
+          ></progress>
+        </div>
+
+        <p class="capture-help">
+          x.comの動画を再生し、拡張機能のツールバーアイコンまたは
+          Ctrl+Shift+9でキャプチャを開始・停止します。
+        </p>
+      </section>
+
+      <section
+        class="recognition-card"
+        aria-labelledby="recognition-heading"
+      >
+        <h2 id="recognition-heading">認識ログ</h2>
+
+        <p class="recognition-runtime">
+          <span>
+            モデル:
+            <strong id="active-model">—</strong>
+          </span>
+          <span>
+            実行デバイス:
+            <strong id="active-device">—</strong>
+          </span>
+          <span>
+            翻訳経路:
+            <strong id="active-translation-path">—</strong>
+          </span>
+        </p>
+
+        <ol
+          id="recognition-log"
+          class="recognition-log"
+          aria-live="polite"
+          aria-relevant="additions text"
+        ></ol>
+
+        <div class="settings-row">
+          <label for="model-select">
+            次回使用するモデル
+          </label>
+          <div class="settings-control">
+            <select id="model-select">
+              <option value="tiny">tiny</option>
+              <option value="base">base</option>
+              <option value="small">small</option>
+              <option value="turbo">turbo</option>
+            </select>
+            <p
+              id="model-recommendation"
+              class="settings-help"
+              role="status"
+              aria-live="polite"
+              hidden
+            ></p>
+          </div>
+        </div>
+
+        <div class="settings-row">
+          <label for="source-language-select">
+            音声の言語
+          </label>
+          <select id="source-language-select">
+            <option value="en">英語</option>
+            <option value="auto">自動判定</option>
+          </select>
+        </div>
+
+        <div class="settings-row">
+          <label for="plamo-model-select">PLaMo モデル（ダウンロード容量）</label>
+          <select id="plamo-model-select"></select>
+        </div>
+        <section aria-labelledby="plamo-cache-heading">
+          <h3 id="plamo-cache-heading">PLaMo の保存データ</h3>
+          <pre id="plamo-cache-results" aria-live="polite">確認中…</pre>
+          <button id="plamo-refresh-cache" type="button">保存容量を更新</button>
+          <button id="plamo-delete-cache" type="button">PLaMo の保存データをすべて削除</button>
+          <p class="settings-help">削除後、次のモデル読込時にダウンロードし直します。すでにメモリーに読み込んだモデルは、再読込まで動作する場合があります。</p>
+        </section>
+        <section aria-labelledby="plamo-check-heading">
+          <h3 id="plamo-check-heading">この PC で試す</h3>
+          <p id="plamo-expected-bytes" class="settings-help"></p>
+          <p class="settings-help">選択したサイズで短い英文を3文翻訳します。GPU の上限値は参考情報です。モデルが収まるかどうかの判定は行いません。</p>
+          <p id="plamo-capture-note" class="settings-help"></p>
+          <button id="plamo-check" type="button" disabled>この PC で試す</button>
+          <p id="plamo-check-status" role="status">未実行</p>
+          <table><tbody id="plamo-check-results"></tbody></table>
+        </section>
+        <div class="settings-row">
+          <label for="plamo-style-select">PLaMo の訳し方</label>
+          <select id="plamo-style-select">
+            <option value="standard">標準</option>
+            <option value="easy">やさしい日本語</option>
+          </select>
+        </div>
+
+        <div class="settings-row">
+          <label
+            class="checkbox-label"
+            for="show-original"
+          >
+            <input
+              id="show-original"
+              type="checkbox"
+            />
+            英語原文も表示
+          </label>
+        </div>
+
+        <div class="settings-row">
+          <label
+            class="checkbox-label"
+            for="show-tentative"
+          >
+            <input
+              id="show-tentative"
+              type="checkbox"
+            />
+            暫定を薄字で表示
+          </label>
+        </div>
+
+        <p class="settings-help">
+          暫定表示は既定でOFFです。適用は次回キャプチャ開始時です。
+        </p>
+        <p
+          id="settings-status"
+          role="status"
+          aria-live="polite"
+        ></p>
+      </section>
+
+      <section
+        class="caption-log-card"
+        aria-labelledby="caption-log-heading"
+      >
+        <h2 id="caption-log-heading">表示ログ</h2>
+        <p class="settings-help">
+          スイッチはこの節のチェックボックスです。画面に出た字幕を、この端末のChromeストレージだけに残します。残すのは、表示した日本語の1行目と2行目、その元になった英語の文、どのまとまりの何ページ目か、出た時刻と消えた時刻です。つまり視聴した動画の字幕が本文ごと手元に残ります。あわせて、受け取った英語の文とその訳の段階、待ち行列で落として画面に出なかったまとまりの記録も残します。画面に出なかった文もここに含まれます。直近400ページ・400行までで、それより古いものは捨てます。既定で記録します。外部へは送りません。
+        </p>
+        <div class="settings-row">
+          <label
+            class="checkbox-label"
+            for="record-caption-display"
+          >
+            <input
+              id="record-caption-display"
+              type="checkbox"
+              checked
+            />
+            表示ログを記録する
+          </label>
+        </div>
+        <div class="actions">
+          <button
+            id="copy-caption-log"
+            type="button"
+          >
+            表示ログをコピー
+          </button>
+          <button
+            id="download-caption-log"
+            type="button"
+          >
+            表示ログをダウンロード
+          </button>
+          <button
+            id="clear-caption-log"
+            type="button"
+          >
+            表示ログを消す
+          </button>
+        </div>
+        <p
+          id="caption-log-status"
+          role="status"
+          aria-live="polite"
+        ></p>
+      </section>
+
+      <section aria-labelledby="diagnostics-heading">
+        <h2 id="diagnostics-heading">診断</h2>
+        <p>
+          WebGPUの実行コンテキスト別診断です。
+        </p>
+
+        <p
+          id="probe-status"
+          role="status"
+          aria-live="polite"
+        ></p>
+
+        <div class="actions">
+          <button id="run-diagnostics" type="button">
+            診断を実行
+          </button>
+          <button id="fetch-last" type="button">
+            保存済み診断を取得
+          </button>
+        </div>
+      </section>
+
+      <section>
+        <h2>環境</h2>
+        <table>
+          <tbody id="environment-results"></tbody>
+        </table>
+      </section>
+
+      <section>
+        <h2>Options page WebGPU</h2>
+        <table>
+          <tbody id="webgpu-results"></tbody>
+        </table>
+      </section>
+
+
+      <section>
+        <h2>保存済みプローブ結果</h2>
+        <table>
+          <tbody id="stored-results"></tbody>
+        </table>
+      </section>
+    </main>
+
+    <script
+      type="module"
+      src="/src/options/index.ts"
+    ></script>
+  </body>
+</html>

@@ -1,0 +1,49 @@
+{
+  "fixture": "tts",
+  "wav": "tts-speech.wav",
+  "script": "tts-script.txt",
+  "durationSeconds": 14.123447,
+  "wavSha256": "49149da3396a45e66114e1b6f50011d4c22e3d2c18d24587640979e06d4aada3",
+  "scriptSha256": "d75faf7d530e4cc59f0aba64aba8e15b20023224d8d62d03f6e1eb55909e4004",
+  "command": "ffmpeg -hide_banner -i bench/refs/tts-speech.wav -af silencedetect=noise=-35dB:d=0.25 -f null -",
+  "thresholds": {
+    "noiseDb": -35,
+    "detectionMinSeconds": 0.25,
+    "sentenceSilenceMinSeconds": 0.75
+  },
+  "alignment": "Script sentences in order; sentence end is the start of each silence >= 0.75 s. Shorter pauses are inside sentences.",
+  "silences": [
+    {
+      "startSeconds": 2.925941,
+      "endSeconds": 3.883764,
+      "durationSeconds": 0.957823
+    },
+    {
+      "startSeconds": 9.672608,
+      "endSeconds": 10.582268,
+      "durationSeconds": 0.90966
+    },
+    {
+      "startSeconds": 13.311066,
+      "endSeconds": 14.123447,
+      "durationSeconds": 0.812381
+    }
+  ],
+  "sentences": [
+    {
+      "text": "Hello everyone and welcome back to the channel.",
+      "matchText": "welcome back to the channel",
+      "endSeconds": 2.925941
+    },
+    {
+      "text": "Today we are going to talk about machine learning and how neural networks actually work.",
+      "matchText": "neural networks actually work",
+      "endSeconds": 9.672608
+    },
+    {
+      "text": "The basic idea is surprisingly simple.",
+      "matchText": "surprisingly simple",
+      "endSeconds": 13.311066
+    }
+  ]
+}

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
 import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
@@ -6,6 +7,49 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { scanPublicTree } from "./check-public-tree.mjs";
+
+test("allows wllama build scripts and vendor paths without broadening other vendor paths", () => {
+  assert.deepEqual(scanPublicTree([
+    { path: "vendor/wllama/index.js", bytes: Buffer.from("export {};") },
+    { path: "scripts/wllama/build.sh", bytes: Buffer.from("#!/bin/bash\n") },
+  ]), []);
+  assert.equal(scanPublicTree([{ path: "vendor/other/index.js", bytes: Buffer.from("") }])[0].label, "path allowlist");
+});
+
+test("exempts only the hash-pinned Emscripten virtual home string in the exact worker path", () => {
+  const call = 'FS.mkdir("/home/' + 'web_user");ENV={HOME:"/home/' + 'web_user"}';
+  const workerPath = "vendor/wllama/wllama-worker.js";
+  const scanWorker = (text, file = workerPath, hash = true) => {
+    const bytes = Buffer.from(text);
+    return scanPublicTree([
+      { path: file, bytes },
+      { path: "vendor/wllama/SOURCE.json", bytes: Buffer.from(JSON.stringify({ files: {
+        "wllama-worker.js": { bytes: bytes.length, sha256: hash ? createHash("sha256").update(bytes).digest("hex") : "0".repeat(64) },
+      } })) },
+    ]);
+  };
+  assert.deepEqual(scanWorker(call), []);
+  assert.ok(scanWorker(call, workerPath, false).some((v) => v.label === "Linux user folder"));
+  assert.ok(scanWorker(call, "vendor/wllama/index.js").some((v) => v.label === "Linux user folder"));
+  assert.ok(scanWorker(call, "vendor/wllama/wllama.wasm").some((v) => v.label === "Linux user folder"));
+  assert.ok(scanWorker(call + '; FS.mkdir("/home/' + 'private")').some((v) => v.label === "Linux user folder"));
+  const privateText = call + "; " + "al" + "ice";
+  const bytes = Buffer.from(privateText);
+  assert.ok(scanPublicTree([
+    { path: workerPath, bytes },
+    { path: "vendor/wllama/SOURCE.json", bytes: Buffer.from(JSON.stringify({ files: {
+      "wllama-worker.js": { bytes: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex") },
+    } })) },
+  ], { extraNames: ["al" + "ice"] }).some((v) => v.label === "local account name"));
+  const virtualBytes = Buffer.from(call);
+  assert.ok(scanPublicTree([
+    { path: workerPath, bytes: virtualBytes },
+    { path: "vendor/wllama/SOURCE.json", bytes: Buffer.from(JSON.stringify({ files: {
+      "wllama-worker.js": { bytes: virtualBytes.length, sha256: createHash("sha256").update(virtualBytes).digest("hex") },
+    } })) },
+  ], { extraNames: ["web_" + "user"] }).some((v) => v.path === workerPath && v.label === "local account name"));
+  assert.ok(scanPublicTree([{ path: workerPath, bytes: Buffer.from(call) }]).length > 0);
+});
 
 // Assemble denied fixtures so the test source itself remains publishable.
 const privateName = "alice";
@@ -346,6 +390,26 @@ test("detects UNC home folders, named home shorthand and the former runner excep
   }
 });
 
+test("skips only the generic home shorthand inside image and video bytes", () => {
+  const shorthand = Buffer.from("\0~" + "bob/private");
+  for (const extension of ["png", "jpg", "jpeg", "gif", "ico", "webp", "mp4", "webm", "GIF"]) {
+    const probe = "public/probe." + extension;
+    assert.deepEqual(scanWithNames([{ path: probe, bytes: shorthand }]), []);
+    for (const [text, label] of [
+      [privateName, localLabel],
+      ["C:" + "\\Users\\bob", "Windows user folder"],
+      ["/" + "home/bob", "Linux user folder"],
+    ]) {
+      const bytes = Buffer.concat([shorthand, Buffer.from("\n" + text)]);
+      assert.deepEqual(scanWithNames([{ path: probe, bytes }]), [{ path: probe, line: 1, label }]);
+    }
+  }
+  for (const extension of ["wav", "mp3", "zip", "wasm", "onnx", "gguf", "woff"]) {
+    assert.ok(scanWithNames([{ path: "public/probe." + extension, bytes: shorthand }])
+      .some((item) => item.label === "named home shorthand"));
+  }
+});
+
 test("does not mistake Git short-name regex syntax for a named home", () => {
   assert.deepEqual(scan("git~[0-9]+" + "/"), []);
 });
@@ -356,7 +420,7 @@ test("recognizes named homes at shell word boundaries without interpreting embed
   for (const prefix of ["", " ", "\t", "=", ":", "(", "[", "{", ";", "|", "&", "\"", "'"]) {
     assert.ok(scan(prefix + home).some((item) => item.label === "named home shorthand"));
   }
-  assert.ok(scan("\0" + home, "public/probe.png").some((item) => item.label === "named home shorthand"));
+  assert.ok(scan("\0" + home, "public/probe.wasm").some((item) => item.label === "named home shorthand"));
   for (const prefix of ["word", "3", "é", "\u0087", "*"]) {
     assert.deepEqual(scan(prefix + home), []);
   }

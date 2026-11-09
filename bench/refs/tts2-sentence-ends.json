@@ -1,0 +1,79 @@
+{
+  "fixture": "tts2",
+  "wav": "tts2-speech.wav",
+  "script": "tts2-script.txt",
+  "durationSeconds": 23.115238,
+  "wavSha256": "84bae5991b6ca7172c80073e3f0bfff84f41aee036ff71a34df552383a57a6a4",
+  "scriptSha256": "c88afef84168ba0b4c9be00e3b197127604093366dcfd5be71a256b8e67722eb",
+  "command": "ffmpeg -hide_banner -i bench/refs/tts2-speech.wav -af silencedetect=noise=-35dB:d=0.25 -f null -",
+  "thresholds": {
+    "noiseDb": -35,
+    "detectionMinSeconds": 0.25,
+    "sentenceSilenceMinSeconds": 0.75
+  },
+  "alignment": "Script sentences in order; sentence end is the start of each silence >= 0.75 s. Shorter pauses are inside sentences.",
+  "silences": [
+    {
+      "startSeconds": 2.678685,
+      "endSeconds": 3.545442,
+      "durationSeconds": 0.866757
+    },
+    {
+      "startSeconds": 5.651247,
+      "endSeconds": 6.061769,
+      "durationSeconds": 0.410522
+    },
+    {
+      "startSeconds": 8.156961,
+      "endSeconds": 9.028798,
+      "durationSeconds": 0.871837
+    },
+    {
+      "startSeconds": 12.025896,
+      "endSeconds": 12.89034,
+      "durationSeconds": 0.864444
+    },
+    {
+      "startSeconds": 15.632063,
+      "endSeconds": 16.058957,
+      "durationSeconds": 0.426893
+    },
+    {
+      "startSeconds": 17.946712,
+      "endSeconds": 18.802857,
+      "durationSeconds": 0.856145
+    },
+    {
+      "startSeconds": 22.357415,
+      "endSeconds": 23.115238,
+      "durationSeconds": 0.757823
+    }
+  ],
+  "sentences": [
+    {
+      "text": "The Roman Space Telescope is ready for launch.",
+      "matchText": "ready for launch",
+      "endSeconds": 2.678685
+    },
+    {
+      "text": "After years of testing at NASA Goddard, Roman will map wide regions of the sky.",
+      "matchText": "map wide regions",
+      "endSeconds": 8.156961
+    },
+    {
+      "text": "The team at Kennedy Space Center finished the final checks.",
+      "matchText": "final checks",
+      "endSeconds": 12.025896
+    },
+    {
+      "text": "Roman carries a coronagraph that blocks starlight, so faint planets become visible.",
+      "matchText": "faint planets",
+      "endSeconds": 17.946712
+    },
+    {
+      "text": "Engineers at Goddard say Roman will change how we see the universe.",
+      "matchText": "see the universe",
+      "endSeconds": 22.357415
+    }
+  ]
+}

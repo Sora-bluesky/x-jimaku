@@ -1,0 +1,528 @@
+// @vitest-environment jsdom
+
+import {
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
+
+import {
+  MAX_CONTEXT_TERMS,
+} from "../shared/messages";
+import {
+  createCaptureState,
+} from "../shared/state";
+import {
+  CUE_MINIMUM_DISPLAY_MS,
+  CaptionOverlay,
+} from "./overlay";
+
+const CONTENT_VERSION_NAME =
+  "0.6.0 abc1234-dirty 2026-09-02T03:04:05Z";
+
+let extractPostContextTerms:
+  typeof import("./index").extractPostContextTerms;
+let handleOffscreenDevLog:
+  typeof import("./index").handleOffscreenDevLog;
+let handleCaptureState:
+  typeof import("./index").handleCaptureState;
+let ensureOverlay:
+  typeof import("./index").ensureOverlay;
+let handleDevMessage: typeof import("./index").handleDevMessage;
+
+class ResizeObserverStub {
+  observe(): void {
+  }
+
+  disconnect(): void {
+  }
+}
+
+function setPostText(text: string): void {
+  document.body.innerHTML =
+    "<main><article></article></main>";
+
+  const article =
+    document.querySelector("main article");
+
+  if (!(article instanceof HTMLElement)) {
+    throw new Error("Test article was not created");
+  }
+
+  article.textContent = text;
+}
+
+beforeAll(async () => {
+  vi.stubGlobal("chrome", {
+    runtime: {
+      getManifest: () => ({
+        version: "0.6.0",
+        version_name: CONTENT_VERSION_NAME,
+      }),
+    },
+  });
+
+  (
+    window as Window & {
+      __xJimakuContentScriptVersion__?:
+        string;
+    }
+  ).__xJimakuContentScriptVersion__ =
+    CONTENT_VERSION_NAME;
+
+  ({
+    extractPostContextTerms,
+    handleOffscreenDevLog,
+    handleCaptureState,
+    ensureOverlay,
+    handleDevMessage,
+  } = await import("./index"));
+});
+
+beforeEach(() => {
+  window.history.replaceState(
+    {},
+    "",
+    "/tester/status/49",
+  );
+});
+
+describe("development dwell policy boundary", () => {
+  it("only accepts same-window fixture messages and does not persist dwell settings", () => {
+    const originalLocation = location;
+    vi.useFakeTimers();
+    vi.stubGlobal("ResizeObserver", ResizeObserverStub);
+    vi.stubGlobal("requestAnimationFrame", vi.fn(() => 1));
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
+    const runtime = chrome.runtime;
+    const setter = vi.spyOn(CaptionOverlay.prototype, "setDwellPolicy");
+    const policy = { dwellFloorMs: 1500, dwellRate: 4, dwellAccelFloorMs: 1000, dwellAccelRate: 7 };
+    const message = (origin: string, source: Window | null = window) => new MessageEvent("message", {
+      origin, source, data: { t: "CS_DEV_SET_SETTINGS", settings: { model: "base", devCueDwell: policy } },
+    });
+    vi.stubGlobal("chrome", { runtime: { ...runtime, sendMessage } });
+    try {
+      handleCaptureState(createCaptureState("starting", { requestId: "dev-dwell" }));
+      ensureOverlay();
+      vi.stubGlobal("location", { origin: "https://x.com" });
+      handleDevMessage(message("https://x.com"));
+      handleDevMessage(message("http://127.0.0.1:8123"));
+      expect(sendMessage).not.toHaveBeenCalled();
+      vi.stubGlobal("location", { origin: "http://127.0.0.1:8123" });
+      handleDevMessage(message("https://x.com"));
+      handleDevMessage(message("http://127.0.0.1:8123", null));
+      expect(sendMessage).not.toHaveBeenCalled();
+      handleDevMessage(message("http://127.0.0.1:8123"));
+      expect(sendMessage).toHaveBeenCalledExactlyOnceWith({ t: "CS_DEV_SET_SETTINGS", settings: { model: "base" } });
+      expect(setter).toHaveBeenCalledExactlyOnceWith(policy);
+    } finally {
+      handleCaptureState(createCaptureState("idle", { requestId: "dev-dwell" }));
+      vi.stubGlobal("location", originalLocation);
+      vi.stubGlobal("chrome", { runtime });
+      setter.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("content script build marker", () => {
+  it(
+    "matches the manifest version_name",
+    () => {
+      const instanceWindow =
+        window as Window & {
+          __xJimakuContentScriptVersion__?:
+            string;
+        };
+
+      expect(
+        instanceWindow
+          .__xJimakuContentScriptVersion__,
+      ).toBe(CONTENT_VERSION_NAME);
+      expect(
+        chrome.runtime.getManifest()
+          .version_name,
+      ).toBe(CONTENT_VERSION_NAME);
+    },
+  );
+});
+
+describe("handleOffscreenDevLog", () => {
+  it(
+    "posts a structured entry on the development origin",
+    () => {
+      const originalLocation = location;
+      const data = {
+        kind: "passthrough" as const,
+        requestId: "request-63",
+        lineId: 1,
+      };
+      const postMessage = vi
+        .spyOn(window, "postMessage")
+        .mockImplementation(() => {
+        });
+      const info = vi
+        .spyOn(console, "info")
+        .mockImplementation(() => {
+        });
+
+      try {
+        vi.stubGlobal("location", {
+          origin: "http://127.0.0.1:8123",
+        });
+
+        handleOffscreenDevLog({
+          t: "OFF_DEV_LOG",
+          level: "info",
+          tag: "translate",
+          message:
+            "PLaMo translation failed; passing through original",
+          data,
+        });
+
+        expect(postMessage).toHaveBeenCalledWith(
+          {
+            t: "OFF_DEV_LOG",
+            level: "info",
+            tag: "translate",
+            message:
+              "PLaMo translation failed; passing through original",
+            data,
+            timestampMs: expect.any(Number),
+          },
+          "http://127.0.0.1:8123",
+        );
+      } finally {
+        vi.stubGlobal(
+          "location",
+          originalLocation,
+        );
+        postMessage.mockRestore();
+        info.mockRestore();
+      }
+    },
+  );
+
+  it(
+    "does not post or print on a non-development origin",
+    () => {
+      expect(location.origin).not.toBe(
+        "http://127.0.0.1:8123",
+      );
+
+      const postMessage = vi
+        .spyOn(window, "postMessage")
+        .mockImplementation(() => {
+        });
+      const methods = [
+        vi
+          .spyOn(console, "info")
+          .mockImplementation(() => {
+          }),
+        vi
+          .spyOn(console, "warn")
+          .mockImplementation(() => {
+          }),
+        vi
+          .spyOn(console, "error")
+          .mockImplementation(() => {
+          }),
+      ];
+
+      handleOffscreenDevLog({
+        t: "OFF_DEV_LOG",
+        level: "info",
+        tag: "translate",
+        message:
+          "PLaMo translation failed; passing through original",
+        data: {
+          kind: "passthrough",
+          requestId: "request-63",
+          lineId: 1,
+        },
+      });
+
+      expect(postMessage).not.toHaveBeenCalled();
+      postMessage.mockRestore();
+
+      for (const method of methods) {
+        expect(method).not.toHaveBeenCalled();
+        method.mockRestore();
+      }
+    },
+  );
+});
+
+describe("explicit-stop overlay lifecycle", () => {
+  it("A-6-4(c') destroys timed-out drain state before the next capture", () => {
+    vi.useFakeTimers();
+    vi.stubGlobal(
+      "ResizeObserver",
+      ResizeObserverStub,
+    );
+    vi.stubGlobal(
+      "requestAnimationFrame",
+      vi.fn((): number => 1),
+    );
+    vi.stubGlobal(
+      "cancelAnimationFrame",
+      vi.fn(),
+    );
+
+    try {
+      handleCaptureState(
+        createCaptureState("starting", {
+          requestId: "request-old",
+        }),
+      );
+      const first = ensureOverlay();
+      first.beginDrain();
+
+      handleCaptureState(
+        createCaptureState("idle", {
+          requestId: "request-old",
+        }),
+      );
+
+      expect(
+        document.querySelector(
+          "#xjsub-host",
+        ),
+      ).toBeNull();
+
+      handleCaptureState(
+        createCaptureState("starting", {
+          requestId: "request-new",
+        }),
+      );
+      const second = ensureOverlay();
+
+      expect(second).not.toBe(first);
+
+      second.showCaption({
+        id: 1,
+        text: "source",
+        ja:
+          "おネち5ナbた1）6c オネz0と3そ4たく0 2ア pてせ、ぬ c ）、",
+        final: true,
+        at: "2026-09-02T00:00:00.000Z",
+      });
+      second.setPlaybackPaused(true);
+      vi.advanceTimersByTime(
+        CUE_MINIMUM_DISPLAY_MS,
+      );
+
+      const host =
+        document.querySelector(
+          "#xjsub-host",
+        );
+      const cue =
+        host?.shadowRoot?.querySelector<
+          HTMLElement
+        >(".caption-cue");
+
+      expect(cue?.dataset.pageId).toBe(
+        "0",
+      );
+    } finally {
+      handleCaptureState(
+        createCaptureState("idle", {
+          requestId: "request-new",
+        }),
+      );
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("extractPostContextTerms", () => {
+  it(
+    "splits after an acronym that ends a sentence",
+    () => {
+      setPostText(
+        "NASA. Kennedy Space Center opened.",
+      );
+
+      const acronymTerms =
+        extractPostContextTerms();
+
+      expect(acronymTerms).toContain(
+        "Kennedy Space Center",
+      );
+      expect(acronymTerms).not.toContain(
+        "NASA Kennedy Space Center",
+      );
+    },
+  );
+
+  it(
+    "keeps a title abbreviation inside a run",
+    () => {
+      setPostText(
+        "Fly to St. Louis Airport today.",
+      );
+
+      expect(
+        extractPostContextTerms(),
+      ).toContain("St. Louis Airport");
+    },
+  );
+
+  it(
+    "keeps a standalone dotted abbreviation",
+    () => {
+      setPostText(
+        "U.S. officials spoke today.",
+      );
+
+      expect(
+        extractPostContextTerms(),
+      ).toContain("U.S.");
+    },
+  );
+
+  it(
+    "keeps abbreviation periods inside a run",
+    () => {
+      setPostText(
+        "The U.S. Space Force launched.",
+      );
+
+      expect(
+        extractPostContextTerms(),
+      ).toContain("U.S. Space Force");
+    },
+  );
+
+
+  it(
+    "appends multi-word terms after their single-token components",
+    () => {
+      setPostText(
+        "NASA Goddard. Kennedy Space Center.",
+      );
+
+      expect(
+        extractPostContextTerms(),
+      ).toEqual([
+        "NASA",
+        "Goddard",
+        "Kennedy",
+        "Space",
+        "Center",
+        "NASA Goddard",
+        "Kennedy Space Center",
+      ]);
+    },
+  );
+
+  it(
+    "normalizes whitespace and accepts two-character capitalized tokens",
+    () => {
+      setPostText("Ab \n\t Cd.");
+
+      expect(
+        extractPostContextTerms(),
+      ).toEqual(["Ab Cd"]);
+    },
+  );
+
+  it(
+    "keeps only the first four words of a maximal run",
+    () => {
+      setPostText(
+        "Alpha Bravo Charlie Delta Echo.",
+      );
+
+      expect(
+        extractPostContextTerms(),
+      ).toEqual([
+        "Alpha",
+        "Bravo",
+        "Charlie",
+        "Delta",
+        "Echo",
+        "Alpha Bravo Charlie Delta",
+      ]);
+    },
+  );
+
+  it(
+    "applies the stoplist to the joined key without breaking the run",
+    () => {
+      setPostText("After Before.");
+
+      expect(
+        extractPostContextTerms(),
+      ).toEqual(["After Before"]);
+    },
+  );
+
+  it(
+    "does not include a handle in a multi-word run",
+    () => {
+      setPostText("@NASA Goddard.");
+
+      expect(
+        extractPostContextTerms(),
+      ).toEqual([
+        "@NASA",
+        "Goddard",
+      ]);
+    },
+  );
+
+  it(
+    "preserves single-token priority at the shared term limit",
+    () => {
+      const filler = Array.from(
+        {
+          length:
+            MAX_CONTEXT_TERMS - 2,
+        },
+        (_, index) => `Name${index}`,
+      );
+
+      setPostText(
+        `${filler.join(". ")}. NASA Goddard.`,
+      );
+
+      const terms =
+        extractPostContextTerms();
+
+      expect(terms).toHaveLength(
+        MAX_CONTEXT_TERMS,
+      );
+      expect(terms.slice(-2)).toEqual([
+        "NASA",
+        "Goddard",
+      ]);
+      expect(terms).not.toContain(
+        "NASA Goddard",
+      );
+    },
+  );
+
+  it(
+    "rejects a joined term longer than 128 characters",
+    () => {
+      const first =
+        `A${"a".repeat(64)}`;
+      const second =
+        `B${"b".repeat(64)}`;
+
+      setPostText(`${first} ${second}.`);
+
+      expect(
+        extractPostContextTerms(),
+      ).toEqual([
+        first,
+        second,
+      ]);
+    },
+  );
+});

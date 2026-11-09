@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -7,6 +8,7 @@ const root = fileURLToPath(new URL("../", import.meta.url));
 const scriptPath = "scripts/check-public-tree.mjs";
 export const allowedPaths = [
   ".claude/skills/",
+  ".gitattributes",
   ".github/",
   ".gitignore",
   "CONTRIBUTING.md",
@@ -16,6 +18,9 @@ export const allowedPaths = [
   "THIRD-PARTY-NOTICES.md",
   "bench/",
   "docs/caption-log-notice.md",
+  "docs/demo/",
+  "docs/requirements.md",
+  "docs/requirements.ja.md",
   "package.json",
   "package-lock.json",
   "public/",
@@ -25,13 +30,14 @@ export const allowedPaths = [
   "vite.config.ts",
   "vite.config.iife.ts",
   "vitest.config.ts",
+  "vendor/wllama/",
 ];
 
 const homeName = /(?!(?:<user>|<name>|USER|USERNAME|you|me|example|%USERNAME%|\$USER|\$\{USER\})(?=$|[\\/\r\n"'`]))[^\\/\r\n"'`]+/.source;
 
 const deniedPatterns = [
   { label: "UNC user folder", pattern: new RegExp(/[\\/]+[^\\/\s:"'`]+[\\/]+(?:[^\\/\r\n]+[\\/]+)*Users[\\/]+/.source + homeName, "i") },
-  { label: "named home shorthand", pattern: /(?<![^\s\0"'`=:(\[{;|&])~[\p{L}\p{N}_.-]+[\\/]/iu },
+  { label: "named home shorthand", pattern: /(?<![^\s\0"'`=:(\[{;|&])~[\p{L}\p{N}_.-]+[\\/]/iu, skipInMedia: true },
   { label: "Windows user folder", pattern: new RegExp(/[A-Z]:[\\/]+Users[\\/]+/.source + homeName, "i") },
   { label: "macOS user folder", pattern: new RegExp(/\/Users\//.source + homeName, "i") },
   { label: "Linux user folder", pattern: new RegExp(/\/home\//.source + homeName, "i") },
@@ -48,6 +54,9 @@ const binaryExtensions = new Set([
   ".png", ".jpg", ".jpeg", ".gif", ".ico", ".webp", ".wav", ".mp3",
   ".mp4", ".webm", ".woff", ".woff2", ".zip", ".wasm", ".onnx", ".gguf",
 ]);
+// Compressed image and video bytes match the generic home shorthand (a tilde, a name, a slash) by chance
+// once a file is a few megabytes. Text drawn in the frames is checked by OCR before publishing, and the named rules still run.
+const mediaExtensions = new Set([".png", ".jpg", ".jpeg", ".gif", ".ico", ".webp", ".mp4", ".webm"]);
 
 function decodeText(bytes) {
   let encoding = "utf-8";
@@ -74,7 +83,18 @@ function decodeText(bytes) {
   return text;
 }
 
+function readPinnedWorker(files) {
+  try {
+    const source = files.find((file) => file.path === "vendor/wllama/SOURCE.json");
+    return JSON.parse(source.bytes.toString("utf8")).files["wllama-worker.js"];
+  } catch {
+    return undefined;
+  }
+}
+
 export function scanPublicTree(files, { extraNames = [] } = {}) {
+  const workerPath = "vendor/wllama/wllama-worker.js";
+  const pinnedWorker = readPinnedWorker(files);
   const patterns = [...deniedPatterns, ...extraNames.filter(Boolean).map((name) => ({
     label: "local account name",
     pattern: new RegExp(name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "iu"),
@@ -93,7 +113,9 @@ export function scanPublicTree(files, { extraNames = [] } = {}) {
         report(file, 1, rule.label);
       }
     }
-    if (binaryExtensions.has(path.extname(file).toLowerCase())) {
+    const extension = path.extname(file).toLowerCase();
+    if (binaryExtensions.has(extension)) {
+      const media = mediaExtensions.has(extension);
       // Scan both UTF-16 byte alignments: a binary prefix can have odd length.
       const views = [Buffer.from(bytes).toString("latin1")];
       for (const offset of [0, 1]) {
@@ -103,6 +125,7 @@ export function scanPublicTree(files, { extraNames = [] } = {}) {
         views.push(Buffer.from(even).swap16().toString("utf16le"));
       }
       for (const rule of patterns) {
+        if (media && rule.skipInMedia) continue;
         if (views.some((text) => rule.pattern.test(text))) {
           report(file, 1, rule.label);
         }
@@ -118,17 +141,24 @@ export function scanPublicTree(files, { extraNames = [] } = {}) {
     }
 
     const lines = text.split(/\r?\n/);
+    const isPinnedWorker = file === workerPath && pinnedWorker?.bytes === bytes.length
+      && pinnedWorker?.sha256 === createHash("sha256").update(bytes).digest("hex");
     const patternStart = file === scriptPath
       ? lines.indexOf("const deniedPatterns = [")
       : -1;
     const patternEnd = patternStart >= 0
       ? lines.indexOf("];", patternStart)
       : -1;
-    for (const [index, line] of lines.entries()) {
+    for (const [index, originalLine] of lines.entries()) {
+      // Emscripten's virtual filesystem home (its fixed web_user folder), not a host account path.
+      const virtualHomeLine = isPinnedWorker
+        ? originalLine.replaceAll('"/home/' + 'web_user"', '"/virtual-home"')
+        : originalLine;
       if (index > patternStart && index < patternEnd) {
         continue;
       }
       for (const rule of patterns) {
+        const line = rule.label === "Linux user folder" ? virtualHomeLine : originalLine;
         if (file === ".gitignore" && line.trim() === rule.ignoreLine) {
           continue;
         }

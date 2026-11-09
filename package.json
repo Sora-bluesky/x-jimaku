@@ -1,0 +1,56 @@
+{
+  "name": "x-jimaku",
+  "version": "0.1.0",
+  "description": "[English](README.md) | [日本語](README.ja.md)",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {
+    "build": "vite build && vite build -c vite.config.iife.ts",
+    "dev": "concurrently \"vite build --watch\" \"vite build -c vite.config.iife.ts --watch\"",
+    "typecheck": "tsc --noEmit",
+    "check:public": "node scripts/check-public-tree.mjs",
+    "test": "node scripts/check-public-tree.mjs && node --test scripts/check-public-tree.test.mjs scripts/export-public.test.mjs && vitest run",
+    "zip": "node scripts/build-zip.mjs",
+    "bench:smoke": "node bench/run-bench.mjs --case tts --model tiny --duration 30",
+    "bench:quality": "node bench/run-bench.mjs --case tts --model base --duration 90"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Sora-bluesky/x-jimaku.git"
+  },
+  "keywords": [],
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/Sora-bluesky/x-jimaku/issues"
+  },
+  "homepage": "https://github.com/Sora-bluesky/x-jimaku#readme",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.2.7",
+    "budoux": "0.9.1",
+    "concurrently": "^10.0.7",
+    "jsdom": "^28.0.0",
+    "puppeteer-core": "^25.16.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.6",
+    "vite-plugin-static-copy": "^4.1.1",
+    "vitest": "^4.1.12"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "4.2.0",
+    "@noble/hashes": "2.4.0"
+  },
+  "private": true,
+  "overrides": {
+    "onnxruntime-node": {
+      "adm-zip": "0.6.1"
+    },
+    "@huggingface/transformers": {
+      "sharp": "0.35.5"
+    }
+  }
+}

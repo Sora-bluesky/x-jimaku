@@ -1,0 +1,47 @@
+{
+  "wllamaRepository": "https://github.com/ngxson/wllama.git",
+  "wllamaCommit": "c10c21114984e37fe6ba4edbba446c28c5b7a954",
+  "llamaCppCommit": "d38bea34227bbf9069d62fdc239c98ab6e05435a",
+  "emsdkImage": "emscripten/emsdk:4.0.20@sha256:460fff8f8ac87e11b16447fbd66538a686eafa0e4fb977aa0989ed19fe2079f7",
+  "dawnTag": "v20260317.182325",
+  "dawnAsset": "emdawnwebgpu_pkg-v20260317.182325.zip",
+  "dawnSha256": "8dcae86c630d76b6794b271c6572becba36f4237d132bee121a56638c3d76575",
+  "files": {
+    "LICENSE": {
+      "sha256": "5866e3bd7e3cbd3f7c8bea6efd8a1e7fa7cc8de68c30f428aff7c6584a0fb720",
+      "bytes": 1071
+    },
+    "LICENSE.dawn": {
+      "sha256": "7e1efc85a78732a13d7ddfc8b52912da7c8f8d3c6d334624b20e3f3a96297de0",
+      "bytes": 1561
+    },
+    "LICENSE.emscripten": {
+      "sha256": "6dbef94d865485b4532b561173460d41dac3a55dce6a50a4c669384643a44992",
+      "bytes": 3291
+    },
+    "LICENSE.llama.cpp": {
+      "sha256": "94f29bbed6a22c35b992c5c6ebf0e7c92f13b836b90f36f461c9cf2f0f1d010d",
+      "bytes": 1078
+    },
+    "index.d.ts": {
+      "sha256": "7be9afd47fb67bd1e4cb251fdca8239271399cacd06fdc515a90ac7ec6374c12",
+      "bytes": 40112
+    },
+    "index.js": {
+      "sha256": "4f58eaa0accc601b366430386ccb997ef9507e65537832c5103ef2b9bd8682a3",
+      "bytes": 88926
+    },
+    "wllama-opfs.js": {
+      "sha256": "0f1fe4fbfa8528f9451e9837a734cca40e087f711ae1a410bbd41e83c22902db",
+      "bytes": 4122
+    },
+    "wllama-worker.js": {
+      "sha256": "85b0e18edaa7bdffc32c0ec9c7f06c3c99d9dbc2be0fe893fce376f6b0b86b73",
+      "bytes": 154897
+    },
+    "wllama.wasm": {
+      "sha256": "a1a716b9e15b7fe8e88637230183d6db200c551e881a036965d04e31fd374008",
+      "bytes": 10189070
+    }
+  }
+}
